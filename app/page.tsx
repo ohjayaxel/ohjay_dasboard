@@ -11,7 +11,7 @@ export default function HomePage() {
         <LandingHero />
         <section id="contact" className="relative z-10 flex justify-center px-4 pb-12">
           <div className="flex flex-wrap items-center gap-4 rounded-full border border-border/50 bg-background/80 px-6 py-3 text-[0.68rem] font-mono uppercase tracking-[0.3em] text-foreground/70 backdrop-blur">
-            <span>hello@orangejuice.ai</span>
+            <span>hello@ohjay.co</span>
             <span className="hidden h-1 w-1 rounded-full bg-primary sm:inline-flex" />
             <span className="hidden sm:inline-flex">Brahegatan 56, Stockholm</span>
           </div>

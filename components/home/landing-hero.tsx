@@ -21,9 +21,9 @@ export function LandingHero() {
           className="h-14 w-auto rounded-md"
           priority
         />
-        <div className="space-y-4">
+        <div className="space-y-3">
           <h1
-            className="text-4xl font-sentient uppercase tracking-[0.12em] text-foreground sm:text-5xl md:text-6xl"
+            className="text-5xl font-sentient uppercase tracking-[0.1em] text-foreground sm:text-[3.5rem] md:text-[4rem]"
             style={{
               font: "normal normal normal calc(90 * var(--theme-spx-ratio)) / 0.8em Arial,'ＭＳ Ｐゴシック','MS PGothic','돋움',Dotum,Helvetica,sans-serif",
             }}
@@ -41,7 +41,7 @@ export function LandingHero() {
           </Link>
           <Button variant="outline" className="tracking-[0.3em] uppercase" asChild>
             <Link href="https://www.ohjay.co/" target="_blank" rel="noreferrer">
-              About Ohjay
+              → ohjay.co
             </Link>
           </Button>
         </div>
