@@ -9,7 +9,10 @@
     "start": "next start",
     "sb:switch:dev": "bash scripts/sb-switch.sh dev",
     "sb:switch:prod": "bash scripts/sb-switch.sh prod",
-    "db:push": "supabase db push"
+    "db:push": "supabase db push",
+    "env:print": "node scripts/print-env.js",
+    "env:check:dev": "bash scripts/env-check.sh env/.env.dev.example .env.local",
+    "env:check:prod": "bash scripts/env-check.sh env/.env.prod.example .env.production.local"
   },
   "dependencies": {
     "@dnd-kit/core": "latest",
