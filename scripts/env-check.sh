@@ -31,25 +31,23 @@ REQUIRED_VARS=(
   ENCRYPTION_KEY
 )
 
-declare -A VALUES
+missing=0
 
-load_file() {
+get_var() {
   local file=$1
-  while IFS='=' read -r key value; do
-    [[ -z "$key" || "$key" =~ ^# ]] && continue
-    key="$(echo "$key" | xargs)"
-    value="${value%%#*}"
-    value="$(echo "${value}" | xargs)"
-    VALUES["$key"]="$value"
-  done <"$file"
+  local key=$2
+  local line
+  line=$(grep -E "^${key}=" "$file" || true)
+  if [[ -z "$line" ]]; then
+    echo ""
+    return
+  fi
+  echo "${line#${key}=}" | sed 's/[[:space:]]*$//' | sed 's/^"\|"$//g'
 }
 
-load_file "$TARGET_FILE"
-
-missing=0
 for var in "${REQUIRED_VARS[@]}"; do
-  val="${VALUES[$var]:-}"
-  if [[ -z "$val" ]]; then
+  value=$(get_var "$TARGET_FILE" "$var")
+  if [[ -z "$value" ]]; then
     echo "✖ $var is missing or empty in $TARGET_FILE"
     missing=1
   else
