@@ -2,14 +2,16 @@
 
 import * as React from "react"
 import {
-  IconCamera,
+  IconBrandGoogle,
+  IconBrandMeta,
+  IconBrandShopify,
   IconChartBar,
+  IconChartDots,
   IconDashboard,
   IconDatabase,
-  IconFileAi,
-  IconFileDescription,
   IconFileWord,
   IconFolder,
+  IconGauge,
   IconHelp,
   IconInnerShadowTop,
   IconListDetails,
@@ -17,6 +19,7 @@ import {
   IconSearch,
   IconSettings,
   IconUsers,
+  type Icon,
 } from "@tabler/icons-react"
 
 import { NavDocuments } from '@/components/nav-documents'
@@ -33,124 +36,145 @@ import {
   SidebarMenuItem,
 } from '@/components/ui/sidebar'
 
-const data = {
+type IconKey =
+  | 'gauge'
+  | 'brand-meta'
+  | 'brand-google'
+  | 'brand-shopify'
+  | 'settings'
+  | 'chart-dots'
+
+type IconSource = Icon | IconKey
+
+const iconMap: Record<IconKey, Icon> = {
+  gauge: IconGauge,
+  'brand-meta': IconBrandMeta,
+  'brand-google': IconBrandGoogle,
+  'brand-shopify': IconBrandShopify,
+  settings: IconSettings,
+  'chart-dots': IconChartDots,
+}
+
+type NavItem = {
+  title: string
+  url: string
+  icon?: IconSource
+}
+
+type DocumentItem = {
+  name: string
+  url: string
+  icon: IconSource
+}
+
+const defaultData = {
   user: {
-    name: "shadcn",
-    email: "m@example.com",
-    avatar: "/avatars/shadcn.jpg",
+    name: 'shadcn',
+    email: 'm@example.com',
+    avatar: '/avatars/shadcn.jpg',
   },
   navMain: [
     {
-      title: "Dashboard",
-      url: "#",
+      title: 'Dashboard',
+      url: '/dashboard',
       icon: IconDashboard,
     },
     {
-      title: "Lifecycle",
-      url: "#",
+      title: 'Lifecycle',
+      url: '#',
       icon: IconListDetails,
     },
     {
-      title: "Analytics",
-      url: "#",
+      title: 'Analytics',
+      url: '#',
       icon: IconChartBar,
     },
     {
-      title: "Projects",
-      url: "#",
+      title: 'Projects',
+      url: '#',
       icon: IconFolder,
     },
     {
-      title: "Team",
-      url: "#",
+      title: 'Team',
+      url: '#',
       icon: IconUsers,
     },
-  ],
-  navClouds: [
-    {
-      title: "Capture",
-      icon: IconCamera,
-      isActive: true,
-      url: "#",
-      items: [
-        {
-          title: "Active Proposals",
-          url: "#",
-        },
-        {
-          title: "Archived",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "Proposal",
-      icon: IconFileDescription,
-      url: "#",
-      items: [
-        {
-          title: "Active Proposals",
-          url: "#",
-        },
-        {
-          title: "Archived",
-          url: "#",
-        },
-      ],
-    },
-    {
-      title: "Prompts",
-      icon: IconFileAi,
-      url: "#",
-      items: [
-        {
-          title: "Active Proposals",
-          url: "#",
-        },
-        {
-          title: "Archived",
-          url: "#",
-        },
-      ],
-    },
-  ],
+  ] as NavItem[],
   navSecondary: [
     {
-      title: "Settings",
-      url: "#",
+      title: 'Settings',
+      url: '#',
       icon: IconSettings,
     },
     {
-      title: "Get Help",
-      url: "#",
+      title: 'Get Help',
+      url: '#',
       icon: IconHelp,
     },
     {
-      title: "Search",
-      url: "#",
+      title: 'Search',
+      url: '#',
       icon: IconSearch,
     },
-  ],
+  ] as NavItem[],
   documents: [
     {
-      name: "Data Library",
-      url: "#",
+      name: 'Data Library',
+      url: '#',
       icon: IconDatabase,
     },
     {
-      name: "Reports",
-      url: "#",
+      name: 'Reports',
+      url: '#',
       icon: IconReport,
     },
     {
-      name: "Word Assistant",
-      url: "#",
+      name: 'Word Assistant',
+      url: '#',
       icon: IconFileWord,
     },
-  ],
+  ] as DocumentItem[],
 }
 
-export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+type AppSidebarProps = React.ComponentProps<typeof Sidebar> & {
+  tenantName?: string
+  navMain?: NavItem[]
+  navSecondary?: NavItem[]
+  documents?: DocumentItem[]
+  user?: {
+    name: string
+    email: string
+    avatar: string
+  }
+}
+
+export function AppSidebar({
+  tenantName,
+  navMain,
+  navSecondary,
+  documents,
+  user,
+  ...props
+}: AppSidebarProps) {
+  const resolveIcon = (icon?: IconSource): Icon | undefined => {
+    if (!icon) return undefined
+    if (typeof icon === 'string') {
+      return iconMap[icon]
+    }
+    return icon
+  }
+
+  const mapNavItems = (items: NavItem[]) =>
+    items.map((item) => ({ ...item, icon: resolveIcon(item.icon) }))
+
+  const mapDocuments = (items: DocumentItem[]) =>
+    items.map((item) => ({ ...item, icon: resolveIcon(item.icon) ?? IconDatabase }))
+
+  const navMainItems = mapNavItems(navMain ?? defaultData.navMain)
+  const navSecondaryItems = mapNavItems(navSecondary ?? defaultData.navSecondary)
+  const documentItems = mapDocuments(documents ?? defaultData.documents)
+  const sidebarUser = user ?? defaultData.user
+
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
@@ -160,21 +184,21 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               asChild
               className="data-[slot=sidebar-menu-button]:!p-1.5"
             >
-              <a href="#">
+              <a href={navMainItems[0]?.url ?? '#'}>
                 <IconInnerShadowTop className="!size-5" />
-                <span className="text-base font-semibold">Acme Inc.</span>
+                <span className="text-base font-semibold">{tenantName ?? 'Acme Inc.'}</span>
               </a>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={data.navMain} />
-        <NavDocuments items={data.documents} />
-        <NavSecondary items={data.navSecondary} className="mt-auto" />
+        <NavMain items={navMainItems} />
+        {documentItems.length > 0 ? <NavDocuments items={documentItems} /> : null}
+        <NavSecondary items={navSecondaryItems} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={data.user} />
+        <NavUser user={sidebarUser} />
       </SidebarFooter>
     </Sidebar>
   )

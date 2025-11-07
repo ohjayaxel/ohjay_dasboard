@@ -1,23 +1,25 @@
-import { getKpiDaily } from '@/lib/data/agg';
-import { resolveTenantId } from '@/lib/tenants/resolve-tenant';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { getKpiDaily } from '@/lib/data/agg'
+import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
 
-export const revalidate = 60;
+export const revalidate = 60
 
 type PageProps = {
-  params: { tenantSlug: string };
-};
+  params: Promise<{ tenantSlug: string }>
+}
 
-export default async function ShopifyDashboardPage({ params }: PageProps) {
-  const tenantId = await resolveTenantId(params.tenantSlug);
+export default async function ShopifyDashboardPage(props: PageProps) {
+  const { tenantSlug } = await props.params
+  const tenantId = await resolveTenantId(tenantSlug)
 
-  const today = new Date();
-  const startWindow = new Date(today);
-  startWindow.setDate(startWindow.getDate() - 29);
+  const today = new Date()
+  const startWindow = new Date(today)
+  startWindow.setDate(startWindow.getDate() - 29)
 
-  const from = startWindow.toISOString().slice(0, 10);
-  const to = today.toISOString().slice(0, 10);
+  const from = startWindow.toISOString().slice(0, 10)
+  const to = today.toISOString().slice(0, 10)
 
-  const { totals, series } = await getKpiDaily({ tenantId, from, to, source: 'shopify' });
+  const { totals, series } = await getKpiDaily({ tenantId, from, to, source: 'shopify' })
 
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
@@ -26,78 +28,91 @@ export default async function ShopifyDashboardPage({ params }: PageProps) {
           currency: 'USD',
           maximumFractionDigits: 0,
         }).format(value)
-      : '—';
+      : '—'
 
   const formatNumber = (value: number) =>
-    Number.isFinite(value) ? new Intl.NumberFormat().format(value) : '0';
+    Number.isFinite(value) ? new Intl.NumberFormat().format(value) : '0'
 
   const formatRatio = (value: number | null) =>
-    value === null || Number.isNaN(value) ? '—' : value.toFixed(2);
+    value === null || Number.isNaN(value) ? '—' : value.toFixed(2)
 
   return (
-    <section className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Shopify</h1>
-        <p className="text-sm text-muted-foreground">
-          Shopify order metrics measured via <code>kpi_daily</code> (Shopify source).
-        </p>
-      </header>
-
+    <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-lg border p-4">
-          <p className="text-sm text-muted-foreground">Revenue</p>
-          <p className="text-xl font-semibold">{formatCurrency(totals.revenue)}</p>
-        </div>
-        <div className="rounded-lg border p-4">
-          <p className="text-sm text-muted-foreground">Orders</p>
-          <p className="text-xl font-semibold">{formatNumber(totals.conversions)}</p>
-        </div>
-        <div className="rounded-lg border p-4">
-          <p className="text-sm text-muted-foreground">Average Order Value</p>
-          <p className="text-xl font-semibold">{formatCurrency(totals.aov)}</p>
-        </div>
-        <div className="rounded-lg border p-4">
-          <p className="text-sm text-muted-foreground">Spend (Attribution)</p>
-          <p className="text-xl font-semibold">{formatCurrency(totals.spend)}</p>
-        </div>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Revenue</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold tracking-tight">{formatCurrency(totals.revenue)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Orders</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold tracking-tight">{formatNumber(totals.conversions)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Average Order Value</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold tracking-tight">{formatRatio(totals.aov)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Attributed Spend</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold tracking-tight">{formatCurrency(totals.spend)}</p>
+          </CardContent>
+        </Card>
       </div>
 
-      <div className="rounded-lg border">
-        <div className="border-b p-4">
-          <h2 className="text-sm font-semibold uppercase tracking-wide">Daily Breakdown</h2>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[600px] text-sm">
-            <thead className="bg-muted/50 text-muted-foreground">
-              <tr>
-                <th className="px-4 py-2 text-left font-medium">Date</th>
-                <th className="px-4 py-2 text-left font-medium">Revenue</th>
-                <th className="px-4 py-2 text-left font-medium">Orders</th>
-                <th className="px-4 py-2 text-left font-medium">AOV</th>
-              </tr>
-            </thead>
-            <tbody>
-              {series.length === 0 ? (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Daily Breakdown
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[600px] text-sm">
+              <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
-                  <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground">
-                    No Shopify KPI data available.
-                  </td>
+                  <th className="px-4 py-2 text-left font-medium">Date</th>
+                  <th className="px-4 py-2 text-left font-medium">Revenue</th>
+                  <th className="px-4 py-2 text-left font-medium">Orders</th>
+                  <th className="px-4 py-2 text-left font-medium">AOV</th>
                 </tr>
-              ) : (
-                series.map((point) => (
-                  <tr key={point.date} className="border-t">
-                    <td className="px-4 py-2 font-medium">{point.date}</td>
-                    <td className="px-4 py-2">{formatCurrency(point.revenue)}</td>
-                    <td className="px-4 py-2">{formatNumber(point.conversions)}</td>
-                    <td className="px-4 py-2">{formatCurrency(point.aov)}</td>
+              </thead>
+              <tbody>
+                {series.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground">
+                      No Shopify KPI data available.
+                    </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-  );
+                ) : (
+                  series.map((point) => (
+                    <tr key={point.date} className="border-t">
+                      <td className="px-4 py-2 font-medium">{point.date}</td>
+                      <td className="px-4 py-2">{formatCurrency(point.revenue)}</td>
+                      <td className="px-4 py-2">{formatNumber(point.conversions)}</td>
+                      <td className="px-4 py-2">{formatRatio(point.aov)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
 }
 

@@ -1,50 +1,13 @@
-let isInitialized = false;
-
-type SentryModule = typeof import('@sentry/nextjs');
-
-async function loadSentry(): Promise<SentryModule | null> {
-  try {
-    return await import('@sentry/nextjs');
-  } catch (error) {
-    console.warn('Sentry module not installed; skipping init.', error);
-    return null;
-  }
-}
-
 export async function initSentry() {
-  if (isInitialized) {
-    return;
-  }
-
-  const dsn = process.env.SENTRY_DSN;
-
+  const dsn = process.env.SENTRY_DSN
   if (!dsn) {
-    console.info('Sentry DSN missing; telemetry disabled.');
-    return;
+    console.info('Sentry DSN missing; telemetry disabled.')
   }
-
-  const sentry = await loadSentry();
-  if (!sentry) {
-    return;
-  }
-
-  sentry.init({
-    dsn,
-    environment: process.env.SENTRY_ENVIRONMENT ?? process.env.APP_ENV ?? 'development',
-    tracesSampleRate: 0.05,
-    enableTracing: true,
-  });
-
-  isInitialized = true;
+  // When Sentry is needed, install @sentry/nextjs and replace this no-op implementation.
 }
 
 export async function captureException(error: unknown, context?: Record<string, unknown>) {
-  const sentry = await loadSentry();
-  if (!sentry) {
-    console.error('Error captured (Sentry disabled):', error, context);
-    return;
+  if (process.env.NODE_ENV !== 'production') {
+    console.error('Captured exception (Sentry disabled):', error, context)
   }
-
-  sentry.captureException(error, { extra: context });
 }
-
