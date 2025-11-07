@@ -4,7 +4,6 @@ import * as React from "react"
 import {
   IconBrandGoogle,
   IconBrandMeta,
-  IconBrandShopify,
   IconChartBar,
   IconChartDots,
   IconDashboard,
@@ -18,6 +17,7 @@ import {
   IconReport,
   IconSearch,
   IconSettings,
+  IconShoppingCart,
   IconUsers,
   type Icon,
 } from "@tabler/icons-react"
@@ -50,7 +50,7 @@ const iconMap: Record<IconKey, Icon> = {
   gauge: IconGauge,
   'brand-meta': IconBrandMeta,
   'brand-google': IconBrandGoogle,
-  'brand-shopify': IconBrandShopify,
+  'brand-shopify': IconShoppingCart,
   settings: IconSettings,
   'chart-dots': IconChartDots,
 }
