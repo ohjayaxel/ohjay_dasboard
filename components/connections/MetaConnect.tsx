@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,14 +14,16 @@ type ConnectActionResult = {
 type AsyncAction<T = void> = () => Promise<T>;
 
 export type MetaConnectProps = {
-  status: 'connected' | 'disconnected' | 'error';
-  lastSyncedAt?: string | null;
-  onConnect?: AsyncAction<ConnectActionResult>;
-  onDisconnect?: AsyncAction;
-};
+  status: 'connected' | 'disconnected' | 'error'
+  lastSyncedAt?: string | null
+  lastSyncedLabel?: string | null
+  onConnect?: AsyncAction<ConnectActionResult>
+  onDisconnect?: AsyncAction
+}
 
-export function MetaConnect({ status, lastSyncedAt, onConnect, onDisconnect }: MetaConnectProps) {
+export function MetaConnect({ status, lastSyncedAt, lastSyncedLabel, onConnect, onDisconnect }: MetaConnectProps) {
   const { toast } = useToast();
+  const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
   const statusLabel = useMemo(() => {
@@ -35,20 +38,16 @@ export function MetaConnect({ status, lastSyncedAt, onConnect, onDisconnect }: M
   }, [status]);
 
   const formattedSync = useMemo(() => {
+    if (lastSyncedLabel) {
+      return lastSyncedLabel;
+    }
+
     if (!lastSyncedAt) {
       return 'Never synced';
     }
 
-    try {
-      return new Intl.DateTimeFormat(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      }).format(new Date(lastSyncedAt));
-    } catch (error) {
-      console.warn('Failed to format `lastSyncedAt`', error);
-      return lastSyncedAt;
-    }
-  }, [lastSyncedAt]);
+    return lastSyncedAt;
+  }, [lastSyncedAt, lastSyncedLabel]);
 
   const handleConnect = () => {
     startTransition(async () => {
@@ -90,6 +89,7 @@ export function MetaConnect({ status, lastSyncedAt, onConnect, onDisconnect }: M
           title: 'Meta disconnected',
           description: 'The Meta connection has been disconnected.',
         });
+        router.refresh();
       } catch (error) {
         console.error('Failed to disconnect Meta connection', error);
         toast({

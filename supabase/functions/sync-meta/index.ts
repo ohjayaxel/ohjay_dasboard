@@ -51,6 +51,10 @@ type JobResult = {
   inserted?: number;
 };
 
+const META_API_VERSION = Deno.env.get('META_API_VERSION') ?? 'v18.0';
+const META_DEV_ACCESS_TOKEN = Deno.env.get('META_DEV_ACCESS_TOKEN');
+const META_DEV_AD_ACCOUNT_ID = Deno.env.get('META_DEV_AD_ACCOUNT_ID');
+
 function mockMetaInsights(tenantId: string): MetaInsightRow[] {
   const today = new Date().toISOString().slice(0, 10);
   return [
@@ -68,6 +72,98 @@ function mockMetaInsights(tenantId: string): MetaInsightRow[] {
       revenue: 780.25,
     },
   ];
+}
+
+function parseNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function extractActionValue(collection: any, predicate: (actionType: string) => boolean): number | null {
+  if (!Array.isArray(collection)) return null;
+  for (const entry of collection) {
+    const actionType = typeof entry?.action_type === 'string' ? entry.action_type : '';
+    if (!predicate(actionType)) continue;
+    const numeric = parseNumber(entry?.value);
+    if (numeric !== null) {
+      return numeric;
+    }
+  }
+  return null;
+}
+
+async function fetchMetaInsightsFromApi(tenantId: string, accessToken: string, adAccountId: string): Promise<MetaInsightRow[]> {
+  const today = new Date();
+  const since = new Date(today);
+  since.setDate(since.getDate() - 7);
+
+  const sinceDate = since.toISOString().slice(0, 10);
+  const untilDate = today.toISOString().slice(0, 10);
+
+  const url = new URL(`https://graph.facebook.com/${META_API_VERSION}/act_${adAccountId}/insights`);
+  url.searchParams.set('access_token', accessToken);
+  url.searchParams.set('time_range', JSON.stringify({ since: sinceDate, until: untilDate }));
+  url.searchParams.set('level', 'ad');
+  url.searchParams.set(
+    'fields',
+    [
+      'date_start',
+      'date_stop',
+      'campaign_id',
+      'adset_id',
+      'ad_id',
+      'spend',
+      'impressions',
+      'clicks',
+      'actions',
+      'action_values',
+    ].join(','),
+  );
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Meta insights request failed: ${response.status} ${body}`);
+  }
+
+  const payload = await response.json();
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+
+  return rows.map((row: any) => {
+    const date = typeof row?.date_start === 'string' ? row.date_start : new Date().toISOString().slice(0, 10);
+    const spend = parseNumber(row?.spend);
+    const impressions = parseNumber(row?.impressions);
+    const clicks = parseNumber(row?.clicks);
+    const purchases = extractActionValue(row?.actions, (type) => type.toLowerCase().includes('purchase'));
+    const revenue = extractActionValue(row?.action_values, (type) => type.toLowerCase().includes('purchase'));
+
+    return {
+      tenant_id: tenantId,
+      date,
+      ad_account_id: adAccountId,
+      campaign_id: typeof row?.campaign_id === 'string' ? row.campaign_id : null,
+      adset_id: typeof row?.adset_id === 'string' ? row.adset_id : null,
+      ad_id: typeof row?.ad_id === 'string' ? row.ad_id : null,
+      spend,
+      impressions,
+      clicks,
+      purchases,
+      revenue,
+    };
+  });
+}
+
+async function fetchMetaInsights(tenantId: string): Promise<MetaInsightRow[]> {
+  if (META_DEV_ACCESS_TOKEN && META_DEV_AD_ACCOUNT_ID) {
+    try {
+      return await fetchMetaInsightsFromApi(tenantId, META_DEV_ACCESS_TOKEN, META_DEV_AD_ACCOUNT_ID);
+    } catch (error) {
+      console.error('Failed to fetch Meta insights via Marketing API, falling back to mock data:', error);
+    }
+  }
+
+  return mockMetaInsights(tenantId);
 }
 
 function aggregateKpis(rows: MetaInsightRow[]) {
@@ -128,8 +224,7 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
   await upsertJobLog(client, { tenantId, status: 'running', startedAt });
 
   try {
-    // TODO: integrate with Meta API using stored credentials.
-    const insights = mockMetaInsights(tenantId);
+    const insights = await fetchMetaInsights(tenantId);
 
     if (insights.length > 0) {
       const { error: upsertError } = await client.from('meta_insights_daily').upsert(insights, {

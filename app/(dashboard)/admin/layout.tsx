@@ -4,22 +4,24 @@ import { AppSidebar } from '@/components/app-sidebar'
 import { SiteHeader } from '@/components/site-header'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { requirePlatformAdmin } from '@/lib/auth/current-user'
+import { listAdminTenants } from '@/lib/admin/tenants'
 
 export default async function AdminLayout({ children }: { children: ReactNode }) {
   const user = await requirePlatformAdmin()
+  const tenants = await listAdminTenants()
   const environment = process.env.APP_ENV ?? 'development'
 
   const navMain = [
     {
-      title: 'Tenants',
+      title: 'All tenants',
       url: '/admin',
       icon: 'gauge',
     },
-    {
-      title: 'Integrations',
-      url: '/admin/integrations',
-      icon: 'settings',
-    },
+    ...tenants.map((tenant) => ({
+      title: tenant.name,
+      url: `/admin/tenants/${tenant.slug}`,
+      icon: 'users',
+    })),
   ]
 
   return (

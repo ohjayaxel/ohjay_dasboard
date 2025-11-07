@@ -11,6 +11,8 @@ This project requires separate configuration for development and production. Use
 | `APP_ENV` | Both | Environment indicator (`development`/`production`) | Set manually |
 | `META_APP_ID` | Server | Meta OAuth App ID | Meta for Developers → App Dashboard |
 | `META_APP_SECRET` | Server | Meta OAuth App Secret | Meta for Developers → App Dashboard |
+| `META_DEV_ACCESS_TOKEN` | Server (optional, dev) | Development override token for Meta Marketing API calls | Meta for Developers → Marketing API Tools |
+| `META_DEV_AD_ACCOUNT_ID` | Server (optional, dev) | Ad account ID used with `META_DEV_ACCESS_TOKEN` | Meta Business Manager → Ad Accounts |
 | `GOOGLE_CLIENT_ID` | Server | Google Ads OAuth Client ID | Google Cloud Console |
 | `GOOGLE_CLIENT_SECRET` | Server | Google Ads OAuth Client Secret | Google Cloud Console |
 | `GOOGLE_DEVELOPER_TOKEN` | Server | Google Ads API developer token | Google Ads Manager account |

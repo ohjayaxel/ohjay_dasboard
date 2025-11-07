@@ -43,6 +43,7 @@ type IconKey =
   | 'brand-shopify'
   | 'settings'
   | 'chart-dots'
+  | 'users'
 
 type IconSource = Icon | IconKey
 
@@ -53,6 +54,7 @@ const iconMap: Record<IconKey, Icon> = {
   'brand-shopify': IconShoppingCart,
   settings: IconSettings,
   'chart-dots': IconChartDots,
+  users: IconUsers,
 }
 
 type NavItem = {
