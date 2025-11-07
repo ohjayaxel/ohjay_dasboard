@@ -22,8 +22,13 @@ export function LandingHero() {
           priority
         />
         <div className="space-y-4">
-          <h1 className="text-4xl font-sentient uppercase tracking-[0.12em] text-foreground sm:text-5xl md:text-6xl">
-            Ohjay Analytics
+          <h1
+            className="text-4xl font-sentient uppercase tracking-[0.12em] text-foreground sm:text-5xl md:text-6xl"
+            style={{
+              font: "normal normal normal calc(90 * var(--theme-spx-ratio)) / 0.8em Arial,'ＭＳ Ｐゴシック','MS PGothic','돋움',Dotum,Helvetica,sans-serif",
+            }}
+          >
+            Analytics Platform
           </h1>
           <p className="mx-auto max-w-xl font-mono text-xs text-foreground/70 sm:text-sm">
             Integrated dashboards, clear KPIs, and advisory that drives profitable expansion.
