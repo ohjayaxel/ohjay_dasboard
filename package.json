@@ -6,7 +6,10 @@
     "build": "next build",
     "dev": "next dev",
     "lint": "eslint .",
-    "start": "next start"
+    "start": "next start",
+    "sb:switch:dev": "bash scripts/sb-switch.sh dev",
+    "sb:switch:prod": "bash scripts/sb-switch.sh prod",
+    "db:push": "supabase db push"
   },
   "dependencies": {
     "@dnd-kit/core": "latest",
