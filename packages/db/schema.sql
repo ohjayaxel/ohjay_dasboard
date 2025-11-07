@@ -4,4 +4,5 @@
 \i migrations/000_init.sql
 \i migrations/001_rls.sql
 \i migrations/002_kpi.sql
+\i migrations/003_members_email.sql
 
