@@ -37,7 +37,7 @@ export function LandingHero() {
 
         <div className="flex flex-wrap items-center justify-center gap-3">
           <Link className="contents" href="/signin">
-            <Button className="tracking-[0.3em] uppercase">[Logga in]</Button>
+            <Button className="tracking-[0.3em] uppercase">[LOGIN]</Button>
           </Link>
           <Button variant="outline" className="tracking-[0.3em] uppercase" asChild>
             <Link href="https://www.ohjay.co/" target="_blank" rel="noreferrer">
