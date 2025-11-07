@@ -123,3 +123,7 @@
     @apply bg-background text-foreground;
   }
 }
+
+.font-sentient {
+  font-family: var(--font-sentient);
+}
