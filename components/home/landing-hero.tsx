@@ -12,7 +12,7 @@ export function LandingHero() {
         aria-hidden
         className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.06),_transparent_60%),radial-gradient(circle_at_bottom,_rgba(255,115,0,0.12),_transparent_55%),linear-gradient(160deg,rgba(15,23,42,0.9) 0%,rgba(8,8,8,0.9) 100%)]"
       />
-      <div className="relative z-10 flex flex-col items-center gap-8 px-4 pb-24 pt-16 text-center sm:pb-28 sm:pt-20">
+      <div className="relative z-10 flex min-h-screen flex-col items-center justify-center gap-8 px-4 pb-24 pt-10 text-center sm:pb-28 sm:pt-12">
         <Image
           src="/Orange Juice Logo (3).avif"
           alt="Orange Juice"
