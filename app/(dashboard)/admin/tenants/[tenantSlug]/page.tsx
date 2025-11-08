@@ -3,7 +3,13 @@ export const dynamic = 'force-dynamic'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 
-import { addTenantMember, disconnectMeta, removeTenantMember, startMetaConnect } from '@/app/(dashboard)/admin/actions'
+import {
+  addTenantMember,
+  disconnectMeta,
+  removeTenantMember,
+  startMetaConnect,
+  updateMetaSelectedAccount,
+} from '@/app/(dashboard)/admin/actions'
 import { getAdminTenantBySlug } from '@/lib/admin/tenants'
 import { Roles } from '@/lib/auth/roles'
 
@@ -55,6 +61,19 @@ export default async function AdminTenantDetailPage(props: PageProps) {
   const shopify = tenant.connections.shopify
   const status = searchParams?.status
   const error = searchParams?.error
+  const metaDetails = (meta.meta ?? {}) as Record<string, unknown>
+  const metaAccounts = Array.isArray(metaDetails.accounts)
+    ? (metaDetails.accounts as Array<{ account_id?: string; name?: string }>)
+        .filter((account) => typeof account?.account_id === 'string')
+        .map((account) => ({
+          id: account.account_id as string,
+          name: account?.name ?? account.account_id,
+        }))
+    : []
+  const selectedMetaAccountId =
+    typeof metaDetails.selected_account_id === 'string' ? (metaDetails.selected_account_id as string) : null
+  const selectedMetaAccountName =
+    metaAccounts.find((account) => account.id === selectedMetaAccountId)?.name ?? selectedMetaAccountId ?? 'Not set'
   const formatTimestamp = (value?: string | null) => {
     if (!value) return null
     try {
@@ -128,6 +147,55 @@ export default async function AdminTenantDetailPage(props: PageProps) {
           />
           <GoogleAdsConnect status={google.status} lastSyncedAt={google.updatedAt ?? undefined} />
           <ShopifyConnect status={shopify.status} lastSyncedAt={shopify.updatedAt ?? undefined} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle className="text-lg font-semibold">Meta ad account</CardTitle>
+            <p className="text-sm text-muted-foreground">Choose which ad account to sync data from.</p>
+          </div>
+          <Badge variant={selectedMetaAccountId ? 'default' : 'secondary'} className="text-xs">
+            {selectedMetaAccountId ? 'Connected' : 'Not selected'}
+          </Badge>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <p className="text-sm text-muted-foreground">Current selection</p>
+            <p className="font-medium">{selectedMetaAccountName}</p>
+          </div>
+
+          {metaAccounts.length > 0 ? (
+            <form action={updateMetaSelectedAccount} className="flex flex-col gap-3 md:flex-row md:items-end">
+              <input type="hidden" name="tenantId" value={tenant.id} />
+              <input type="hidden" name="tenantSlug" value={tenant.slug} />
+              <div className="flex-1 space-y-2">
+                <Label htmlFor="meta-account">Select ad account</Label>
+                <select
+                  id="meta-account"
+                  name="accountId"
+                  defaultValue={selectedMetaAccountId ?? metaAccounts[0]?.id ?? ''}
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  required
+                >
+                  {metaAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button type="submit" className="md:w-auto">
+                Save selection
+              </Button>
+            </form>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No ad accounts were returned for this user. Reconnect Meta or verify that the user has access to the desired
+              ad account.
+            </p>
+          )}
         </CardContent>
       </Card>
 

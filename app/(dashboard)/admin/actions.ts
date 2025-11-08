@@ -48,6 +48,16 @@ const connectMetaSchema = z.object({
 
 const disconnectMetaSchema = connectMetaSchema
 
+const updateMetaAccountSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+  accountId: z
+    .string({ required_error: 'Select an ad account.' })
+    .min(1, { message: 'Select an ad account.' }),
+})
+
 const INTEGRATION_SOURCES = ['meta', 'google_ads', 'shopify'] as const
 
 const slugify = (value: string) =>
@@ -380,6 +390,61 @@ export async function disconnectMeta(payload: { tenantId: string; tenantSlug: st
   }
 
   await revalidateTenantViews(tenantId, tenantSlug)
+}
+
+export async function updateMetaSelectedAccount(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const result = updateMetaAccountSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+    accountId: formData.get('accountId'),
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid Meta account selection.')
+  }
+
+  const client = getSupabaseServiceClient()
+
+  const { data: connection, error } = await client
+    .from('connections')
+    .select('id, meta')
+    .eq('tenant_id', result.data.tenantId)
+    .eq('source', 'meta')
+    .maybeSingle()
+
+  if (error) {
+    throw new Error(`Failed to load Meta connection: ${error.message}`)
+  }
+
+  if (!connection) {
+    throw new Error('No Meta connection found for this tenant.')
+  }
+
+  const accounts = Array.isArray((connection.meta as any)?.accounts)
+    ? ((connection.meta as any).accounts as Array<{ account_id?: string }>)
+    : []
+
+  if (!accounts.some((account) => account?.account_id === result.data.accountId)) {
+    throw new Error('Selected ad account is not available for this connection.')
+  }
+
+  const nextMeta = {
+    ...(connection.meta ?? {}),
+    selected_account_id: result.data.accountId,
+  }
+
+  const { error: updateError } = await client
+    .from('connections')
+    .update({ meta: nextMeta })
+    .eq('id', connection.id)
+
+  if (updateError) {
+    throw new Error(`Failed to update Meta ad account: ${updateError.message}`)
+  }
+
+  await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
 }
 
 

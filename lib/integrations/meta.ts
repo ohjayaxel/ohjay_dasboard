@@ -4,8 +4,9 @@ import { getSupabaseServiceClient } from '@/lib/supabase/server';
 
 import { decryptSecret, encryptSecret } from './crypto';
 
-const META_OAUTH_BASE = 'https://www.facebook.com/v18.0/dialog/oauth';
-const META_TOKEN_ENDPOINT = 'https://graph.facebook.com/v18.0/oauth/access_token';
+const META_API_VERSION = process.env.META_API_VERSION ?? 'v18.0';
+const META_OAUTH_BASE = `https://www.facebook.com/${META_API_VERSION}/dialog/oauth`;
+const META_TOKEN_ENDPOINT = `https://graph.facebook.com/${META_API_VERSION}/oauth/access_token`;
 const META_APP_ID = process.env.META_APP_ID;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:3000';
@@ -35,6 +36,39 @@ function normalizedBaseUrl() {
 
 function buildRedirectUri() {
   return `${normalizedBaseUrl()}${META_REDIRECT_PATH}`;
+}
+
+type MetaAdAccount = {
+  account_id: string;
+  name?: string;
+};
+
+async function fetchMetaAdAccounts(accessToken: string): Promise<MetaAdAccount[]> {
+  const url = new URL(`https://graph.facebook.com/${META_API_VERSION}/me/adaccounts`);
+  url.searchParams.set('fields', 'account_id,name');
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Meta ad accounts fetch failed: ${response.status} ${body}`);
+  }
+
+  const payload = await response.json();
+  if (!Array.isArray(payload?.data)) {
+    return [];
+  }
+
+  return payload.data
+    .filter((item: any) => typeof item?.account_id === 'string')
+    .map((item: any) => ({
+      account_id: item.account_id as string,
+      name: typeof item?.name === 'string' ? item.name : undefined,
+    }));
 }
 
 function requireAppCredentials() {
@@ -182,6 +216,15 @@ export async function handleMetaOAuthCallback(options: {
     ? new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString()
     : null;
 
+  let accounts: MetaAdAccount[] = [];
+  try {
+    accounts = await fetchMetaAdAccounts(tokenResponse.access_token);
+  } catch (error) {
+    console.error('Failed to fetch Meta ad accounts', error);
+  }
+
+  const selectedAccountId = accounts[0]?.account_id ?? null;
+
   await upsertConnection(options.tenantId, {
     status: 'connected',
     accessToken: tokenResponse.access_token,
@@ -189,6 +232,8 @@ export async function handleMetaOAuthCallback(options: {
     expiresAt,
     meta: {
       token_type: tokenResponse.token_type,
+      accounts,
+      selected_account_id: selectedAccountId,
       // TODO: store key version when encryption rotation is implemented.
     },
   });
@@ -284,7 +329,7 @@ export async function fetchMetaInsightsDaily(params: {
   }
 
   const url = new URL(
-    `https://graph.facebook.com/v18.0/${params.adAccountId}/insights`,
+    `https://graph.facebook.com/${META_API_VERSION}/${params.adAccountId}/insights`,
   );
   url.searchParams.set('access_token', accessToken);
   url.searchParams.set('time_range', JSON.stringify({ since: params.startDate, until: params.endDate }));
