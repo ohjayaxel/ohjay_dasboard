@@ -8,7 +8,7 @@ import { requirePlatformAdmin } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
-import { logger } from '@/lib/logger'
+import { logger, withRequestContext } from '@/lib/logger'
 
 const roleEnum = z.enum([
   Roles.platformAdmin,
@@ -250,90 +250,95 @@ export async function createTenant(formData: FormData) {
 }
 
 export async function startMetaConnect(payload: { tenantId: string; tenantSlug: string }) {
-  const user = await requirePlatformAdmin()
+  return withRequestContext(async () => {
+    const user = await requirePlatformAdmin()
 
-  const result = connectMetaSchema.safeParse(payload)
+    const result = connectMetaSchema.safeParse(payload)
 
-  if (!result.success) {
-    throw new Error(result.error.errors[0]?.message ?? 'Invalid Meta connection payload.')
-  }
+    if (!result.success) {
+      throw new Error(result.error.errors[0]?.message ?? 'Invalid Meta connection payload.')
+    }
 
-  const { tenantId, tenantSlug } = result.data
-  const { url, state } = await getMetaAuthorizeUrl(tenantId)
-  const client = getSupabaseServiceClient()
+    const { tenantId, tenantSlug } = result.data
+    const { url, state } = await getMetaAuthorizeUrl(tenantId)
+    const client = getSupabaseServiceClient()
 
-  const { data: existing, error: existingError } = await client
-    .from('connections')
-    .select('id, meta')
-    .eq('tenant_id', tenantId)
-    .eq('source', 'meta')
-    .maybeSingle()
-
-  if (existingError) {
-    throw new Error(`Failed to prepare Meta connection: ${existingError.message}`)
-  }
-
-  const now = new Date().toISOString()
-  const baseMeta =
-    existing && typeof existing.meta === 'object' && existing.meta !== null ? (existing.meta as Record<string, unknown>) : {}
-  const nextMeta = {
-    ...baseMeta,
-    oauth_state: state,
-    oauth_state_created_at: now,
-    oauth_redirect_path: `/admin/tenants/${tenantSlug}`,
-  }
-
-  if (existing) {
-    const { error } = await client
+    const { data: existing, error: existingError } = await client
       .from('connections')
-      .update({
+      .select('id, meta')
+      .eq('tenant_id', tenantId)
+      .eq('source', 'meta')
+      .maybeSingle()
+
+    if (existingError) {
+      throw new Error(`Failed to prepare Meta connection: ${existingError.message}`)
+    }
+
+    const now = new Date().toISOString()
+    const baseMeta =
+      existing && typeof existing.meta === 'object' && existing.meta !== null ? (existing.meta as Record<string, unknown>) : {}
+    const nextMeta = {
+      ...baseMeta,
+      oauth_state: state,
+      oauth_state_created_at: now,
+      oauth_redirect_path: `/admin/tenants/${tenantSlug}`,
+    }
+
+    if (existing) {
+      const { error } = await client
+        .from('connections')
+        .update({
+          status: 'disconnected',
+          access_token_enc: null,
+          refresh_token_enc: null,
+          expires_at: null,
+          updated_at: now,
+          meta: nextMeta,
+        })
+        .eq('id', existing.id)
+
+      if (error) {
+        throw new Error(`Failed to update Meta connection: ${error.message}`)
+      }
+    } else {
+      const { error } = await client.from('connections').insert({
+        tenant_id: tenantId,
+        source: 'meta',
         status: 'disconnected',
+        updated_at: now,
         access_token_enc: null,
         refresh_token_enc: null,
         expires_at: null,
-        updated_at: now,
         meta: nextMeta,
       })
-      .eq('id', existing.id)
 
-    if (error) {
-      throw new Error(`Failed to update Meta connection: ${error.message}`)
+      if (error) {
+        throw new Error(`Failed to create Meta connection: ${error.message}`)
+      }
     }
-  } else {
-    const { error } = await client.from('connections').insert({
-      tenant_id: tenantId,
-      source: 'meta',
-      status: 'disconnected',
-      updated_at: now,
-      access_token_enc: null,
-      refresh_token_enc: null,
-      expires_at: null,
-      meta: nextMeta,
-    })
 
-    if (error) {
-      throw new Error(`Failed to create Meta connection: ${error.message}`)
-    }
-  }
+    await revalidateTenantViews(tenantId, tenantSlug)
 
-  await revalidateTenantViews(tenantId, tenantSlug)
+    logger.info(
+      {
+        route: 'admin.meta',
+        action: 'connect_initiated',
+        endpoint: '/api/oauth/meta/callback',
+        tenantId,
+        tenantSlug,
+        userId: user.id,
+        state,
+        state_prefix: state.slice(0, 8),
+        redirect_url: url,
+      },
+      'Meta connect initiated',
+    )
 
-  logger.info(
-    {
-      route: 'admin.meta',
-      action: 'connect_initiated',
-      tenantId,
-      tenantSlug,
-      userId: user.id,
+    return {
+      redirectUrl: url,
       state,
-      redirect_url: url,
-    },
-    'Meta connect initiated',
-  )
-
-  return {
-    redirectUrl: url,
-  }
+    }
+  })
 }
 
 export async function disconnectMeta(payload: { tenantId: string; tenantSlug: string }) {

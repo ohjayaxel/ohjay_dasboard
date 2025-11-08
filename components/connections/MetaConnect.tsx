@@ -9,6 +9,7 @@ import { useToast } from '@/hooks/use-toast';
 
 type ConnectActionResult = {
   redirectUrl: string;
+  state?: string;
 };
 
 type AsyncAction<T = void> = () => Promise<T>;

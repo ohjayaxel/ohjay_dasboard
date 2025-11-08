@@ -1,22 +1,37 @@
+import { AsyncLocalStorage } from 'async_hooks'
+import crypto from 'crypto'
 import pino from 'pino'
 
 type LogContext = Record<string, unknown>
+
+type RequestScope = {
+  requestId?: string
+}
+
+const storage = new AsyncLocalStorage<RequestScope>()
 
 export type Logger = {
   info: (context: LogContext, message: string) => void
   warn: (context: LogContext, message: string) => void
   error: (context: LogContext, message: string) => void
+  createChild: (context: LogContext) => Logger
 }
 
 const baseLogger = (() => {
   try {
     return pino({
       level: process.env.LOG_LEVEL ?? 'info',
+      base: {
+        service: 'meta',
+      },
       transport:
         process.env.NODE_ENV === 'development'
           ? {
               target: 'pino-pretty',
-              options: { colorize: true },
+              options: {
+                colorize: true,
+                translateTime: 'SYS:standard',
+              },
             }
           : undefined,
     })
@@ -25,37 +40,61 @@ const baseLogger = (() => {
   }
 })()
 
-function withTimestamp(context: LogContext): LogContext {
+function withBaseContext(context: LogContext): LogContext {
+  const scope = storage.getStore()
+  const requestId = scope?.requestId
   return {
-    timestamp: new Date().toISOString(),
+    ts: new Date().toISOString(),
+    requestId,
     ...context,
   }
 }
 
-export const logger: Logger = {
-  info(context, message) {
-    const payload = withTimestamp(context)
-    if (baseLogger) {
-      baseLogger.info(payload, message)
-    } else {
-      console.info(message, payload)
+function emit(level: 'info' | 'warn' | 'error', context: LogContext, message: string) {
+  const payload = withBaseContext(context)
+
+  if (baseLogger) {
+    baseLogger[level](payload, message)
+    return
+  }
+
+  const line = `[${level.toUpperCase()}] ${message}`
+  switch (level) {
+    case 'warn': {
+      console.warn(line, payload)
+      break
     }
-  },
-  warn(context, message) {
-    const payload = withTimestamp(context)
-    if (baseLogger) {
-      baseLogger.warn(payload, message)
-    } else {
-      console.warn(message, payload)
+    case 'error': {
+      console.error(line, payload)
+      break
     }
-  },
-  error(context, message) {
-    const payload = withTimestamp(context)
-    if (baseLogger) {
-      baseLogger.error(payload, message)
-    } else {
-      console.error(message, payload)
+    default: {
+      console.info(line, payload)
     }
-  },
+  }
 }
+
+function createLogger(context: LogContext = {}): Logger {
+  return {
+    info(additionalContext, message) {
+      emit('info', { ...context, ...additionalContext }, message)
+    },
+    warn(additionalContext, message) {
+      emit('warn', { ...context, ...additionalContext }, message)
+    },
+    error(additionalContext, message) {
+      emit('error', { ...context, ...additionalContext }, message)
+    },
+    createChild(childContext) {
+      return createLogger({ ...context, ...childContext })
+    },
+  }
+}
+
+export function withRequestContext<T>(fn: () => Promise<T>, requestId?: string): Promise<T> {
+  const id = requestId ?? crypto.randomUUID()
+  return storage.run({ requestId: id }, fn)
+}
+
+export const logger = createLogger()
 

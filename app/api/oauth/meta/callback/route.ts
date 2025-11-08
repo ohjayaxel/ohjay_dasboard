@@ -2,10 +2,15 @@ import { revalidatePath } from 'next/cache'
 import { NextRequest, NextResponse } from 'next/server'
 
 import { handleMetaOAuthCallback, isMetaStateExpired } from '@/lib/integrations/meta'
-import { logger } from '@/lib/logger'
+import { logger, withRequestContext } from '@/lib/logger'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 
+const CALLBACK_ENDPOINT = '/api/oauth/meta/callback'
+
 export async function GET(request: NextRequest) {
+  const requestId = request.headers.get('x-request-id') ?? undefined
+
+  return withRequestContext(async () => {
   const url = new URL(request.url)
   const state = url.searchParams.get('state')
   const code = url.searchParams.get('code')
@@ -15,6 +20,7 @@ export async function GET(request: NextRequest) {
       {
         route: 'meta_callback',
         action: 'validate_state',
+        endpoint: CALLBACK_ENDPOINT,
         error_message: 'Missing state parameter',
       },
       'Meta OAuth callback missing state',
@@ -27,7 +33,9 @@ export async function GET(request: NextRequest) {
       {
         route: 'meta_callback',
         action: 'validate_code',
+        endpoint: CALLBACK_ENDPOINT,
         state,
+        state_prefix: state?.slice(0, 8),
         error_message: 'Missing authorization code',
       },
       'Meta OAuth callback missing code',
@@ -49,7 +57,9 @@ export async function GET(request: NextRequest) {
       {
         route: 'meta_callback',
         action: 'lookup_connection',
+        endpoint: CALLBACK_ENDPOINT,
         state,
+        state_prefix: state.slice(0, 8),
         error_message: connectionError.message,
       },
       'Failed to lookup Meta connection for callback',
@@ -62,7 +72,9 @@ export async function GET(request: NextRequest) {
       {
         route: 'meta_callback',
         action: 'lookup_connection',
+        endpoint: CALLBACK_ENDPOINT,
         state,
+        state_prefix: state.slice(0, 8),
         error_message: 'State not found',
       },
       'Meta OAuth state not found or already consumed',
@@ -85,7 +97,9 @@ export async function GET(request: NextRequest) {
       {
         route: 'meta_callback',
         action: 'validate_state_age',
+        endpoint: CALLBACK_ENDPOINT,
         state,
+        state_prefix: state.slice(0, 8),
         tenantId: connection.tenant_id,
       },
       'Meta OAuth state expired',
@@ -113,6 +127,7 @@ export async function GET(request: NextRequest) {
       tenantId: connection.tenant_id as string,
       code,
       state,
+      userId: undefined,
     })
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
@@ -120,7 +135,9 @@ export async function GET(request: NextRequest) {
       {
         route: 'meta_callback',
         action: 'handle_callback',
+        endpoint: CALLBACK_ENDPOINT,
         state,
+        state_prefix: state.slice(0, 8),
         tenantId: connection.tenant_id,
         error_message: errorMessage,
       },
@@ -145,12 +162,15 @@ export async function GET(request: NextRequest) {
     {
       route: 'meta_callback',
       action: 'redirect_success',
+      endpoint: CALLBACK_ENDPOINT,
       state,
+      state_prefix: state.slice(0, 8),
       tenantId: connection.tenant_id,
     },
     'Meta OAuth flow completed successfully',
   )
 
   return NextResponse.redirect(successUrl)
+  }, requestId)
 }
 

@@ -19,9 +19,15 @@ const RAW_BASE_URL =
   process.env.APP_BASE_URL ?? process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
 const META_REDIRECT_PATH = '/api/oauth/meta/callback'
 
-const META_SCOPES = ['ads_read', 'ads_management', 'business_management']
+export const META_REQUESTED_SCOPES = Object.freeze([
+  'ads_read',
+  'ads_management',
+  'business_management',
+])
+const META_SCOPES = META_REQUESTED_SCOPES
 const CONNECTION_SOURCE = 'meta'
 const STATE_TTL_MS = 15 * 60 * 1000
+export const META_STATE_TTL_MS = STATE_TTL_MS
 
 type ConnectionRow = {
   id: string
@@ -76,6 +82,7 @@ export type NormalizedMetaAdAccount = {
 type MetaRequestContext = {
   route: string
   action: string
+  endpoint?: string
   tenantId: string
   userId?: string
   state?: string
@@ -85,6 +92,20 @@ type MetaRequestResult<T> = {
   body: T
   fbTraceId?: string
   status: number
+}
+
+export type MetaRequestErrorDetail = {
+  status: number
+  fbTraceId?: string
+  endpoint: string
+  error_code?: number
+  error_subcode?: number
+  tenantId?: string
+  message?: string
+}
+
+type MetaRequestError = Error & {
+  meta?: MetaRequestErrorDetail
 }
 
 function normalizeBaseUrl(raw: string | undefined): string {
@@ -110,8 +131,20 @@ function normalizeBaseUrl(raw: string | undefined): string {
 
 const APP_BASE_URL = normalizeBaseUrl(RAW_BASE_URL)
 
+export function getMetaBaseUrl(): string {
+  return APP_BASE_URL
+}
+
+export function getMetaCallbackPath(): string {
+  return META_REDIRECT_PATH
+}
+
 function buildRedirectUri(): string {
   return `${APP_BASE_URL}${META_REDIRECT_PATH}`
+}
+
+export function getMetaRedirectUri(): string {
+  return buildRedirectUri()
 }
 
 function requireAppCredentials() {
@@ -120,7 +153,9 @@ function requireAppCredentials() {
   }
 }
 
-async function getExistingConnection(tenantId: string): Promise<ConnectionRow | null> {
+export async function getExistingMetaConnection(
+  tenantId: string,
+): Promise<ConnectionRow | null> {
   const client = getSupabaseServiceClient()
   const { data, error } = await client
     .from('connections')
@@ -165,7 +200,7 @@ async function upsertConnection(
   },
 ) {
   const client = getSupabaseServiceClient()
-  const existing = await getExistingConnection(tenantId)
+  const existing = await getExistingMetaConnection(tenantId)
   const mergedMeta = mergeMeta(existing?.meta as Record<string, unknown> | null, payload.meta)
   const now = new Date().toISOString()
 
@@ -257,6 +292,10 @@ function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
 
+function statePrefix(state?: string): string | undefined {
+  return state ? state.slice(0, 8) : undefined
+}
+
 async function performMetaRequest<T>(
   path: string,
   options: {
@@ -272,6 +311,11 @@ async function performMetaRequest<T>(
   for (const [key, value] of Object.entries(options.params ?? {})) {
     url.searchParams.set(key, value)
   }
+
+  const endpoint =
+    options.context.endpoint ??
+    (url.pathname.startsWith('/') ? url.pathname : `/${url.pathname}`)
+  const statePrefixValue = statePrefix(options.context.state)
 
   const response = await fetch(url.toString(), {
     headers: {
@@ -294,26 +338,41 @@ async function performMetaRequest<T>(
     const errorPayload: MetaApiError | undefined =
       parsed && typeof parsed === 'object' && 'error' in parsed ? (parsed.error as MetaApiError) : undefined
 
+    const errorMessage =
+      errorPayload?.message ?? (typeof parsed === 'string' ? (parsed as string) : undefined)
+
     logger.error(
       {
         route: options.context.route,
         action: options.context.action,
+        endpoint,
         tenantId: options.context.tenantId,
         userId: options.context.userId,
         state: options.context.state,
+        state_prefix: statePrefixValue,
         fb_trace_id: fbTraceId,
         status,
         error_code: errorPayload?.code,
         error_subcode: errorPayload?.error_subcode,
-        error_message:
-          errorPayload?.message ?? (typeof parsed === 'string' ? (parsed as string) : undefined),
+        error_message: errorMessage,
       },
       'Meta API request failed',
     )
 
-    throw new Error(
-      errorPayload?.message ?? `Meta API request failed with status ${status}`,
-    )
+    const error = new Error(
+      errorMessage ?? `Meta API request failed with status ${status}`,
+    ) as MetaRequestError
+    error.meta = {
+      status,
+      fbTraceId,
+      endpoint,
+      error_code: errorPayload?.code,
+      error_subcode: errorPayload?.error_subcode,
+      tenantId: options.context.tenantId,
+      message: errorMessage,
+    }
+
+    throw error
   }
 
   const count =
@@ -327,9 +386,11 @@ async function performMetaRequest<T>(
     {
       route: options.context.route,
       action: options.context.action,
+      endpoint,
       tenantId: options.context.tenantId,
       userId: options.context.userId,
       state: options.context.state,
+      state_prefix: statePrefixValue,
       fb_trace_id: fbTraceId,
       status,
       count,
@@ -364,6 +425,8 @@ async function exchangeCodeForToken(options: {
   const fbTraceId = response.headers.get('x-fb-trace-id') ?? undefined
   const status = response.status
   const text = await response.text()
+  const endpoint = META_TOKEN_ENDPOINT
+  const statePrefixValue = statePrefix(options.state)
 
   let parsed: any
   try {
@@ -380,9 +443,11 @@ async function exchangeCodeForToken(options: {
       {
         route: 'meta.oauth',
         action: 'token_exchange',
+        endpoint,
         tenantId: options.tenantId,
         userId: options.userId,
         state: options.state,
+        state_prefix: statePrefixValue,
         fb_trace_id: fbTraceId,
         status,
         error_code: errorPayload?.code,
@@ -400,9 +465,11 @@ async function exchangeCodeForToken(options: {
     {
       route: 'meta.oauth',
       action: 'token_exchange',
+      endpoint,
       tenantId: options.tenantId,
       userId: options.userId,
       state: options.state,
+      state_prefix: statePrefixValue,
       fb_trace_id: fbTraceId,
       status,
     },
@@ -429,6 +496,8 @@ async function fetchGrantedScopes(
   const fbTraceId = response.headers.get('x-fb-trace-id') ?? undefined
   const status = response.status
   const text = await response.text()
+  const endpoint = META_DEBUG_TOKEN_ENDPOINT
+  const statePrefixValue = statePrefix(context.state)
 
   let parsed: any
   try {
@@ -445,9 +514,11 @@ async function fetchGrantedScopes(
       {
         route: 'meta.oauth',
         action: 'debug_token',
+        endpoint,
         tenantId: context.tenantId,
         userId: context.userId,
         state: context.state,
+        state_prefix: statePrefixValue,
         fb_trace_id: fbTraceId,
         status,
         error_code: errorPayload?.code,
@@ -469,9 +540,11 @@ async function fetchGrantedScopes(
     {
       route: 'meta.oauth',
       action: 'debug_token',
+      endpoint,
       tenantId: context.tenantId,
       userId: context.userId,
       state: context.state,
+      state_prefix: statePrefixValue,
       fb_trace_id: fbTraceId,
       status,
       count: scopes.length,
@@ -492,7 +565,10 @@ async function fetchMetaAdAccountsWithToken(options: {
       fields: 'id,account_id,name,currency,account_status',
       limit: '100',
     },
-    context: options.context,
+    context: {
+      ...options.context,
+      endpoint: options.context.endpoint ?? '/me/adaccounts',
+    },
   })
 
   return {
@@ -500,6 +576,22 @@ async function fetchMetaAdAccountsWithToken(options: {
     raw: result.body,
     fbTraceId: result.fbTraceId,
   }
+}
+
+async function fetchMetaProfileWithToken(options: {
+  accessToken: string
+  context: MetaRequestContext
+}) {
+  return performMetaRequest<{ id?: string; name?: string }>('me', {
+    accessToken: options.accessToken,
+    params: {
+      fields: 'id,name',
+    },
+    context: {
+      ...options.context,
+      endpoint: options.context.endpoint ?? '/me',
+    },
+  })
 }
 
 async function fetchMetaCampaignsWithToken(options: {
@@ -515,7 +607,10 @@ async function fetchMetaCampaignsWithToken(options: {
         fields: 'id,name,status,effective_status,objective,updated_time',
         limit: '50',
       },
-      context: options.context,
+      context: {
+        ...options.context,
+        endpoint: options.context.endpoint ?? `/${options.adAccountId}/campaigns`,
+      },
     },
   )
 
@@ -546,7 +641,10 @@ async function fetchMetaInsightsWithToken(options: {
         level: 'campaign',
         limit: '100',
       },
-      context: options.context,
+      context: {
+        ...options.context,
+        endpoint: options.context.endpoint ?? `/${options.adAccountId}/insights`,
+      },
     },
   )
 
@@ -568,6 +666,7 @@ async function resolveAccessToken(tenantId: string): Promise<string | null> {
       {
         route: 'meta.access_token',
         action: 'fallback_system_user_token',
+        endpoint: '/system_user_token',
         tenantId,
       },
       'Falling back to META_SYSTEM_USER_TOKEN for Meta API request',
@@ -576,6 +675,10 @@ async function resolveAccessToken(tenantId: string): Promise<string | null> {
   }
 
   return null
+}
+
+export async function getActiveMetaAccessToken(tenantId: string): Promise<string | null> {
+  return resolveAccessToken(tenantId)
 }
 
 export async function getMetaAuthorizeUrl(tenantId: string) {
@@ -599,6 +702,7 @@ export async function getMetaAuthorizeUrl(tenantId: string) {
       route: 'meta.oauth',
       action: 'build_auth_url',
       tenantId,
+      state_prefix: statePrefix(state),
       state,
       redirect_uri: redirectUri,
       scopes: META_SCOPES.join(','),
@@ -627,6 +731,7 @@ export async function handleMetaOAuthCallback(options: {
       tenantId: options.tenantId,
       userId: options.userId,
       state: options.state,
+      state_prefix: statePrefix(options.state),
     },
     'Meta OAuth callback received',
   )
@@ -661,6 +766,7 @@ export async function handleMetaOAuthCallback(options: {
         tenantId: options.tenantId,
         userId: options.userId,
         state: options.state,
+        endpoint: '/me/adaccounts',
       },
     })
     accounts = normalized
@@ -671,9 +777,11 @@ export async function handleMetaOAuthCallback(options: {
       {
         route: 'meta.oauth',
         action: 'fetch_adaccounts',
+        endpoint: '/me/adaccounts',
         tenantId: options.tenantId,
         userId: options.userId,
         state: options.state,
+        state_prefix: statePrefix(options.state),
         error_message: accountsError,
       },
       'Meta ad accounts fetch failed during OAuth callback',
@@ -702,6 +810,7 @@ export async function handleMetaOAuthCallback(options: {
           tenantId: options.tenantId,
           userId: options.userId,
           state: options.state,
+          endpoint: `/${selectedAccountId}/campaigns`,
         },
       })
       campaigns = campaignResult.campaigns.slice(0, 50)
@@ -712,9 +821,11 @@ export async function handleMetaOAuthCallback(options: {
         {
           route: 'meta.oauth',
           action: 'fetch_campaigns',
+        endpoint: `/${selectedAccountId}/campaigns`,
           tenantId: options.tenantId,
           userId: options.userId,
           state: options.state,
+        state_prefix: statePrefix(options.state),
           error_message: campaignsError,
         },
         'Meta campaigns fetch failed during OAuth callback',
@@ -731,6 +842,7 @@ export async function handleMetaOAuthCallback(options: {
           tenantId: options.tenantId,
           userId: options.userId,
           state: options.state,
+        endpoint: `/${selectedAccountId}/insights`,
         },
       })
       insights = insightsResult.insights.slice(0, 50)
@@ -742,9 +854,11 @@ export async function handleMetaOAuthCallback(options: {
         {
           route: 'meta.oauth',
           action: 'fetch_insights',
+        endpoint: `/${selectedAccountId}/insights`,
           tenantId: options.tenantId,
           userId: options.userId,
           state: options.state,
+        state_prefix: statePrefix(options.state),
           error_message: insightsError,
         },
         'Meta insights fetch failed during OAuth callback',
@@ -793,6 +907,7 @@ export async function handleMetaOAuthCallback(options: {
       tenantId: options.tenantId,
       userId: options.userId,
       state: options.state,
+      state_prefix: statePrefix(options.state),
       selected_account_id: selectedAccountId,
     },
     'Meta OAuth callback completed successfully',
@@ -802,7 +917,7 @@ export async function handleMetaOAuthCallback(options: {
 export async function refreshMetaTokenIfNeeded(tenantId: string) {
   requireAppCredentials()
 
-  const connection = await getExistingConnection(tenantId)
+  const connection = await getExistingMetaConnection(tenantId)
 
   if (!connection) {
     throw new Error('Meta connection not found.')
@@ -824,6 +939,7 @@ export async function refreshMetaTokenIfNeeded(tenantId: string) {
         route: 'meta.oauth',
         action: 'token_refresh',
         tenantId,
+        endpoint: META_TOKEN_ENDPOINT,
       },
       'Refresh token missing; skipping Meta token refresh',
     )
@@ -841,6 +957,7 @@ export async function refreshMetaTokenIfNeeded(tenantId: string) {
   const status = response.status
   const text = await response.text()
   const fbTraceId = response.headers.get('x-fb-trace-id') ?? undefined
+  const endpoint = META_TOKEN_ENDPOINT
 
   let parsed: any
   try {
@@ -858,6 +975,7 @@ export async function refreshMetaTokenIfNeeded(tenantId: string) {
         route: 'meta.oauth',
         action: 'token_refresh',
         tenantId,
+        endpoint,
         fb_trace_id: fbTraceId,
         status,
         error_code: errorPayload?.code,
@@ -887,6 +1005,7 @@ export async function refreshMetaTokenIfNeeded(tenantId: string) {
       route: 'meta.oauth',
       action: 'token_refresh',
       tenantId,
+      endpoint,
       fb_trace_id: fbTraceId,
       status,
     },
@@ -895,7 +1014,7 @@ export async function refreshMetaTokenIfNeeded(tenantId: string) {
 }
 
 export async function getMetaAccessToken(tenantId: string): Promise<string | null> {
-  const connection = await getExistingConnection(tenantId)
+  const connection = await getExistingMetaConnection(tenantId)
   if (!connection) {
     return null
   }
@@ -922,10 +1041,42 @@ export async function fetchMetaAdAccountsForTenant(params: {
       tenantId: params.tenantId,
       userId: params.userId,
       state: params.state,
+      endpoint: '/me/adaccounts',
     },
   })
 
-  return result.raw
+  return {
+    status: result.status,
+    fbTraceId: result.fbTraceId,
+    data: result.body,
+    accounts: normalizeAdAccounts(result.body?.data),
+  }
+}
+
+export async function fetchMetaProfileForTenant(params: {
+  tenantId: string
+  userId?: string
+  route?: string
+  state?: string
+}) {
+  const accessToken = await resolveAccessToken(params.tenantId)
+  if (!accessToken) {
+    throw new Error('No Meta access token available for tenant.')
+  }
+
+  const result = await fetchMetaProfileWithToken({
+    accessToken,
+    context: {
+      route: params.route ?? 'api.meta',
+      action: 'fetch_me',
+      tenantId: params.tenantId,
+      userId: params.userId,
+      state: params.state,
+      endpoint: '/me',
+    },
+  })
+
+  return result
 }
 
 export async function fetchMetaInsightsDaily(params: {
@@ -956,6 +1107,7 @@ export async function fetchMetaInsightsDaily(params: {
         route: 'meta.insights',
         action: 'fetch_insights_daily',
         tenantId: params.tenantId,
+        endpoint: `/${params.adAccountId}/insights`,
       },
     },
   )
