@@ -1,351 +1,983 @@
-import { randomBytes } from 'crypto';
+import { randomBytes } from 'crypto'
 
-import { getSupabaseServiceClient } from '@/lib/supabase/server';
+import { logger } from '@/lib/logger'
+import { getSupabaseServiceClient } from '@/lib/supabase/server'
 
-import { decryptSecret, encryptSecret } from './crypto';
+import { decryptSecret, encryptSecret } from './crypto'
 
-const META_API_VERSION = process.env.META_API_VERSION ?? 'v18.0';
-const META_OAUTH_BASE = `https://www.facebook.com/${META_API_VERSION}/dialog/oauth`;
-const META_TOKEN_ENDPOINT = `https://graph.facebook.com/${META_API_VERSION}/oauth/access_token`;
-const META_APP_ID = process.env.META_APP_ID;
-const META_APP_SECRET = process.env.META_APP_SECRET;
-const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:3000';
+const META_API_VERSION = process.env.META_API_VERSION ?? 'v18.0'
+const META_GRAPH_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+const META_OAUTH_BASE = `https://www.facebook.com/${META_API_VERSION}/dialog/oauth`
+const META_TOKEN_ENDPOINT = `${META_GRAPH_BASE}/oauth/access_token`
+const META_DEBUG_TOKEN_ENDPOINT = 'https://graph.facebook.com/debug_token'
 
-const META_SCOPES = ['ads_read', 'ads_management', 'business_management'];
+const META_APP_ID = process.env.META_APP_ID
+const META_APP_SECRET = process.env.META_APP_SECRET
+const META_SYSTEM_USER_TOKEN = process.env.META_SYSTEM_USER_TOKEN ?? null
+
+const RAW_BASE_URL =
+  process.env.APP_BASE_URL ?? process.env.NEXT_PUBLIC_BASE_URL ?? 'http://localhost:3000'
+const META_REDIRECT_PATH = '/api/oauth/meta/callback'
+
+const META_SCOPES = ['ads_read', 'ads_management', 'business_management']
+const CONNECTION_SOURCE = 'meta'
+const STATE_TTL_MS = 15 * 60 * 1000
 
 type ConnectionRow = {
-  id: string;
-  access_token_enc: Buffer | null;
-  refresh_token_enc: Buffer | null;
-  expires_at: string | null;
-};
+  id: string
+  access_token_enc: Buffer | null
+  refresh_token_enc: Buffer | null
+  expires_at: string | null
+  meta: Record<string, unknown> | null
+}
 
 type TokenResponse = {
-  access_token: string;
-  token_type: string;
-  expires_in?: number;
-  refresh_token?: string;
-};
-
-const META_REDIRECT_PATH = '/api/oauth/meta/callback';
-
-function normalizedBaseUrl() {
-  const base = APP_BASE_URL ?? 'http://localhost:3000';
-  return base.endsWith('/') ? base.slice(0, -1) : base;
+  access_token: string
+  token_type: string
+  expires_in?: number
+  refresh_token?: string
+  granted_scopes?: string[]
 }
 
-function buildRedirectUri() {
-  return `${normalizedBaseUrl()}${META_REDIRECT_PATH}`;
+type MetaApiError = {
+  message?: string
+  type?: string
+  code?: number
+  error_subcode?: number
 }
 
-type MetaAdAccount = {
-  account_id: string;
-  name?: string;
-};
+type MetaAdAccountPayload = {
+  id?: string
+  account_id?: string
+  name?: string
+  currency?: string
+  account_status?: number
+}
 
-async function fetchMetaAdAccounts(accessToken: string): Promise<MetaAdAccount[]> {
-  const url = new URL(`https://graph.facebook.com/${META_API_VERSION}/me/adaccounts`);
-  url.searchParams.set('fields', 'account_id,name');
+type MetaCampaignPayload = {
+  id?: string
+  name?: string
+  status?: string
+  effective_status?: string
+  objective?: string
+  updated_time?: string
+}
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+type MetaInsightPayload = Record<string, unknown>
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Meta ad accounts fetch failed: ${response.status} ${body}`);
+export type NormalizedMetaAdAccount = {
+  id: string
+  account_id: string
+  name?: string
+  currency?: string
+  account_status?: number
+}
+
+type MetaRequestContext = {
+  route: string
+  action: string
+  tenantId: string
+  userId?: string
+  state?: string
+}
+
+type MetaRequestResult<T> = {
+  body: T
+  fbTraceId?: string
+  status: number
+}
+
+function normalizeBaseUrl(raw: string | undefined): string {
+  const fallback = 'http://localhost:3000'
+  if (!raw || raw.trim().length === 0) {
+    return fallback
   }
 
-  const payload = await response.json();
-  if (!Array.isArray(payload?.data)) {
-    return [];
-  }
+  const trimmed = raw.trim()
+  const withProtocol = /^https?:\/\//i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed.replace(/^\/+/, '')}`
 
-  return payload.data
-    .filter((item: any) => typeof item?.account_id === 'string')
-    .map((item: any) => ({
-      account_id: item.account_id as string,
-      name: typeof item?.name === 'string' ? item.name : undefined,
-    }));
+  try {
+    const url = new URL(withProtocol)
+    const base = `${url.protocol}//${url.host}`
+    const pathname = url.pathname.replace(/\/$/, '')
+    return pathname ? `${base}${pathname}` : base
+  } catch (error) {
+    throw new Error(`Invalid APP_BASE_URL/NEXT_PUBLIC_BASE_URL value: ${raw}`)
+  }
+}
+
+const APP_BASE_URL = normalizeBaseUrl(RAW_BASE_URL)
+
+function buildRedirectUri(): string {
+  return `${APP_BASE_URL}${META_REDIRECT_PATH}`
 }
 
 function requireAppCredentials() {
-  if (!META_APP_ID) {
-    throw new Error('Missing META_APP_ID environment variable.');
-  }
-
-  if (!META_APP_SECRET) {
-    throw new Error('Missing META_APP_SECRET environment variable.');
+  if (!META_APP_ID || !META_APP_SECRET) {
+    throw new Error('Missing Meta app credentials. Set META_APP_ID and META_APP_SECRET.')
   }
 }
 
 async function getExistingConnection(tenantId: string): Promise<ConnectionRow | null> {
-  const client = getSupabaseServiceClient();
+  const client = getSupabaseServiceClient()
   const { data, error } = await client
     .from('connections')
-    .select('id, access_token_enc, refresh_token_enc, expires_at')
+    .select('id, access_token_enc, refresh_token_enc, expires_at, meta')
     .eq('tenant_id', tenantId)
-    .eq('source', 'meta')
-    .maybeSingle();
+    .eq('source', CONNECTION_SOURCE)
+    .maybeSingle()
 
   if (error) {
-    throw new Error(`Failed to read Meta connection: ${error.message}`);
+    throw new Error(`Failed to read Meta connection: ${error.message}`)
   }
 
-  return data as ConnectionRow | null;
+  return (data as ConnectionRow) ?? null
+}
+
+function mergeMeta(
+  existing: Record<string, unknown> | null | undefined,
+  updates?: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!updates) {
+    return (existing as Record<string, unknown>) ?? {}
+  }
+
+  return {
+    ...(existing ?? {}),
+    ...updates,
+  }
+}
+
+function hasOwn<T extends object>(obj: T, key: keyof any): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key)
 }
 
 async function upsertConnection(
   tenantId: string,
   payload: {
-    status: string;
-    accessToken?: string;
-    refreshToken?: string | null;
-    expiresAt?: string | null;
-    meta?: Record<string, unknown>;
+    status: string
+    accessToken?: string | null
+    refreshToken?: string | null
+    expiresAt?: string | null
+    meta?: Record<string, unknown>
   },
 ) {
-  const client = getSupabaseServiceClient();
-  const existing = await getExistingConnection(tenantId);
+  const client = getSupabaseServiceClient()
+  const existing = await getExistingConnection(tenantId)
+  const mergedMeta = mergeMeta(existing?.meta as Record<string, unknown> | null, payload.meta)
+  const now = new Date().toISOString()
 
-  const row = {
+  if (existing) {
+    const updates: Record<string, unknown> = {
+      status: payload.status,
+      updated_at: now,
+      meta: mergedMeta,
+    }
+
+    if (hasOwn(payload, 'accessToken')) {
+      updates.access_token_enc = payload.accessToken
+        ? encryptSecret(payload.accessToken)
+        : null
+    }
+
+    if (hasOwn(payload, 'refreshToken')) {
+      updates.refresh_token_enc = payload.refreshToken
+        ? encryptSecret(payload.refreshToken)
+        : null
+    }
+
+    if (hasOwn(payload, 'expiresAt')) {
+      updates.expires_at = payload.expiresAt ?? null
+    }
+
+    const { error } = await client.from('connections').update(updates).eq('id', existing.id)
+
+    if (error) {
+      throw new Error(`Failed to update Meta connection: ${error.message}`)
+    }
+    return
+  }
+
+  const insertRow: Record<string, unknown> = {
     tenant_id: tenantId,
-    source: 'meta',
+    source: CONNECTION_SOURCE,
     status: payload.status,
+    updated_at: now,
+    meta: mergedMeta,
     access_token_enc: payload.accessToken ? encryptSecret(payload.accessToken) : null,
     refresh_token_enc: payload.refreshToken ? encryptSecret(payload.refreshToken) : null,
     expires_at: payload.expiresAt ?? null,
-    meta: payload.meta ?? {},
-  };
-
-  if (existing) {
-    const { error } = await client
-      .from('connections')
-      .update(row)
-      .eq('id', existing.id);
-
-    if (error) {
-      throw new Error(`Failed to update Meta connection: ${error.message}`);
-    }
-    return;
   }
 
-  const { error } = await client.from('connections').insert(row);
+  const { error } = await client.from('connections').insert(insertRow)
   if (error) {
-    throw new Error(`Failed to insert Meta connection: ${error.message}`);
+    throw new Error(`Failed to insert Meta connection: ${error.message}`)
   }
 }
 
-export async function getMetaAuthorizeUrl(tenantId: string) {
-  const state = randomBytes(16).toString('hex');
+function ensureActPrefix(accountId: string): string {
+  return accountId.startsWith('act_') ? accountId : `act_${accountId}`
+}
 
-  if (!META_APP_ID) {
-    const fallbackParams = new URLSearchParams({
-      state,
-      code: 'mock-code',
-    });
-
-    return {
-      url: `${buildRedirectUri()}?${fallbackParams.toString()}`,
-      state,
-    };
+function normalizeAdAccounts(list: MetaAdAccountPayload[] | undefined | null): NormalizedMetaAdAccount[] {
+  if (!Array.isArray(list)) {
+    return []
   }
 
+  const normalized: NormalizedMetaAdAccount[] = []
+
+  for (const item of list) {
+    const rawId =
+      typeof item.account_id === 'string'
+        ? item.account_id
+        : typeof item.id === 'string'
+          ? item.id.replace(/^act_/, '')
+          : null
+
+    if (!rawId) {
+      continue
+    }
+
+    normalized.push({
+      id: ensureActPrefix(item.id ?? rawId),
+      account_id: rawId,
+      name: typeof item.name === 'string' ? item.name : undefined,
+      currency: typeof item.currency === 'string' ? item.currency : undefined,
+      account_status:
+        typeof item.account_status === 'number' ? item.account_status : undefined,
+    })
+  }
+
+  return normalized
+}
+
+function isoDate(date: Date): string {
+  return date.toISOString().slice(0, 10)
+}
+
+async function performMetaRequest<T>(
+  path: string,
+  options: {
+    accessToken: string
+    params?: Record<string, string>
+    context: MetaRequestContext
+  },
+): Promise<MetaRequestResult<T>> {
+  const url = path.startsWith('http')
+    ? new URL(path)
+    : new URL(`${META_GRAPH_BASE}/${path.replace(/^\/+/, '')}`)
+
+  for (const [key, value] of Object.entries(options.params ?? {})) {
+    url.searchParams.set(key, value)
+  }
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${options.accessToken}`,
+    },
+  })
+
+  const fbTraceId = response.headers.get('x-fb-trace-id') ?? undefined
+  const status = response.status
+  const text = await response.text()
+
+  let parsed: any
+  try {
+    parsed = text ? JSON.parse(text) : {}
+  } catch {
+    parsed = text
+  }
+
+  if (!response.ok) {
+    const errorPayload: MetaApiError | undefined =
+      parsed && typeof parsed === 'object' && 'error' in parsed ? (parsed.error as MetaApiError) : undefined
+
+    logger.error(
+      {
+        route: options.context.route,
+        action: options.context.action,
+        tenantId: options.context.tenantId,
+        userId: options.context.userId,
+        state: options.context.state,
+        fb_trace_id: fbTraceId,
+        status,
+        error_code: errorPayload?.code,
+        error_subcode: errorPayload?.error_subcode,
+        error_message:
+          errorPayload?.message ?? (typeof parsed === 'string' ? (parsed as string) : undefined),
+      },
+      'Meta API request failed',
+    )
+
+    throw new Error(
+      errorPayload?.message ?? `Meta API request failed with status ${status}`,
+    )
+  }
+
+  const count =
+    parsed &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { data?: unknown[] }).data)
+      ? ((parsed as { data?: unknown[] }).data?.length ?? 0)
+      : undefined
+
+  logger.info(
+    {
+      route: options.context.route,
+      action: options.context.action,
+      tenantId: options.context.tenantId,
+      userId: options.context.userId,
+      state: options.context.state,
+      fb_trace_id: fbTraceId,
+      status,
+      count,
+    },
+    'Meta API request succeeded',
+  )
+
+  return {
+    body: parsed as T,
+    fbTraceId,
+    status,
+  }
+}
+
+async function exchangeCodeForToken(options: {
+  tenantId: string
+  userId?: string
+  state?: string
+  code: string
+  redirectUri: string
+}) {
+  requireAppCredentials()
+
   const params = new URLSearchParams({
-    client_id: META_APP_ID,
-    redirect_uri: buildRedirectUri(),
+    client_id: META_APP_ID!,
+    client_secret: META_APP_SECRET!,
+    redirect_uri: options.redirectUri,
+    code: options.code,
+  })
+
+  const response = await fetch(`${META_TOKEN_ENDPOINT}?${params.toString()}`)
+  const fbTraceId = response.headers.get('x-fb-trace-id') ?? undefined
+  const status = response.status
+  const text = await response.text()
+
+  let parsed: any
+  try {
+    parsed = text ? JSON.parse(text) : {}
+  } catch {
+    parsed = text
+  }
+
+  if (!response.ok || !parsed?.access_token) {
+    const errorPayload: MetaApiError | undefined =
+      parsed && typeof parsed === 'object' && 'error' in parsed ? (parsed.error as MetaApiError) : undefined
+
+    logger.error(
+      {
+        route: 'meta.oauth',
+        action: 'token_exchange',
+        tenantId: options.tenantId,
+        userId: options.userId,
+        state: options.state,
+        fb_trace_id: fbTraceId,
+        status,
+        error_code: errorPayload?.code,
+        error_subcode: errorPayload?.error_subcode,
+        error_message:
+          errorPayload?.message ?? (typeof parsed === 'string' ? (parsed as string) : undefined),
+      },
+      'Meta token exchange failed',
+    )
+
+    throw new Error(errorPayload?.message ?? 'Meta token exchange failed')
+  }
+
+  logger.info(
+    {
+      route: 'meta.oauth',
+      action: 'token_exchange',
+      tenantId: options.tenantId,
+      userId: options.userId,
+      state: options.state,
+      fb_trace_id: fbTraceId,
+      status,
+    },
+    'Meta token exchange succeeded',
+  )
+
+  return {
+    token: parsed as TokenResponse,
+    fbTraceId,
+  }
+}
+
+async function fetchGrantedScopes(
+  accessToken: string,
+  context: { tenantId: string; userId?: string; state?: string },
+): Promise<string[]> {
+  requireAppCredentials()
+
+  const url = new URL(META_DEBUG_TOKEN_ENDPOINT)
+  url.searchParams.set('input_token', accessToken)
+  url.searchParams.set('access_token', `${META_APP_ID}|${META_APP_SECRET}`)
+
+  const response = await fetch(url.toString())
+  const fbTraceId = response.headers.get('x-fb-trace-id') ?? undefined
+  const status = response.status
+  const text = await response.text()
+
+  let parsed: any
+  try {
+    parsed = text ? JSON.parse(text) : {}
+  } catch {
+    parsed = text
+  }
+
+  if (!response.ok) {
+    const errorPayload: MetaApiError | undefined =
+      parsed && typeof parsed === 'object' && 'error' in parsed ? (parsed.error as MetaApiError) : undefined
+
+    logger.warn(
+      {
+        route: 'meta.oauth',
+        action: 'debug_token',
+        tenantId: context.tenantId,
+        userId: context.userId,
+        state: context.state,
+        fb_trace_id: fbTraceId,
+        status,
+        error_code: errorPayload?.code,
+        error_subcode: errorPayload?.error_subcode,
+        error_message:
+          errorPayload?.message ?? (typeof parsed === 'string' ? (parsed as string) : undefined),
+      },
+      'Meta debug_token request failed',
+    )
+
+    return []
+  }
+
+  const scopes: string[] = Array.isArray(parsed?.data?.scopes)
+    ? parsed.data.scopes.filter((scope: unknown) => typeof scope === 'string')
+    : []
+
+  logger.info(
+    {
+      route: 'meta.oauth',
+      action: 'debug_token',
+      tenantId: context.tenantId,
+      userId: context.userId,
+      state: context.state,
+      fb_trace_id: fbTraceId,
+      status,
+      count: scopes.length,
+    },
+    'Meta granted scopes fetched',
+  )
+
+  return scopes
+}
+
+async function fetchMetaAdAccountsWithToken(options: {
+  accessToken: string
+  context: MetaRequestContext
+}) {
+  const result = await performMetaRequest<{ data?: MetaAdAccountPayload[] }>('me/adaccounts', {
+    accessToken: options.accessToken,
+    params: {
+      fields: 'id,account_id,name,currency,account_status',
+      limit: '100',
+    },
+    context: options.context,
+  })
+
+  return {
+    accounts: normalizeAdAccounts(result.body?.data),
+    raw: result.body,
+    fbTraceId: result.fbTraceId,
+  }
+}
+
+async function fetchMetaCampaignsWithToken(options: {
+  accessToken: string
+  adAccountId: string
+  context: MetaRequestContext
+}) {
+  const result = await performMetaRequest<{ data?: MetaCampaignPayload[] }>(
+    `${options.adAccountId}/campaigns`,
+    {
+      accessToken: options.accessToken,
+      params: {
+        fields: 'id,name,status,effective_status,objective,updated_time',
+        limit: '50',
+      },
+      context: options.context,
+    },
+  )
+
+  return {
+    campaigns: Array.isArray(result.body?.data) ? result.body.data : [],
+    fbTraceId: result.fbTraceId,
+  }
+}
+
+async function fetchMetaInsightsWithToken(options: {
+  accessToken: string
+  adAccountId: string
+  context: MetaRequestContext
+  days?: number
+}) {
+  const days = options.days ?? 7
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+  const until = new Date()
+
+  const result = await performMetaRequest<{ data?: MetaInsightPayload[] }>(
+    `${options.adAccountId}/insights`,
+    {
+      accessToken: options.accessToken,
+      params: {
+        fields:
+          'date_start,date_stop,campaign_id,campaign_name,spend,impressions,clicks,actions,action_values',
+        time_range: JSON.stringify({ since: isoDate(since), until: isoDate(until) }),
+        level: 'campaign',
+        limit: '100',
+      },
+      context: options.context,
+    },
+  )
+
+  return {
+    insights: Array.isArray(result.body?.data) ? result.body.data : [],
+    fbTraceId: result.fbTraceId,
+    timeRange: { since: isoDate(since), until: isoDate(until) },
+  }
+}
+
+async function resolveAccessToken(tenantId: string): Promise<string | null> {
+  const directToken = await getMetaAccessToken(tenantId)
+  if (directToken) {
+    return directToken
+  }
+
+  if (META_SYSTEM_USER_TOKEN) {
+    logger.warn(
+      {
+        route: 'meta.access_token',
+        action: 'fallback_system_user_token',
+        tenantId,
+      },
+      'Falling back to META_SYSTEM_USER_TOKEN for Meta API request',
+    )
+    return META_SYSTEM_USER_TOKEN
+  }
+
+  return null
+}
+
+export async function getMetaAuthorizeUrl(tenantId: string) {
+  requireAppCredentials()
+
+  const state = randomBytes(16).toString('hex')
+  const redirectUri = buildRedirectUri()
+
+  const params = new URLSearchParams({
+    client_id: META_APP_ID!,
+    redirect_uri: redirectUri,
     response_type: 'code',
     scope: META_SCOPES.join(','),
     display: 'page',
     auth_type: 'rerequest',
     state,
-  });
+  })
+
+  logger.info(
+    {
+      route: 'meta.oauth',
+      action: 'build_auth_url',
+      tenantId,
+      state,
+      redirect_uri: redirectUri,
+      scopes: META_SCOPES.join(','),
+    },
+    'Meta auth URL generated',
+  )
 
   return {
     url: `${META_OAUTH_BASE}?${params.toString()}`,
     state,
-  };
+  }
 }
 
 export async function handleMetaOAuthCallback(options: {
-  tenantId: string;
-  code: string;
-  state: string;
+  tenantId: string
+  code: string
+  state: string
+  userId?: string
 }) {
-  const redirectUri = buildRedirectUri();
+  requireAppCredentials()
 
-  let tokenResponse: TokenResponse | null = null;
+  logger.info(
+    {
+      route: 'meta.oauth',
+      action: 'callback_received',
+      tenantId: options.tenantId,
+      userId: options.userId,
+      state: options.state,
+    },
+    'Meta OAuth callback received',
+  )
 
-  if (META_APP_ID && META_APP_SECRET) {
+  const redirectUri = buildRedirectUri()
+  const { token, fbTraceId: tokenTraceId } = await exchangeCodeForToken({
+    tenantId: options.tenantId,
+    userId: options.userId,
+    state: options.state,
+    code: options.code,
+    redirectUri,
+  })
+
+  const grantedScopes =
+    token.granted_scopes ??
+    (await fetchGrantedScopes(token.access_token, {
+      tenantId: options.tenantId,
+      userId: options.userId,
+      state: options.state,
+    }))
+
+  let accounts: NormalizedMetaAdAccount[] = []
+  let adAccountsTraceId: string | undefined
+  let accountsError: string | null = null
+
+  try {
+    const { accounts: normalized, fbTraceId } = await fetchMetaAdAccountsWithToken({
+      accessToken: token.access_token,
+      context: {
+        route: 'meta.oauth',
+        action: 'fetch_adaccounts',
+        tenantId: options.tenantId,
+        userId: options.userId,
+        state: options.state,
+      },
+    })
+    accounts = normalized
+    adAccountsTraceId = fbTraceId
+  } catch (error) {
+    accountsError = error instanceof Error ? error.message : String(error)
+    logger.error(
+      {
+        route: 'meta.oauth',
+        action: 'fetch_adaccounts',
+        tenantId: options.tenantId,
+        userId: options.userId,
+        state: options.state,
+        error_message: accountsError,
+      },
+      'Meta ad accounts fetch failed during OAuth callback',
+    )
+  }
+
+  const selectedAccountId = accounts[0]?.id ?? null
+
+  let campaigns: MetaCampaignPayload[] = []
+  let campaignsTraceId: string | undefined
+  let campaignsError: string | null = null
+
+  let insights: MetaInsightPayload[] = []
+  let insightsTraceId: string | undefined
+  let insightsError: string | null = null
+  let insightsRange: { since: string; until: string } | undefined
+
+  if (selectedAccountId) {
     try {
-      const params = new URLSearchParams({
-        client_id: META_APP_ID,
-        client_secret: META_APP_SECRET,
-        redirect_uri: redirectUri,
-        code: options.code,
-      });
-
-      const res = await fetch(`${META_TOKEN_ENDPOINT}?${params.toString()}`, {
-        method: 'GET',
-      });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Meta token exchange failed: ${res.status} ${body}`);
-      }
-
-      tokenResponse = (await res.json()) as TokenResponse;
+      const campaignResult = await fetchMetaCampaignsWithToken({
+        accessToken: token.access_token,
+        adAccountId: selectedAccountId,
+        context: {
+          route: 'meta.oauth',
+          action: 'fetch_campaigns',
+          tenantId: options.tenantId,
+          userId: options.userId,
+          state: options.state,
+        },
+      })
+      campaigns = campaignResult.campaigns.slice(0, 50)
+      campaignsTraceId = campaignResult.fbTraceId
     } catch (error) {
-      console.error('Meta token exchange failed, falling back to mock tokens.', error);
+      campaignsError = error instanceof Error ? error.message : String(error)
+      logger.error(
+        {
+          route: 'meta.oauth',
+          action: 'fetch_campaigns',
+          tenantId: options.tenantId,
+          userId: options.userId,
+          state: options.state,
+          error_message: campaignsError,
+        },
+        'Meta campaigns fetch failed during OAuth callback',
+      )
+    }
+
+    try {
+      const insightsResult = await fetchMetaInsightsWithToken({
+        accessToken: token.access_token,
+        adAccountId: selectedAccountId,
+        context: {
+          route: 'meta.oauth',
+          action: 'fetch_insights',
+          tenantId: options.tenantId,
+          userId: options.userId,
+          state: options.state,
+        },
+      })
+      insights = insightsResult.insights.slice(0, 50)
+      insightsTraceId = insightsResult.fbTraceId
+      insightsRange = insightsResult.timeRange
+    } catch (error) {
+      insightsError = error instanceof Error ? error.message : String(error)
+      logger.error(
+        {
+          route: 'meta.oauth',
+          action: 'fetch_insights',
+          tenantId: options.tenantId,
+          userId: options.userId,
+          state: options.state,
+          error_message: insightsError,
+        },
+        'Meta insights fetch failed during OAuth callback',
+      )
     }
   }
 
-  if (!tokenResponse) {
-    // Mock tokens for local development when credentials are not configured.
-    tokenResponse = {
-      access_token: `mock-meta-access-token-${options.tenantId}`,
-      token_type: 'bearer',
-      expires_in: 60 * 60 * 2,
-      refresh_token: `mock-meta-refresh-token-${options.tenantId}`,
-    };
-  }
-
-  const expiresAt = tokenResponse.expires_in
-    ? new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString()
-    : null;
-
-  let accounts: MetaAdAccount[] = [];
-  let accountsFetchError: string | null = null;
-  try {
-    accounts = await fetchMetaAdAccounts(tokenResponse.access_token);
-  } catch (error) {
-    accountsFetchError = error instanceof Error ? error.message : String(error);
-    console.error('Failed to fetch Meta ad accounts', accountsFetchError);
-  }
-
-  const selectedAccountId = accounts[0]?.account_id ?? null;
+  const expiresAt = token.expires_in
+    ? new Date(Date.now() + token.expires_in * 1000).toISOString()
+    : null
+  const now = new Date().toISOString()
 
   await upsertConnection(options.tenantId, {
     status: 'connected',
-    accessToken: tokenResponse.access_token,
-    refreshToken: tokenResponse.refresh_token ?? null,
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token ?? null,
     expiresAt,
     meta: {
-      token_type: tokenResponse.token_type,
-      accounts,
+      token_type: token.token_type,
+      granted_scopes: grantedScopes,
+      oauth_state: null,
+      oauth_state_created_at: null,
+      connected_at: now,
+      last_synced_at: now,
+      ad_accounts: accounts,
+      accounts_error: accountsError,
       selected_account_id: selectedAccountId,
-      accounts_error: accountsFetchError,
-      // TODO: store key version when encryption rotation is implemented.
+      campaigns_snapshot: campaigns,
+      campaigns_error: campaignsError,
+      insights_snapshot: insights,
+      insights_error: insightsError,
+      insights_time_range: insightsRange,
+      fb_trace_ids: {
+        token: tokenTraceId,
+        ad_accounts: adAccountsTraceId,
+        campaigns: campaignsTraceId,
+        insights: insightsTraceId,
+      },
     },
-  });
+  })
+
+  logger.info(
+    {
+      route: 'meta.oauth',
+      action: 'callback_complete',
+      tenantId: options.tenantId,
+      userId: options.userId,
+      state: options.state,
+      selected_account_id: selectedAccountId,
+    },
+    'Meta OAuth callback completed successfully',
+  )
 }
 
 export async function refreshMetaTokenIfNeeded(tenantId: string) {
-  const connection = await getExistingConnection(tenantId);
+  requireAppCredentials()
+
+  const connection = await getExistingConnection(tenantId)
 
   if (!connection) {
-    throw new Error('Meta connection not found.');
+    throw new Error('Meta connection not found.')
   }
 
   if (!connection.expires_at || !connection.refresh_token_enc) {
-    return;
+    return
   }
 
-  const expiresAt = new Date(connection.expires_at).getTime();
-
-  // Refresh token if less than 5 minutes remaining.
-  if (Date.now() < expiresAt - 5 * 60 * 1000) {
-    return;
+  const expiresAt = new Date(connection.expires_at).getTime()
+  if (Number.isNaN(expiresAt) || Date.now() < expiresAt - 5 * 60 * 1000) {
+    return
   }
 
-  if (!META_APP_SECRET) {
-    console.warn('Missing META_APP_SECRET; skipping token refresh.');
-    return;
-  }
-
-  const refreshToken = decryptSecret(connection.refresh_token_enc);
+  const refreshToken = decryptSecret(connection.refresh_token_enc)
   if (!refreshToken) {
-    console.warn('Meta refresh token is unavailable.');
-    return;
+    logger.warn(
+      {
+        route: 'meta.oauth',
+        action: 'token_refresh',
+        tenantId,
+      },
+      'Refresh token missing; skipping Meta token refresh',
+    )
+    return
   }
 
   const params = new URLSearchParams({
     grant_type: 'fb_exchange_token',
     client_id: META_APP_ID!,
-    client_secret: META_APP_SECRET,
+    client_secret: META_APP_SECRET!,
     fb_exchange_token: refreshToken,
-  });
+  })
 
-  const res = await fetch(`${META_TOKEN_ENDPOINT}?${params.toString()}`, {
-    method: 'GET',
-  });
+  const response = await fetch(`${META_TOKEN_ENDPOINT}?${params.toString()}`)
+  const status = response.status
+  const text = await response.text()
+  const fbTraceId = response.headers.get('x-fb-trace-id') ?? undefined
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Meta token refresh failed: ${res.status} ${body}`);
+  let parsed: any
+  try {
+    parsed = text ? JSON.parse(text) : {}
+  } catch {
+    parsed = text
   }
 
-  const body = (await res.json()) as TokenResponse;
-  const newExpiresAt = body.expires_in
-    ? new Date(Date.now() + body.expires_in * 1000).toISOString()
-    : null;
+  if (!response.ok || !parsed?.access_token) {
+    const errorPayload: MetaApiError | undefined =
+      parsed && typeof parsed === 'object' && 'error' in parsed ? (parsed.error as MetaApiError) : undefined
+
+    logger.error(
+      {
+        route: 'meta.oauth',
+        action: 'token_refresh',
+        tenantId,
+        fb_trace_id: fbTraceId,
+        status,
+        error_code: errorPayload?.code,
+        error_subcode: errorPayload?.error_subcode,
+        error_message:
+          errorPayload?.message ?? (typeof parsed === 'string' ? (parsed as string) : undefined),
+      },
+      'Meta token refresh failed',
+    )
+
+    throw new Error(errorPayload?.message ?? 'Meta token refresh failed')
+  }
+
+  const expiresAtIso = parsed.expires_in
+    ? new Date(Date.now() + parsed.expires_in * 1000).toISOString()
+    : null
 
   await upsertConnection(tenantId, {
     status: 'connected',
-    accessToken: body.access_token,
+    accessToken: parsed.access_token,
     refreshToken,
-    expiresAt: newExpiresAt,
-  });
+    expiresAt: expiresAtIso,
+  })
+
+  logger.info(
+    {
+      route: 'meta.oauth',
+      action: 'token_refresh',
+      tenantId,
+      fb_trace_id: fbTraceId,
+      status,
+    },
+    'Meta token refresh succeeded',
+  )
 }
 
 export async function getMetaAccessToken(tenantId: string): Promise<string | null> {
-  const connection = await getExistingConnection(tenantId);
+  const connection = await getExistingConnection(tenantId)
   if (!connection) {
-    return null;
+    return null
   }
 
-  return decryptSecret(connection.access_token_enc);
+  return decryptSecret(connection.access_token_enc)
+}
+
+export async function fetchMetaAdAccountsForTenant(params: {
+  tenantId: string
+  userId?: string
+  route?: string
+  state?: string
+}) {
+  const accessToken = await resolveAccessToken(params.tenantId)
+  if (!accessToken) {
+    throw new Error('No Meta access token available for tenant.')
+  }
+
+  const result = await fetchMetaAdAccountsWithToken({
+    accessToken,
+    context: {
+      route: params.route ?? 'api.meta',
+      action: 'fetch_adaccounts',
+      tenantId: params.tenantId,
+      userId: params.userId,
+      state: params.state,
+    },
+  })
+
+  return result.raw
 }
 
 export async function fetchMetaInsightsDaily(params: {
-  tenantId: string;
-  adAccountId: string;
-  startDate: string;
-  endDate: string;
+  tenantId: string
+  adAccountId: string
+  startDate: string
+  endDate: string
 }) {
-  const accessToken = await getMetaAccessToken(params.tenantId);
+  const accessToken = await resolveAccessToken(params.tenantId)
+  if (!accessToken) {
+    throw new Error('No Meta access token available for tenant.')
+  }
 
-  if (!accessToken || !META_APP_SECRET) {
-    // Local development fallback payload.
-    return [
-      {
-        date: params.startDate,
-        spend: 123.45,
-        impressions: 1000,
-        clicks: 120,
-        purchases: 4,
-        revenue: 420.67,
+  const result = await performMetaRequest<{ data?: MetaInsightPayload[] }>(
+    `${params.adAccountId}/insights`,
+    {
+      accessToken,
+      params: {
+        fields: 'date_start,date_stop,spend,impressions,clicks,actions,action_values',
+        time_range: JSON.stringify({
+          since: params.startDate,
+          until: params.endDate,
+        }),
+        level: 'ad',
+        limit: '100',
       },
-    ];
-  }
+      context: {
+        route: 'meta.insights',
+        action: 'fetch_insights_daily',
+        tenantId: params.tenantId,
+      },
+    },
+  )
 
-  const url = new URL(
-    `https://graph.facebook.com/${META_API_VERSION}/${params.adAccountId}/insights`,
-  );
-  url.searchParams.set('access_token', accessToken);
-  url.searchParams.set('time_range', JSON.stringify({ since: params.startDate, until: params.endDate }));
-  url.searchParams.set('level', 'ad');
-  url.searchParams.set('fields', ['spend', 'impressions', 'clicks', 'purchases', 'purchase_value'].join(','));
-
-  const response = await fetch(url);
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Meta insights fetch failed: ${response.status} ${body}`);
-  }
-
-  const body = await response.json();
-  return body.data ?? [];
+  return Array.isArray(result.body?.data) ? result.body.data : []
 }
 
+export function isMetaStateExpired(meta: Record<string, unknown> | null | undefined): boolean {
+  const raw =
+    meta && typeof meta === 'object'
+      ? (meta as Record<string, unknown>)['oauth_state_created_at']
+      : null
+  const createdAt = typeof raw === 'string' ? raw : null
+
+  if (!createdAt) {
+    return true
+  }
+
+  const createdMs = new Date(createdAt).getTime()
+  if (Number.isNaN(createdMs)) {
+    return true
+  }
+
+  return Date.now() - createdMs > STATE_TTL_MS
+}

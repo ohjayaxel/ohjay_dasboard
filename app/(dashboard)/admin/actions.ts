@@ -8,6 +8,7 @@ import { requirePlatformAdmin } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
+import { logger } from '@/lib/logger'
 
 const roleEnum = z.enum([
   Roles.platformAdmin,
@@ -249,7 +250,7 @@ export async function createTenant(formData: FormData) {
 }
 
 export async function startMetaConnect(payload: { tenantId: string; tenantSlug: string }) {
-  await requirePlatformAdmin()
+  const user = await requirePlatformAdmin()
 
   const result = connectMetaSchema.safeParse(payload)
 
@@ -316,6 +317,19 @@ export async function startMetaConnect(payload: { tenantId: string; tenantSlug: 
   }
 
   await revalidateTenantViews(tenantId, tenantSlug)
+
+  logger.info(
+    {
+      route: 'admin.meta',
+      action: 'connect_initiated',
+      tenantId,
+      tenantSlug,
+      userId: user.id,
+      state,
+      redirect_url: url,
+    },
+    'Meta connect initiated',
+  )
 
   return {
     redirectUrl: url,

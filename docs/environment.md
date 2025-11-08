@@ -11,11 +11,12 @@ Reference `env.example` for the full list. Configure values in Vercel → Settin
 
 Core variables:
 
-- `APP_BASE_URL` — primary domain (e.g. `https://dev.orangejuice.app`, `https://app.orangejuice.app`).
+- `NEXT_PUBLIC_BASE_URL` — canonical domain with protocol (e.g. `https://dev.orangejuice.app`).
+- `APP_BASE_URL` — optional server-only override; falls back to `NEXT_PUBLIC_BASE_URL` when omitted.
 - `APP_ENV` — `development` or `production`; surfaces in dashboards and Sentry.
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` — public keys for the targeted Supabase project.
 - `SUPABASE_SERVICE_ROLE_KEY` — service role (server-only). Never expose to clients.
-- Provider credentials (`META_*`, `GOOGLE_*`, `SHOPIFY_*`) — separate dev/prod apps where possible.
+- Provider credentials (`META_*`, `GOOGLE_*`, `SHOPIFY_*`) — separate dev/prod apps where possible. Ensure Meta redirect URL exactly matches `${NEXT_PUBLIC_BASE_URL}/api/oauth/meta/callback` in the Facebook App settings.
 - `ENCRYPTION_KEY` — 32-byte key (rotate per environment; track version in `connections.meta`).
 - `SENTRY_DSN`, `SENTRY_ENVIRONMENT` — optional, server-only.
 - `RATE_LIMIT_REDIS_URL`, `RATE_LIMIT_REDIS_TOKEN` — optional, used when Upstash/Redis is configured.

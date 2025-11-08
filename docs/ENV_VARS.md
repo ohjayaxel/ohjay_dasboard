@@ -7,10 +7,13 @@ This project requires separate configuration for development and production. Use
 | `NEXT_PUBLIC_SUPABASE_URL` | Client & Server | Supabase REST base URL (public) | Supabase Dashboard → Settings → API |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Client | Public anon key for Supabase Auth | Supabase Dashboard → Settings → API |
 | `SUPABASE_SERVICE_ROLE_KEY` | Server only | Service role key for migrations, Edge Functions | Supabase Dashboard → Settings → API |
-| `APP_BASE_URL` | Server | Base URL used for OAuth redirects and emails | Vercel project domain |
+| `NEXT_PUBLIC_BASE_URL` | Client & Server | Canonical base URL for OAuth redirects (must include protocol) | Vercel project domain |
+| `APP_BASE_URL` | Server (optional) | Server-only override for the base URL (falls back to `NEXT_PUBLIC_BASE_URL`) | Vercel project domain |
 | `APP_ENV` | Both | Environment indicator (`development`/`production`) | Set manually |
 | `META_APP_ID` | Server | Meta OAuth App ID | Meta for Developers → App Dashboard |
 | `META_APP_SECRET` | Server | Meta OAuth App Secret | Meta for Developers → App Dashboard |
+| `META_API_VERSION` | Server | Graph API version to target (default `v18.0`) | Meta for Developers → Graph API Changelog |
+| `META_SYSTEM_USER_TOKEN` | Server (optional) | System user token used when tenant token is unavailable | Meta Business Manager → System Users |
 | `META_DEV_ACCESS_TOKEN` | Server (optional, dev) | Development override token for Meta Marketing API calls | Meta for Developers → Marketing API Tools |
 | `META_DEV_AD_ACCOUNT_ID` | Server (optional, dev) | Ad account ID used with `META_DEV_ACCESS_TOKEN` | Meta Business Manager → Ad Accounts |
 | `GOOGLE_CLIENT_ID` | Server | Google Ads OAuth Client ID | Google Cloud Console |
