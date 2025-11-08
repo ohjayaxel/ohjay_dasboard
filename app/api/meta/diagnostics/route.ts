@@ -39,6 +39,11 @@ type DiagnosticsResult = {
     request_id_policy: string
   }
   recommendations: Record<string, string[]>
+  meta_app_config?: {
+    app_domains?: string[]
+    site_url?: string | null
+    fetch_error?: string
+  }
   notes?: string[]
 }
 
@@ -139,6 +144,37 @@ export async function GET(request: NextRequest) {
       result.notes = [
         'Redirect URI could not be computed. Validate NEXT_PUBLIC_BASE_URL / APP_BASE_URL.',
       ]
+    }
+
+    if (process.env.META_APP_ID && process.env.META_APP_SECRET) {
+      const apiVersion = process.env.META_API_VERSION ?? 'v18.0'
+      const appToken = `${process.env.META_APP_ID}|${process.env.META_APP_SECRET}`
+      try {
+        const response = await fetch(
+          `https://graph.facebook.com/${apiVersion}/${process.env.META_APP_ID}?fields=app_domains,website_url&access_token=${encodeURIComponent(appToken)}`,
+        )
+
+        if (!response.ok) {
+          const body = await response.text()
+          result.meta_app_config = {
+            fetch_error: `Failed to fetch app config: ${response.status} ${body}`,
+          }
+        } else {
+          const payload = (await response.json()) as {
+            app_domains?: string[]
+            website_url?: string | null
+          }
+          result.meta_app_config = {
+            app_domains: payload.app_domains ?? [],
+            site_url: payload.website_url ?? null,
+          }
+        }
+      } catch (error) {
+        result.meta_app_config = {
+          fetch_error:
+            error instanceof Error ? error.message : 'Unknown error retrieving app config',
+        }
+      }
     }
 
     logger.info(
