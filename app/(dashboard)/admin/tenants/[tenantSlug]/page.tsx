@@ -104,9 +104,14 @@ export default async function AdminTenantDetailPage(props: PageProps) {
           <h1 className="text-2xl font-semibold leading-tight">{tenant.name}</h1>
           <p className="text-sm text-muted-foreground">/{tenant.slug}</p>
         </div>
-        <Button asChild variant="outline">
-          <Link href="/admin">← Back to all tenants</Link>
-        </Button>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Button asChild variant="default">
+            <Link href={`/t/${tenant.slug}`}>Open {tenant.name}</Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/admin">← Back to all tenants</Link>
+          </Button>
+        </div>
       </div>
 
       <Card>
