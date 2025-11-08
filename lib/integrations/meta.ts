@@ -28,9 +28,13 @@ type TokenResponse = {
 
 const META_REDIRECT_PATH = '/api/oauth/meta/callback';
 
+function normalizedBaseUrl() {
+  const base = APP_BASE_URL ?? 'http://localhost:3000';
+  return base.endsWith('/') ? base.slice(0, -1) : base;
+}
+
 function buildRedirectUri() {
-  // TODO: allow environment override for custom redirect URI per deployment.
-  return `${APP_BASE_URL}${META_REDIRECT_PATH}`;
+  return `${normalizedBaseUrl()}${META_REDIRECT_PATH}`;
 }
 
 function requireAppCredentials() {

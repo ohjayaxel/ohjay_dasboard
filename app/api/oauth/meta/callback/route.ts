@@ -45,12 +45,14 @@ export async function GET(request: NextRequest) {
       state,
     })
   } catch (error) {
-    console.error('Meta OAuth callback failed:', error)
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    console.error('Meta OAuth callback failed:', errorMessage)
     const errorUrl = new URL(redirectPath, url.origin)
     errorUrl.searchParams.set(
       'error',
       'Meta authorization failed. Please verify credentials and try connecting again.',
     )
+    errorUrl.searchParams.set('error_detail', errorMessage)
     return NextResponse.redirect(errorUrl)
   }
 
