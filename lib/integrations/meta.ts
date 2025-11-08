@@ -124,6 +124,8 @@ export async function getMetaAuthorizeUrl(tenantId: string) {
     redirect_uri: buildRedirectUri(),
     response_type: 'code',
     scope: META_SCOPES.join(','),
+    display: 'page',
+    auth_type: 'rerequest',
     state,
   });
 
