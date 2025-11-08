@@ -11,7 +11,7 @@ const META_APP_ID = process.env.META_APP_ID;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:3000';
 
-const META_SCOPES = ['ads_read'];
+const META_SCOPES = ['ads_read', 'ads_management', 'business_management'];
 
 type ConnectionRow = {
   id: string;
@@ -217,10 +217,12 @@ export async function handleMetaOAuthCallback(options: {
     : null;
 
   let accounts: MetaAdAccount[] = [];
+  let accountsFetchError: string | null = null;
   try {
     accounts = await fetchMetaAdAccounts(tokenResponse.access_token);
   } catch (error) {
-    console.error('Failed to fetch Meta ad accounts', error);
+    accountsFetchError = error instanceof Error ? error.message : String(error);
+    console.error('Failed to fetch Meta ad accounts', accountsFetchError);
   }
 
   const selectedAccountId = accounts[0]?.account_id ?? null;
@@ -234,6 +236,7 @@ export async function handleMetaOAuthCallback(options: {
       token_type: tokenResponse.token_type,
       accounts,
       selected_account_id: selectedAccountId,
+      accounts_error: accountsFetchError,
       // TODO: store key version when encryption rotation is implemented.
     },
   });

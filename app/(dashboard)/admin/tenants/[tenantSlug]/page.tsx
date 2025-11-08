@@ -74,6 +74,10 @@ export default async function AdminTenantDetailPage(props: PageProps) {
     typeof metaDetails.selected_account_id === 'string' ? (metaDetails.selected_account_id as string) : null
   const selectedMetaAccountName =
     metaAccounts.find((account) => account.id === selectedMetaAccountId)?.name ?? selectedMetaAccountId ?? 'Not set'
+  const metaAccountsError =
+    typeof metaDetails.accounts_error === 'string' && metaDetails.accounts_error.length > 0
+      ? (metaDetails.accounts_error as string)
+      : null
   const formatTimestamp = (value?: string | null) => {
     if (!value) return null
     try {
@@ -191,10 +195,17 @@ export default async function AdminTenantDetailPage(props: PageProps) {
               </Button>
             </form>
           ) : (
-            <p className="text-sm text-muted-foreground">
-              No ad accounts were returned for this user. Reconnect Meta or verify that the user has access to the desired
-              ad account.
-            </p>
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">
+                No ad accounts were returned for this user. Reconnect Meta or verify that the user has access to the desired
+                ad account.
+              </p>
+              {metaAccountsError && (
+                <p className="text-sm text-destructive">
+                  Meta API response: <span className="font-mono">{metaAccountsError}</span>
+                </p>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>
