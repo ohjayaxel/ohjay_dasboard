@@ -8,6 +8,13 @@ alter table google_insights_daily enable row level security;
 alter table shopify_orders enable row level security;
 alter table kpi_daily enable row level security;
 alter table jobs_log enable row level security;
+alter table meta_ad_accounts enable row level security;
+alter table meta_insights_fact enable row level security;
+alter table google_ads_customers enable row level security;
+alter table google_insights_fact enable row level security;
+alter table shopify_shops enable row level security;
+alter table shopify_orders_fact enable row level security;
+alter table metrics_daily enable row level security;
 
 create or replace function is_member_of(tenant uuid)
 returns boolean language sql stable as $$
@@ -48,7 +55,14 @@ begin
     'google_insights_daily'::regclass,
     'shopify_orders'::regclass,
     'kpi_daily'::regclass,
-    'jobs_log'::regclass
+    'jobs_log'::regclass,
+    'meta_ad_accounts'::regclass,
+    'meta_insights_fact'::regclass,
+    'google_ads_customers'::regclass,
+    'google_insights_fact'::regclass,
+    'shopify_shops'::regclass,
+    'shopify_orders_fact'::regclass,
+    'metrics_daily'::regclass
   ]) loop
     execute format($f$
       create policy %I_read on %s
@@ -66,7 +80,14 @@ begin
     'google_insights_daily'::regclass,
     'shopify_orders'::regclass,
     'kpi_daily'::regclass,
-    'jobs_log'::regclass
+    'jobs_log'::regclass,
+    'meta_ad_accounts'::regclass,
+    'meta_insights_fact'::regclass,
+    'google_ads_customers'::regclass,
+    'google_insights_fact'::regclass,
+    'shopify_shops'::regclass,
+    'shopify_orders_fact'::regclass,
+    'metrics_daily'::regclass
   ]) loop
     execute format($f$
       create policy %I_write on %s
