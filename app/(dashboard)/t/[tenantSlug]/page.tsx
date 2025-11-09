@@ -1,9 +1,7 @@
-import Link from 'next/link'
-
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import { getKpiDaily, type KpiSeriesPoint, type KpiTotals } from '@/lib/data/agg'
 import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
+import { OverviewFilters } from '@/components/tenant/overview-filters'
 
 export const revalidate = 60
 
@@ -17,6 +15,7 @@ type MetricKey = 'spend' | 'revenue' | 'conversions' | 'clicks' | 'roas' | 'cos'
 type MetricDefinition = {
   key: MetricKey
   label: string
+  description?: string
   format: (value: number | null) => string
   extractTotal: (totals: KpiTotals) => number | null
   extractPoint: (point: KpiSeriesPoint) => number | null
@@ -80,6 +79,7 @@ export default async function TenantOverviewPage(props: PageProps) {
     {
       key: 'spend',
       label: 'Spend',
+      description: 'Total advertising spend',
       format: formatCurrency,
       extractTotal: (value) => value.spend,
       extractPoint: (point) => point.spend,
@@ -87,6 +87,7 @@ export default async function TenantOverviewPage(props: PageProps) {
     {
       key: 'revenue',
       label: 'Revenue',
+      description: 'Attributed revenue',
       format: formatCurrency,
       extractTotal: (value) => value.revenue,
       extractPoint: (point) => point.revenue,
@@ -94,6 +95,7 @@ export default async function TenantOverviewPage(props: PageProps) {
     {
       key: 'conversions',
       label: 'Conversions',
+      description: 'Total orders or conversions',
       format: (value) => formatNumber(value),
       extractTotal: (value) => value.conversions,
       extractPoint: (point) => point.conversions,
@@ -101,6 +103,7 @@ export default async function TenantOverviewPage(props: PageProps) {
     {
       key: 'clicks',
       label: 'Clicks',
+      description: 'Total ad clicks',
       format: (value) => formatNumber(value),
       extractTotal: (value) => value.clicks,
       extractPoint: (point) => point.clicks,
@@ -108,6 +111,7 @@ export default async function TenantOverviewPage(props: PageProps) {
     {
       key: 'roas',
       label: 'ROAS',
+      description: 'Return on ad spend',
       format: formatRatio,
       extractTotal: (value) => value.roas,
       extractPoint: (point) => point.roas,
@@ -115,6 +119,7 @@ export default async function TenantOverviewPage(props: PageProps) {
     {
       key: 'cos',
       label: 'COS',
+      description: 'Cost of sale (spend / revenue)',
       format: formatRatio,
       extractTotal: (value) => value.cos,
       extractPoint: (point) => point.cos,
@@ -138,60 +143,17 @@ export default async function TenantOverviewPage(props: PageProps) {
           <CardTitle className="text-sm font-semibold text-muted-foreground">Filters</CardTitle>
         </CardHeader>
         <CardContent>
-          <form method="get" className="grid gap-4 md:grid-cols-12">
-            <div className="space-y-2 md:col-span-3">
-              <label htmlFor="from" className="text-sm font-medium text-muted-foreground">
-                From
-              </label>
-              <input
-                id="from"
-                name="from"
-                type="date"
-                defaultValue={from}
-                className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              />
-            </div>
-            <div className="space-y-2 md:col-span-3">
-              <label htmlFor="to" className="text-sm font-medium text-muted-foreground">
-                To
-              </label>
-              <input
-                id="to"
-                name="to"
-                type="date"
-                defaultValue={to}
-                className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              />
-            </div>
-            <fieldset className="space-y-2 md:col-span-4">
-              <legend className="text-sm font-medium text-muted-foreground">KPIs</legend>
-              <div className="grid grid-cols-2 gap-2 text-sm text-muted-foreground">
-                {metricDefinitions.map((metric) => (
-                  <label
-                    key={metric.key}
-                    className="flex items-center gap-2 rounded-md border border-input bg-background px-3 py-2"
-                  >
-                    <input
-                      type="checkbox"
-                      name="metric"
-                      value={metric.key}
-                      defaultChecked={selectedMetricKeys.includes(metric.key)}
-                      className="h-4 w-4 rounded border border-input text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    />
-                    <span>{metric.label}</span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            <div className="flex items-end gap-2 md:col-span-2">
-              <Button type="submit" className="w-full">
-                Apply
-              </Button>
-              <Button asChild variant="ghost" className="w-full">
-                <Link href={`/t/${tenantSlug}`}>Reset</Link>
-              </Button>
-            </div>
-          </form>
+          <OverviewFilters
+            tenantSlug={tenantSlug}
+            from={from}
+            to={to}
+            metricOptions={metricDefinitions.map((metric) => ({
+              value: metric.key,
+              label: metric.label,
+              description: metric.description,
+            }))}
+            selectedMetrics={selectedMetricKeys}
+          />
         </CardContent>
       </Card>
 
