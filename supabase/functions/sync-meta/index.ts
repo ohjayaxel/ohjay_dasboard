@@ -38,16 +38,54 @@ type MetaInsightRow = {
   date: string;
   ad_account_id: string;
   campaign_id: string | null;
+  campaign_name: string | null;
   adset_id: string | null;
+  adset_name: string | null;
   ad_id: string | null;
+  ad_name: string | null;
+  currency: string | null;
   spend: number | null;
   impressions: number | null;
   clicks: number | null;
   purchases: number | null;
+  add_to_cart: number | null;
+  leads: number | null;
   revenue: number | null;
+  reach: number | null;
+  frequency: number | null;
+  cpm: number | null;
+  cpc: number | null;
+  ctr: number | null;
+  objective: string | null;
+  effective_status: string | null;
+  configured_status: string | null;
+  buying_type: string | null;
+  daily_budget: number | null;
+  lifetime_budget: number | null;
 };
 
 type MetaInsightRowWithLevel = MetaInsightRow & { level: 'campaign' | 'adset' | 'ad' };
+
+type MetaCampaignRecord = {
+  tenant_id: string;
+  id: string;
+  account_id: string;
+  name: string | null;
+  status: string | null;
+  effective_status: string | null;
+  configured_status: string | null;
+  objective: string | null;
+  buying_type: string | null;
+  start_time: string | null;
+  stop_time: string | null;
+  created_time: string | null;
+  updated_time: string | null;
+  daily_budget: number | null;
+  lifetime_budget: number | null;
+  budget_remaining: number | null;
+  special_ad_categories: unknown;
+  issues_info: unknown;
+};
 
 type JobResult = {
   tenantId: string;
@@ -150,6 +188,19 @@ function extractActionValue(collection: any, predicate: (actionType: string) => 
   return null;
 }
 
+function extractActionCount(collection: any, predicate: (actionType: string) => boolean): number | null {
+  if (!Array.isArray(collection)) return null;
+  for (const entry of collection) {
+    const actionType = typeof entry?.action_type === 'string' ? entry.action_type : '';
+    if (!predicate(actionType)) continue;
+    const numeric = parseNumber(entry?.value ?? entry?.count);
+    if (numeric !== null) {
+      return numeric;
+    }
+  }
+  return null;
+}
+
 function ensureActPrefix(accountId: string): string {
   return accountId.startsWith('act_') ? accountId : `act_${accountId}`;
 }
@@ -217,19 +268,33 @@ async function fetchMetaInsightsFromApi(
   url.searchParams.set('time_range', JSON.stringify(window));
   url.searchParams.set('level', level);
   url.searchParams.set('time_increment', '1');
+  url.searchParams.set('limit', '500');
   url.searchParams.set(
     'fields',
     [
       'date_start',
       'date_stop',
       'campaign_id',
+      'campaign_name',
+      'campaign_status',
+      'campaign_effective_status',
       'adset_id',
+      'adset_name',
       'ad_id',
+      'ad_name',
+      'account_currency',
       'spend',
       'impressions',
       'clicks',
       'actions',
       'action_values',
+      'reach',
+      'frequency',
+      'cpm',
+      'cpc',
+      'ctr',
+      'objective',
+      'buying_type',
     ].join(','),
   );
 
@@ -251,8 +316,24 @@ async function fetchMetaInsightsFromApi(
         const spend = parseNumber(row?.spend);
         const impressions = parseNumber(row?.impressions);
         const clicks = parseNumber(row?.clicks);
-        const purchases = extractActionValue(row?.actions, (type) => type.toLowerCase().includes('purchase'));
+        const purchases = extractActionCount(row?.actions, (type) => type.toLowerCase().includes('purchase'));
+        const addToCart = extractActionCount(row?.actions, (type) => type.toLowerCase().includes('add_to_cart'));
+        const leads = extractActionCount(row?.actions, (type) => type.toLowerCase().includes('lead'));
         const revenue = extractActionValue(row?.action_values, (type) => type.toLowerCase().includes('purchase'));
+        const currency = typeof row?.account_currency === 'string' ? row.account_currency : null;
+        const campaignName = typeof row?.campaign_name === 'string' ? row.campaign_name : null;
+        const adsetName = typeof row?.adset_name === 'string' ? row.adset_name : null;
+        const adName = typeof row?.ad_name === 'string' ? row.ad_name : null;
+        const reach = parseNumber(row?.reach);
+        const frequency = parseNumber(row?.frequency);
+        const cpm = parseNumber(row?.cpm);
+        const cpc = parseNumber(row?.cpc);
+        const ctr = parseNumber(row?.ctr);
+        const objective = typeof row?.objective === 'string' ? row.objective : null;
+        const effectiveStatus =
+          typeof row?.campaign_effective_status === 'string' ? row.campaign_effective_status : null;
+        const configuredStatus = typeof row?.campaign_status === 'string' ? row.campaign_status : null;
+        const buyingType = typeof row?.buying_type === 'string' ? row.buying_type : null;
 
         return {
           level,
@@ -260,13 +341,30 @@ async function fetchMetaInsightsFromApi(
           date,
           ad_account_id: normalizedAccountId,
           campaign_id: typeof row?.campaign_id === 'string' ? row.campaign_id : null,
+          campaign_name: campaignName,
           adset_id: typeof row?.adset_id === 'string' ? row.adset_id : null,
+          adset_name: adsetName,
           ad_id: typeof row?.ad_id === 'string' ? row.ad_id : null,
+          ad_name: adName,
+          currency,
           spend,
           impressions,
           clicks,
           purchases,
+          add_to_cart: addToCart,
+          leads,
           revenue,
+          reach,
+          frequency,
+          cpm,
+          cpc,
+          ctr,
+          objective,
+          effective_status: effectiveStatus,
+          configured_status: configuredStatus,
+          buying_type: buyingType,
+          daily_budget: null,
+          lifetime_budget: null,
         };
       }),
     );
@@ -319,6 +417,104 @@ function base64ToBytes(value: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+async function fetchMetaCampaignCatalog(
+  tenantId: string,
+  accessToken: string,
+  adAccountId: string,
+): Promise<MetaCampaignRecord[]> {
+  const normalizedAccountId = ensureActPrefix(adAccountId);
+  let url: URL | null = new URL(`https://graph.facebook.com/${META_API_VERSION}/${normalizedAccountId}/campaigns`);
+  url.searchParams.set('access_token', accessToken);
+  url.searchParams.set('limit', '500');
+  url.searchParams.set(
+    'fields',
+    [
+      'id',
+      'name',
+      'status',
+      'effective_status',
+      'configured_status',
+      'objective',
+      'buying_type',
+      'start_time',
+      'stop_time',
+      'created_time',
+      'updated_time',
+      'daily_budget',
+      'lifetime_budget',
+      'budget_remaining',
+      'special_ad_categories',
+      'issues_info',
+    ].join(','),
+  );
+
+  const campaigns: MetaCampaignRecord[] = [];
+  let page = 0;
+
+  while (url) {
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Meta campaigns request failed: ${response.status} ${body}`);
+    }
+
+    const payload = await response.json();
+    const rows = Array.isArray(payload?.data) ? payload.data : [];
+
+    for (const row of rows) {
+      if (!row || typeof row.id !== 'string') {
+        continue;
+      }
+
+      campaigns.push({
+        tenant_id: tenantId,
+        id: row.id,
+        account_id: normalizedAccountId,
+        name: typeof row.name === 'string' ? row.name : null,
+        status: typeof row.status === 'string' ? row.status : null,
+        effective_status: typeof row.effective_status === 'string' ? row.effective_status : null,
+        configured_status: typeof row.configured_status === 'string' ? row.configured_status : null,
+        objective: typeof row.objective === 'string' ? row.objective : null,
+        buying_type: typeof row.buying_type === 'string' ? row.buying_type : null,
+        start_time: typeof row.start_time === 'string' ? row.start_time : null,
+        stop_time: typeof row.stop_time === 'string' ? row.stop_time : null,
+        created_time: typeof row.created_time === 'string' ? row.created_time : null,
+        updated_time: typeof row.updated_time === 'string' ? row.updated_time : null,
+        daily_budget: parseNumber(row.daily_budget),
+        lifetime_budget: parseNumber(row.lifetime_budget),
+        budget_remaining: parseNumber(row.budget_remaining),
+        special_ad_categories: row.special_ad_categories ?? null,
+        issues_info: row.issues_info ?? null,
+      });
+    }
+
+    logSyncEvent('campaign_page', {
+      tenantId,
+      accountId: normalizedAccountId,
+      page,
+      pageRows: rows.length,
+    });
+
+    const next = payload?.paging?.next;
+    if (typeof next === 'string' && next.length > 0) {
+      try {
+        url = new URL(next);
+        if (!url.searchParams.has('access_token')) {
+          url.searchParams.set('access_token', accessToken);
+        }
+      } catch {
+        url = null;
+      }
+    } else {
+      url = null;
+    }
+
+    page += 1;
+  }
+
+  return campaigns;
 }
 
 function decodeEncryptedPayload(payload: unknown): Uint8Array | null {
@@ -485,6 +681,7 @@ type InsightFetchResult = {
   tokenSource: 'tenant';
   windowSince: string;
   windowUntil: string;
+  campaigns: MetaCampaignRecord[];
 };
 
 async function fetchTenantInsights(
@@ -515,6 +712,8 @@ async function fetchTenantInsights(
   const rowsByLevel: MetaInsightRowWithLevel[] = [];
   let lastUntil = window.since;
 
+  const campaignCatalog = await fetchMetaCampaignCatalog(tenantId, accessToken, accountId);
+
   for (const level of ['ad', 'adset', 'campaign'] as const) {
     for (
       let cursor = new Date(startDate);
@@ -542,13 +741,30 @@ async function fetchTenantInsights(
             date: row.date,
             ad_account_id: row.ad_account_id,
             campaign_id: row.campaign_id,
+            campaign_name: row.campaign_name,
             adset_id: row.adset_id,
+            adset_name: row.adset_name,
             ad_id: row.ad_id,
+            ad_name: row.ad_name,
+            currency: row.currency,
             spend: row.spend,
             impressions: row.impressions,
             clicks: row.clicks,
             purchases: row.purchases,
+            add_to_cart: row.add_to_cart,
+            leads: row.leads,
             revenue: row.revenue,
+            reach: row.reach,
+            frequency: row.frequency,
+            cpm: row.cpm,
+            cpc: row.cpc,
+            ctr: row.ctr,
+            objective: row.objective,
+            effective_status: row.effective_status,
+            configured_status: row.configured_status,
+            buying_type: row.buying_type,
+            daily_budget: row.daily_budget,
+            lifetime_budget: row.lifetime_budget,
           })),
         );
       }
@@ -568,6 +784,36 @@ async function fetchTenantInsights(
     }
   }
 
+  if (campaignCatalog.length > 0) {
+    const campaignMetaMap = new Map(
+      campaignCatalog.map((entry) => [
+        entry.id,
+        {
+          name: entry.name,
+          objective: entry.objective,
+          effective_status: entry.effective_status,
+          configured_status: entry.configured_status,
+          buying_type: entry.buying_type,
+          daily_budget: entry.daily_budget,
+          lifetime_budget: entry.lifetime_budget,
+        },
+      ]),
+    );
+
+    for (const row of rowsByLevel) {
+      if (row.campaign_id && campaignMetaMap.has(row.campaign_id)) {
+        const meta = campaignMetaMap.get(row.campaign_id)!;
+        row.campaign_name = row.campaign_name ?? (meta.name ?? null);
+        row.objective = row.objective ?? (meta.objective ?? null);
+        row.effective_status = row.effective_status ?? (meta.effective_status ?? null);
+        row.configured_status = row.configured_status ?? (meta.configured_status ?? null);
+        row.buying_type = row.buying_type ?? (meta.buying_type ?? null);
+        row.daily_budget = meta.daily_budget ?? null;
+        row.lifetime_budget = meta.lifetime_budget ?? null;
+      }
+    }
+  }
+
   return {
     rows: adRows,
     rowsByLevel,
@@ -575,6 +821,7 @@ async function fetchTenantInsights(
     tokenSource: 'tenant',
     windowSince: window.since,
     windowUntil: lastUntil,
+    campaigns: campaignCatalog,
   };
 }
 
@@ -717,18 +964,35 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
       const cos = row.revenue && row.revenue > 0 && row.spend ? row.spend / row.revenue : null;
 
       return {
+        level: row.level,
         tenant_id: row.tenant_id,
         ad_account_id: row.ad_account_id,
         date: row.date,
         campaign_id: row.campaign_id,
+        campaign_name: row.campaign_name,
         adset_id: row.adset_id,
+        adset_name: row.adset_name,
         ad_id: row.ad_id,
+        ad_name: row.ad_name,
         currency: typeof accountMeta?.currency === 'string' ? accountMeta.currency : null,
         spend: row.spend,
         impressions: row.impressions,
         clicks: row.clicks,
         purchases: row.purchases,
+        add_to_cart: row.add_to_cart,
+        leads: row.leads,
         revenue: row.revenue,
+        reach: row.reach,
+        frequency: row.frequency,
+        cpm: row.cpm,
+        cpc: row.cpc,
+        ctr: row.ctr,
+        objective: row.objective,
+        effective_status: row.effective_status,
+        configured_status: row.configured_status,
+        buying_type: row.buying_type,
+        daily_budget: row.daily_budget,
+        lifetime_budget: row.lifetime_budget,
         roas,
         cos,
       };
@@ -764,15 +1028,57 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
       });
     }
 
+    if (insightsResult.campaigns.length > 0) {
+      const campaignRows = insightsResult.campaigns.map((campaign) => ({
+        tenant_id: tenantId,
+        id: campaign.id,
+        account_id: campaign.account_id,
+        name: campaign.name,
+        status: campaign.status,
+        effective_status: campaign.effective_status,
+        configured_status: campaign.configured_status,
+        objective: campaign.objective,
+        buying_type: campaign.buying_type,
+        start_time: campaign.start_time,
+        stop_time: campaign.stop_time,
+        created_time: campaign.created_time,
+        updated_time: campaign.updated_time,
+        daily_budget: campaign.daily_budget,
+        lifetime_budget: campaign.lifetime_budget,
+        budget_remaining: campaign.budget_remaining,
+        special_ad_categories: campaign.special_ad_categories ?? null,
+        issues_info: campaign.issues_info ?? null,
+        updated_at: new Date().toISOString(),
+      }));
+
+      for (let cursor = 0; cursor < campaignRows.length; cursor += 500) {
+        const batch = campaignRows.slice(cursor, cursor + 500);
+        const { error: campaignError } = await client.from('meta_campaigns').upsert(batch, {
+          onConflict: 'tenant_id,id',
+        });
+        if (campaignError) {
+          console.error(`Failed to upsert meta_campaigns for tenant ${tenantId}:`, campaignError);
+          break;
+        }
+      }
+    }
+
     const insightsRaw = insightsResult.rows.map((row) => ({
       ...row,
       tenant_id: tenantId,
     }));
     const insights = insightsRaw.map((row) => ({
-      ...row,
-      campaign_id: row.campaign_id ?? 'unknown',
-      adset_id: row.adset_id ?? 'unknown',
-      ad_id: row.ad_id ?? 'unknown',
+      tenant_id: row.tenant_id,
+      date: row.date,
+      ad_account_id: row.ad_account_id,
+      campaign_id: (row.campaign_id ?? 'unknown') as string,
+      adset_id: (row.adset_id ?? 'unknown') as string,
+      ad_id: (row.ad_id ?? 'unknown') as string,
+      spend: row.spend,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      purchases: row.purchases,
+      revenue: row.revenue,
     }));
 
     if (insights.length > 0) {

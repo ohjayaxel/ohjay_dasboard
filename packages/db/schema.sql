@@ -6,4 +6,6 @@
 \i migrations/002_kpi.sql
 \i migrations/003_members_email.sql
 \i migrations/004_metrics_schema.sql
+\i migrations/005_meta_table_renames.sql
+\i migrations/006_meta_campaigns.sql
 
