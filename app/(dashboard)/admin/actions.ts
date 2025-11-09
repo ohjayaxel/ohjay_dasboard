@@ -480,7 +480,31 @@ export async function updateIntegrationSettings(formData: FormData) {
     display_kpis_updated_at: new Date().toISOString(),
   }
 
-  if (syncStartChanged) {
+  const lastRange =
+    baseMeta && typeof baseMeta.last_synced_range === 'object'
+      ? (baseMeta.last_synced_range as Record<string, unknown>)
+      : null
+
+  let shouldResetSyncState = syncStartChanged
+
+  if (!shouldResetSyncState && syncStartDate) {
+    const syncStartDateValue = new Date(syncStartDate)
+    if (!Number.isNaN(syncStartDateValue.getTime())) {
+      if (lastRange && typeof lastRange.since === 'string') {
+        const lastSince = new Date(lastRange.since)
+        if (!Number.isNaN(lastSince.getTime()) && lastSince > syncStartDateValue) {
+          shouldResetSyncState = true
+        }
+      } else if (typeof baseMeta.last_synced_at === 'string') {
+        const lastSyncedAt = new Date(baseMeta.last_synced_at as string)
+        if (!Number.isNaN(lastSyncedAt.getTime()) && lastSyncedAt > syncStartDateValue) {
+          shouldResetSyncState = true
+        }
+      }
+    }
+  }
+
+  if (shouldResetSyncState) {
     nextMeta.last_synced_at = null
     nextMeta.last_synced_range = null
   }
