@@ -26,11 +26,11 @@ Configure Vercel Cron Jobs for each project:
 
 | Endpoint | Schedule |
 | --- | --- |
-| `/api/jobs/sync?source=meta` | Every hour |
-| `/api/jobs/sync?source=google_ads` | Every hour (offset +5 minutes) |
-| `/api/jobs/sync?source=shopify` | Every hour (offset +10 minutes) |
+| `/api/jobs/sync?source=meta` | Daily at 03:00 UTC |
+| `/api/jobs/sync?source=google_ads` | Daily at 03:15 UTC |
+| `/api/jobs/sync?source=shopify` | Daily at 03:30 UTC |
 
-Ensure each project uses its own `APP_BASE_URL` and Supabase credentials.
+These schedules are encoded in `vercel.json`, so deployments automatically register the cron jobs. Ensure each project uses its own `APP_BASE_URL` and Supabase credentials.
 
 ## Deployment Checklist
 

@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/jobs/sync?source=meta",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/jobs/sync?source=google_ads",
+      "schedule": "15 3 * * *"
+    },
+    {
+      "path": "/api/jobs/sync?source=shopify",
+      "schedule": "30 3 * * *"
+    }
+  ]
+}
