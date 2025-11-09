@@ -62,18 +62,21 @@ export default async function AdminTenantDetailPage(props: PageProps) {
   const status = searchParams?.status
   const error = searchParams?.error
   const metaDetails = (meta.meta ?? {}) as Record<string, unknown>
-  const metaAccounts = Array.isArray(metaDetails.accounts)
-    ? (metaDetails.accounts as Array<{ account_id?: string; name?: string }>)
+  const metaAccounts = Array.isArray(metaDetails.ad_accounts)
+    ? (metaDetails.ad_accounts as Array<{ id?: string; account_id?: string; name?: string }>)
         .filter((account) => typeof account?.account_id === 'string')
         .map((account) => ({
-          id: account.account_id as string,
+          id: account.id ?? (`act_${account.account_id}` as string),
+          accountId: account.account_id as string,
           name: account?.name ?? account.account_id,
         }))
     : []
   const selectedMetaAccountId =
     typeof metaDetails.selected_account_id === 'string' ? (metaDetails.selected_account_id as string) : null
   const selectedMetaAccountName =
-    metaAccounts.find((account) => account.id === selectedMetaAccountId)?.name ?? selectedMetaAccountId ?? 'Not set'
+    metaAccounts.find((account) => account.id === selectedMetaAccountId || account.accountId === selectedMetaAccountId)?.name ??
+    selectedMetaAccountId ??
+    'Not set'
   const metaAccountsError =
     typeof metaDetails.accounts_error === 'string' && metaDetails.accounts_error.length > 0
       ? (metaDetails.accounts_error as string)
