@@ -47,6 +47,8 @@ type MetaInsightRow = {
   revenue: number | null;
 };
 
+type MetaInsightRowWithLevel = MetaInsightRow & { level: 'campaign' | 'adset' | 'ad' };
+
 type JobResult = {
   tenantId: string;
   status: 'succeeded' | 'failed';
@@ -207,12 +209,13 @@ async function fetchMetaInsightsFromApi(
   accessToken: string,
   adAccountId: string,
   window: SyncWindow,
-): Promise<MetaInsightRow[]> {
+  level: 'campaign' | 'adset' | 'ad',
+): Promise<MetaInsightRowWithLevel[]> {
   const normalizedAccountId = ensureActPrefix(adAccountId);
-  const url = new URL(`https://graph.facebook.com/${META_API_VERSION}/${normalizedAccountId}/insights`);
+  let url: URL | null = new URL(`https://graph.facebook.com/${META_API_VERSION}/${normalizedAccountId}/insights`);
   url.searchParams.set('access_token', accessToken);
   url.searchParams.set('time_range', JSON.stringify(window));
-  url.searchParams.set('level', 'ad');
+  url.searchParams.set('level', level);
   url.searchParams.set('time_increment', '1');
   url.searchParams.set(
     'fields',
@@ -230,37 +233,72 @@ async function fetchMetaInsightsFromApi(
     ].join(','),
   );
 
-  const response = await fetch(url.toString());
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Meta insights request failed: ${response.status} ${body}`);
+  const collected: MetaInsightRowWithLevel[] = [];
+  let page = 0;
+
+  while (url) {
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Meta insights request failed: ${response.status} ${body}`);
+    }
+
+    const payload = await response.json();
+    const rows = Array.isArray(payload?.data) ? payload.data : [];
+    collected.push(
+      ...rows.map((row: any) => {
+        const date = typeof row?.date_start === 'string' ? row.date_start : new Date().toISOString().slice(0, 10);
+        const spend = parseNumber(row?.spend);
+        const impressions = parseNumber(row?.impressions);
+        const clicks = parseNumber(row?.clicks);
+        const purchases = extractActionValue(row?.actions, (type) => type.toLowerCase().includes('purchase'));
+        const revenue = extractActionValue(row?.action_values, (type) => type.toLowerCase().includes('purchase'));
+
+        return {
+          level,
+          tenant_id: tenantId,
+          date,
+          ad_account_id: normalizedAccountId,
+          campaign_id: typeof row?.campaign_id === 'string' ? row.campaign_id : null,
+          adset_id: typeof row?.adset_id === 'string' ? row.adset_id : null,
+          ad_id: typeof row?.ad_id === 'string' ? row.ad_id : null,
+          spend,
+          impressions,
+          clicks,
+          purchases,
+          revenue,
+        };
+      }),
+    );
+
+    logSyncEvent('insights_page', {
+      tenantId,
+      accountId: normalizedAccountId,
+      since: window.since,
+      until: window.until,
+      page,
+      pageRows: rows.length,
+      level,
+    });
+
+    const next = payload?.paging?.next;
+    if (typeof next === 'string' && next.length > 0) {
+      try {
+        url = new URL(next);
+        if (!url.searchParams.has('access_token')) {
+          url.searchParams.set('access_token', accessToken);
+        }
+      } catch {
+        url = null;
+      }
+    } else {
+      url = null;
+    }
+
+    page += 1;
   }
 
-  const payload = await response.json();
-  const rows = Array.isArray(payload?.data) ? payload.data : [];
-
-  return rows.map((row: any) => {
-    const date = typeof row?.date_start === 'string' ? row.date_start : new Date().toISOString().slice(0, 10);
-    const spend = parseNumber(row?.spend);
-    const impressions = parseNumber(row?.impressions);
-    const clicks = parseNumber(row?.clicks);
-    const purchases = extractActionValue(row?.actions, (type) => type.toLowerCase().includes('purchase'));
-    const revenue = extractActionValue(row?.action_values, (type) => type.toLowerCase().includes('purchase'));
-
-    return {
-      tenant_id: tenantId,
-      date,
-      ad_account_id: normalizedAccountId,
-      campaign_id: typeof row?.campaign_id === 'string' ? row.campaign_id : null,
-      adset_id: typeof row?.adset_id === 'string' ? row.adset_id : null,
-      ad_id: typeof row?.ad_id === 'string' ? row.ad_id : null,
-      spend,
-      impressions,
-      clicks,
-      purchases,
-      revenue,
-    };
-  });
+  return collected;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -442,6 +480,7 @@ function getPreferredAccountId(meta: Record<string, any>): string | null {
 
 type InsightFetchResult = {
   rows: MetaInsightRow[];
+  rowsByLevel: MetaInsightRowWithLevel[];
   accountId: string;
   tokenSource: 'tenant';
   windowSince: string;
@@ -472,49 +511,66 @@ async function fetchTenantInsights(
     throw new Error('Invalid sync window for Meta insights.');
   }
 
-  const aggregatedRows: MetaInsightRow[] = [];
+  const adRows: MetaInsightRow[] = [];
+  const rowsByLevel: MetaInsightRowWithLevel[] = [];
   let lastUntil = window.since;
 
-  for (
-    let cursor = new Date(startDate);
-    cursor <= endDate;
-    cursor.setDate(cursor.getDate() + MAX_WINDOW_DAYS)
-  ) {
-    const chunkSinceDate = new Date(cursor);
-    const chunkUntilDate = new Date(cursor);
-    chunkUntilDate.setDate(chunkUntilDate.getDate() + MAX_WINDOW_DAYS - 1);
-    if (chunkUntilDate > endDate) {
-      chunkUntilDate.setTime(endDate.getTime());
-    }
+  for (const level of ['ad', 'adset', 'campaign'] as const) {
+    for (
+      let cursor = new Date(startDate);
+      cursor <= endDate;
+      cursor.setDate(cursor.getDate() + MAX_WINDOW_DAYS)
+    ) {
+      const chunkSinceDate = new Date(cursor);
+      const chunkUntilDate = new Date(cursor);
+      chunkUntilDate.setDate(chunkUntilDate.getDate() + MAX_WINDOW_DAYS - 1);
+      if (chunkUntilDate > endDate) {
+        chunkUntilDate.setTime(endDate.getTime());
+      }
 
-    const chunkWindow = {
-      since: chunkSinceDate.toISOString().slice(0, 10),
-      until: chunkUntilDate.toISOString().slice(0, 10),
-    };
+      const chunkWindow = {
+        since: chunkSinceDate.toISOString().slice(0, 10),
+        until: chunkUntilDate.toISOString().slice(0, 10),
+      };
 
-    const chunkRows = await fetchMetaInsightsFromApi(tenantId, accessToken, accountId, chunkWindow);
-    aggregatedRows.push(
-      ...chunkRows.map((row) => ({
-        ...row,
-        tenant_id: tenantId,
-      })),
-    );
-    logSyncEvent('chunk_fetch', {
-      tenantId,
-      accountId,
-      since: chunkWindow.since,
-      until: chunkWindow.until,
-      rows: chunkRows.length,
-    });
-    lastUntil = chunkWindow.until;
+      const chunkRows = await fetchMetaInsightsFromApi(tenantId, accessToken, accountId, chunkWindow, level);
+      rowsByLevel.push(...chunkRows);
+      if (level === 'ad') {
+        adRows.push(
+          ...chunkRows.map((row) => ({
+            tenant_id: row.tenant_id,
+            date: row.date,
+            ad_account_id: row.ad_account_id,
+            campaign_id: row.campaign_id,
+            adset_id: row.adset_id,
+            ad_id: row.ad_id,
+            spend: row.spend,
+            impressions: row.impressions,
+            clicks: row.clicks,
+            purchases: row.purchases,
+            revenue: row.revenue,
+          })),
+        );
+      }
+      logSyncEvent('chunk_fetch', {
+        tenantId,
+        accountId,
+        since: chunkWindow.since,
+        until: chunkWindow.until,
+        rows: chunkRows.length,
+        level,
+      });
+      lastUntil = chunkWindow.until;
 
-    if (chunkUntilDate >= endDate) {
-      break;
+      if (chunkUntilDate >= endDate) {
+        break;
+      }
     }
   }
 
   return {
-    rows: aggregatedRows,
+    rows: adRows,
+    rowsByLevel,
     accountId,
     tokenSource: 'tenant',
     windowSince: window.since,
@@ -623,6 +679,91 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
 
   try {
     const insightsResult = await fetchTenantInsights(tenantId, connection, connectionMeta ?? {}, syncWindow);
+    const accountMeta =
+      Array.isArray(connectionMeta?.ad_accounts) && typeof insightsResult.accountId === 'string'
+        ? (connectionMeta.ad_accounts as Array<Record<string, any>>).find((item) => {
+            const identifier = typeof item?.id === 'string' ? item.id : item?.account_id;
+            return identifier && ensureActPrefix(identifier) === insightsResult.accountId;
+          }) ?? null
+        : null;
+
+    if (accountMeta) {
+      const accountRecord = {
+        id: ensureActPrefix(
+          typeof accountMeta.id === 'string' ? accountMeta.id : accountMeta.account_id ?? insightsResult.accountId,
+        ),
+        tenant_id: tenantId,
+        name: typeof accountMeta.name === 'string' ? accountMeta.name : null,
+        currency: typeof accountMeta.currency === 'string' ? accountMeta.currency : null,
+        status:
+          typeof accountMeta.account_status === 'number'
+            ? String(accountMeta.account_status)
+            : typeof accountMeta.account_status === 'string'
+              ? accountMeta.account_status
+              : null,
+        metadata: accountMeta,
+      };
+
+      const { error: accountUpsertError } = await client.from('meta_ad_accounts').upsert(accountRecord, {
+        onConflict: 'id',
+      });
+      if (accountUpsertError) {
+        console.error(`Failed to upsert meta_ad_accounts for tenant ${tenantId}:`, accountUpsertError);
+      }
+    }
+
+    const factRows = insightsResult.rowsByLevel.map((row) => {
+      const roas = row.spend && row.spend > 0 && row.revenue ? row.revenue / row.spend : null;
+      const cos = row.revenue && row.revenue > 0 && row.spend ? row.spend / row.revenue : null;
+
+      return {
+        tenant_id: row.tenant_id,
+        ad_account_id: row.ad_account_id,
+        date: row.date,
+        campaign_id: row.campaign_id,
+        adset_id: row.adset_id,
+        ad_id: row.ad_id,
+        currency: typeof accountMeta?.currency === 'string' ? accountMeta.currency : null,
+        spend: row.spend,
+        impressions: row.impressions,
+        clicks: row.clicks,
+        purchases: row.purchases,
+        revenue: row.revenue,
+        roas,
+        cos,
+      };
+    });
+
+    if (factRows.length > 0) {
+      const { error: deleteError } = await client
+        .from('meta_insights_fact')
+        .delete()
+        .eq('tenant_id', tenantId)
+        .eq('ad_account_id', insightsResult.accountId)
+        .gte('date', insightsResult.windowSince)
+        .lte('date', insightsResult.windowUntil);
+
+      if (deleteError) {
+        throw new Error(deleteError.message);
+      }
+
+      for (let cursor = 0; cursor < factRows.length; cursor += 500) {
+        const batch = factRows.slice(cursor, cursor + 500);
+        const { error: factError } = await client.from('meta_insights_fact').insert(batch);
+        if (factError) {
+          throw new Error(factError.message);
+        }
+      }
+
+      logSyncEvent('fact_upsert', {
+        tenantId,
+        accountId: insightsResult.accountId,
+        windowSince: insightsResult.windowSince,
+        windowUntil: insightsResult.windowUntil,
+        rows: factRows.length,
+      });
+    }
+
     const insightsRaw = insightsResult.rows.map((row) => ({
       ...row,
       tenant_id: tenantId,
