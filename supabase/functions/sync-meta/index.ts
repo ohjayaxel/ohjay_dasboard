@@ -136,11 +136,13 @@ function resolveSyncWindow(meta: Record<string, any> | null): SyncWindow {
   defaultSince.setDate(defaultSince.getDate() - 7);
 
   let sinceDate = defaultSince;
+  let syncStartDate: Date | null = null;
 
   if (meta && typeof meta.sync_start_date === 'string') {
     const parsed = new Date(meta.sync_start_date);
     if (!Number.isNaN(parsed.getTime())) {
-      sinceDate = clampDate(parsed);
+      syncStartDate = clampDate(parsed);
+      sinceDate = syncStartDate;
     }
   }
 
@@ -149,15 +151,16 @@ function resolveSyncWindow(meta: Record<string, any> | null): SyncWindow {
     const parsed = new Date(lastRange.until);
     if (!Number.isNaN(parsed.getTime())) {
       parsed.setDate(parsed.getDate() + 1);
-      if (parsed > sinceDate) {
-        sinceDate = clampDate(parsed);
+      const candidate = clampDate(parsed);
+      if ((!syncStartDate || candidate >= syncStartDate) && candidate > sinceDate) {
+        sinceDate = candidate;
       }
     }
   } else if (meta && typeof meta.last_synced_at === 'string') {
     const parsed = new Date(meta.last_synced_at);
     if (!Number.isNaN(parsed.getTime())) {
       const candidate = clampDate(parsed);
-      if (candidate > sinceDate) {
+      if ((!syncStartDate || candidate >= syncStartDate) && candidate > sinceDate) {
         sinceDate = candidate;
       }
     }

@@ -465,11 +465,24 @@ export async function updateIntegrationSettings(formData: FormData) {
   const baseMeta =
     connection.meta && typeof connection.meta === 'object' ? (connection.meta as Record<string, unknown>) : {}
 
+  const previousSyncStart =
+    typeof baseMeta.sync_start_date === 'string' && baseMeta.sync_start_date.length > 0
+      ? (baseMeta.sync_start_date as string)
+      : null
+
+  const syncStartChanged =
+    (previousSyncStart ?? null) !== (syncStartDate ?? null)
+
   const nextMeta = {
     ...baseMeta,
     sync_start_date: syncStartDate,
     display_kpis: kpis ?? [],
     display_kpis_updated_at: new Date().toISOString(),
+  }
+
+  if (syncStartChanged) {
+    nextMeta.last_synced_at = null
+    nextMeta.last_synced_range = null
   }
 
   const { error: updateError } = await client
