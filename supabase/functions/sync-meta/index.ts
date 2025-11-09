@@ -704,11 +704,11 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
         metadata: accountMeta,
       };
 
-      const { error: accountUpsertError } = await client.from('meta_ad_accounts').upsert(accountRecord, {
+      const { error: accountUpsertError } = await client.from('meta_accounts').upsert(accountRecord, {
         onConflict: 'id',
       });
       if (accountUpsertError) {
-        console.error(`Failed to upsert meta_ad_accounts for tenant ${tenantId}:`, accountUpsertError);
+        console.error(`Failed to upsert meta_accounts for tenant ${tenantId}:`, accountUpsertError);
       }
     }
 
@@ -736,7 +736,7 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
 
     if (factRows.length > 0) {
       const { error: deleteError } = await client
-        .from('meta_insights_fact')
+        .from('meta_insights_levels')
         .delete()
         .eq('tenant_id', tenantId)
         .eq('ad_account_id', insightsResult.accountId)
@@ -749,7 +749,7 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
 
       for (let cursor = 0; cursor < factRows.length; cursor += 500) {
         const batch = factRows.slice(cursor, cursor + 500);
-        const { error: factError } = await client.from('meta_insights_fact').insert(batch);
+        const { error: factError } = await client.from('meta_insights_levels').insert(batch);
         if (factError) {
           throw new Error(factError.message);
         }

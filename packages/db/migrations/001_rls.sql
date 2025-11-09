@@ -8,8 +8,8 @@ alter table google_insights_daily enable row level security;
 alter table shopify_orders enable row level security;
 alter table kpi_daily enable row level security;
 alter table jobs_log enable row level security;
-alter table meta_ad_accounts enable row level security;
-alter table meta_insights_fact enable row level security;
+alter table meta_accounts enable row level security;
+alter table meta_insights_levels enable row level security;
 alter table google_ads_customers enable row level security;
 alter table google_insights_fact enable row level security;
 alter table shopify_shops enable row level security;
@@ -56,8 +56,8 @@ begin
     'shopify_orders'::regclass,
     'kpi_daily'::regclass,
     'jobs_log'::regclass,
-    'meta_ad_accounts'::regclass,
-    'meta_insights_fact'::regclass,
+    'meta_accounts'::regclass,
+    'meta_insights_levels'::regclass,
     'google_ads_customers'::regclass,
     'google_insights_fact'::regclass,
     'shopify_shops'::regclass,
@@ -81,8 +81,8 @@ begin
     'shopify_orders'::regclass,
     'kpi_daily'::regclass,
     'jobs_log'::regclass,
-    'meta_ad_accounts'::regclass,
-    'meta_insights_fact'::regclass,
+    'meta_accounts'::regclass,
+    'meta_insights_levels'::regclass,
     'google_ads_customers'::regclass,
     'google_insights_fact'::regclass,
     'shopify_shops'::regclass,

@@ -5,7 +5,7 @@ set check_function_bodies = off;
 
 -- 1. Fact tables per channel with richer schema
 
-create table if not exists meta_ad_accounts(
+create table if not exists meta_accounts(
   id text primary key,
   tenant_id uuid not null references tenants(id) on delete cascade,
   name text,
@@ -17,12 +17,12 @@ create table if not exists meta_ad_accounts(
   updated_at timestamptz default now()
 );
 
-create index if not exists meta_ad_accounts_tenant_idx on meta_ad_accounts(tenant_id);
+create index if not exists meta_accounts_tenant_idx on meta_accounts(tenant_id);
 
-create table if not exists meta_insights_fact(
+create table if not exists meta_insights_levels(
   id bigserial primary key,
   tenant_id uuid not null references tenants(id) on delete cascade,
-  ad_account_id text not null references meta_ad_accounts(id) on delete cascade,
+  ad_account_id text not null references meta_accounts(id) on delete cascade,
   date date not null,
   campaign_id text,
   adset_id text,
@@ -46,8 +46,8 @@ create table if not exists meta_insights_fact(
   updated_at timestamptz default now()
 );
 
-create index if not exists meta_insights_fact_tenant_date_idx on meta_insights_fact(tenant_id, date);
-create index if not exists meta_insights_fact_account_date_idx on meta_insights_fact(ad_account_id, date);
+create index if not exists meta_insights_levels_tenant_date_idx on meta_insights_levels(tenant_id, date);
+create index if not exists meta_insights_levels_account_date_idx on meta_insights_levels(ad_account_id, date);
 
 
 create table if not exists google_ads_customers(
@@ -183,8 +183,8 @@ create or replace view kpi_daily_view as
 
 -- 4. RLS policies for new tables
 
-alter table meta_ad_accounts enable row level security;
-alter table meta_insights_fact enable row level security;
+alter table meta_accounts enable row level security;
+alter table meta_insights_levels enable row level security;
 alter table google_ads_customers enable row level security;
 alter table google_insights_fact enable row level security;
 alter table shopify_shops enable row level security;
@@ -197,8 +197,8 @@ declare
   tbl regclass;
 begin
   for tbl in select unnest(array[
-    'meta_ad_accounts'::regclass,
-    'meta_insights_fact',
+    'meta_accounts'::regclass,
+    'meta_insights_levels',
     'google_ads_customers',
     'google_insights_fact',
     'shopify_shops',
