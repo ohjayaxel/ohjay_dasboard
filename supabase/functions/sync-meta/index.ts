@@ -532,6 +532,45 @@ function aggregateKpis(rows: MetaInsightRow[]) {
   });
 }
 
+function fillMissingAggregateDates(
+  aggregates: ReturnType<typeof aggregateKpis>,
+  windowSince: string,
+  windowUntil: string,
+) {
+  const aggregateByDate = new Map(aggregates.map((entry) => [entry.date, entry]));
+  const filled: ReturnType<typeof aggregateKpis> = [];
+
+  const start = new Date(windowSince);
+  const end = new Date(windowUntil);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return aggregates;
+  }
+
+  for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+    const key = cursor.toISOString().slice(0, 10);
+    const existing = aggregateByDate.get(key);
+
+    if (existing) {
+      filled.push(existing);
+      continue;
+    }
+
+    filled.push({
+      date: key,
+      spend: 0,
+      clicks: 0,
+      conversions: 0,
+      revenue: 0,
+      aov: null,
+      cos: null,
+      roas: null,
+    });
+  }
+
+  return filled;
+}
+
 async function upsertJobLog(client: SupabaseClient, payload: {
   tenantId: string;
   status: 'pending' | 'running' | 'succeeded' | 'failed';
@@ -585,7 +624,12 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
       }
 
       const aggregates = aggregateKpis(insights);
-      const kpiRows = aggregates.map((row) => ({
+      const normalizedAggregates = fillMissingAggregateDates(
+        aggregates,
+        insightsResult.windowSince,
+        insightsResult.windowUntil,
+      );
+      const kpiRows = normalizedAggregates.map((row) => ({
         tenant_id: tenantId,
         date: row.date,
         source: SOURCE,
