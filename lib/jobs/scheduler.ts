@@ -5,6 +5,12 @@ const MAX_RETRIES = 5;
 
 type Source = 'meta' | 'google_ads' | 'shopify';
 
+type InvokeOptions = {
+  source: Source
+  payload?: Record<string, unknown>
+  attempt?: number
+};
+
 function ensureEnv() {
   if (!SUPABASE_URL) {
     throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL environment variable.');
@@ -21,7 +27,7 @@ function getFunctionUrl(source: Source) {
   return `${normalized}/functions/v1/sync-${source}`;
 }
 
-async function invokeWithRetry(source: Source, attempt = 1): Promise<{ status: number }> {
+async function invokeWithRetry({ source, payload, attempt = 1 }: InvokeOptions): Promise<{ status: number }> {
   const url = getFunctionUrl(source);
 
   const response = await fetch(url, {
@@ -31,7 +37,7 @@ async function invokeWithRetry(source: Source, attempt = 1): Promise<{ status: n
       Authorization: `Bearer ${SUPABASE_FUNCTION_KEY}`,
       apikey: SUPABASE_FUNCTION_KEY!,
     },
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload ?? {}),
   });
 
   if (response.ok) {
@@ -45,7 +51,7 @@ async function invokeWithRetry(source: Source, attempt = 1): Promise<{ status: n
 
     const delay = Math.pow(2, attempt - 1) * 1000;
     await new Promise((resolve) => setTimeout(resolve, delay));
-    return invokeWithRetry(source, attempt + 1);
+    return invokeWithRetry({ source, payload, attempt: attempt + 1 });
   }
 
   const body = await response.text();
@@ -54,6 +60,13 @@ async function invokeWithRetry(source: Source, attempt = 1): Promise<{ status: n
 
 export async function triggerSyncJob(source: Source) {
   // TODO: add per-tenant rate limiting using Redis/Upstash.
-  return invokeWithRetry(source);
+  return invokeWithRetry({ source });
+}
+
+export async function triggerSyncJobForTenant(source: Source, tenantId: string) {
+  return invokeWithRetry({
+    source,
+    payload: { tenantId },
+  });
 }
 

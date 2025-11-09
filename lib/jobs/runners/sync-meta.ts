@@ -1,6 +1,6 @@
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
 
-import { triggerSyncJob } from '../scheduler';
+import { triggerSyncJob, triggerSyncJobForTenant } from '../scheduler';
 
 export async function runMetaSyncRunner() {
   const client = getSupabaseServiceClient();
@@ -31,5 +31,9 @@ export async function runMetaSyncRunner() {
     tenantCount: connectedTenants.size,
     result,
   };
+}
+
+export async function runMetaSyncForTenant(tenantId: string) {
+  return triggerSyncJobForTenant('meta', tenantId);
 }
 

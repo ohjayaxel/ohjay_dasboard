@@ -4,6 +4,7 @@ import { logger } from '@/lib/logger'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 
 import { decryptSecret, encryptSecret } from './crypto'
+import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
 
 const META_API_VERSION = process.env.META_API_VERSION ?? 'v18.0'
 const META_GRAPH_BASE = `https://graph.facebook.com/${META_API_VERSION}`
@@ -912,6 +913,28 @@ export async function handleMetaOAuthCallback(options: {
     },
     'Meta OAuth callback completed successfully',
   )
+
+  try {
+    await triggerSyncJobForTenant('meta', options.tenantId)
+    logger.info(
+      {
+        route: 'meta.oauth',
+        action: 'post_connect_sync',
+        tenantId: options.tenantId,
+      },
+      'Triggered immediate Meta sync after OAuth connection',
+    )
+  } catch (error) {
+    logger.error(
+      {
+        route: 'meta.oauth',
+        action: 'post_connect_sync',
+        tenantId: options.tenantId,
+        error_message: error instanceof Error ? error.message : String(error),
+      },
+      'Failed to trigger immediate Meta sync after OAuth connection',
+    )
+  }
 }
 
 export async function refreshMetaTokenIfNeeded(tenantId: string) {
