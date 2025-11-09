@@ -401,7 +401,7 @@ function getPreferredAccountId(meta: Record<string, any>): string | null {
 type InsightFetchResult = {
   rows: MetaInsightRow[];
   accountId: string;
-  tokenSource: 'tenant' | 'dev';
+  tokenSource: 'tenant';
 };
 
 async function fetchTenantInsights(
@@ -413,22 +413,16 @@ async function fetchTenantInsights(
   const accessToken = await decryptAccessToken(connection.access_token_enc);
   const accountId = getPreferredAccountId(connectionMeta);
 
-  if (accessToken && accountId) {
-    const rows = await fetchMetaInsightsFromApi(tenantId, accessToken, accountId, window);
-    return { rows, accountId, tokenSource: 'tenant' };
-  }
-
   if (!accessToken) {
-    if (META_DEV_ACCESS_TOKEN && META_DEV_AD_ACCOUNT_ID) {
-      console.warn(`[sync-meta] Tenant ${tenantId} missing Meta access token; using META_DEV fallback.`);
-      const rows = await fetchMetaInsightsFromApi(tenantId, META_DEV_ACCESS_TOKEN, META_DEV_AD_ACCOUNT_ID, window);
-      return { rows, accountId: META_DEV_AD_ACCOUNT_ID, tokenSource: 'dev' };
-    }
-
     throw new Error('No Meta access token stored for tenant. Connect Meta to enable syncing.');
   }
 
-  throw new Error('Meta connection missing selected ad account. Choose an account in the admin panel.');
+  if (!accountId) {
+    throw new Error('Meta connection missing selected ad account. Choose an account in the admin panel.');
+  }
+
+  const rows = await fetchMetaInsightsFromApi(tenantId, accessToken, accountId, window);
+  return { rows, accountId, tokenSource: 'tenant' };
 }
 
 function aggregateKpis(rows: MetaInsightRow[]) {
