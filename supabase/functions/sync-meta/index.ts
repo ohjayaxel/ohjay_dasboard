@@ -59,6 +59,8 @@ const META_DEV_ACCESS_TOKEN = Deno.env.get('META_DEV_ACCESS_TOKEN');
 const META_DEV_AD_ACCOUNT_ID = Deno.env.get('META_DEV_AD_ACCOUNT_ID');
 const ENCRYPTION_KEY = Deno.env.get('ENCRYPTION_KEY');
 
+const MAX_WINDOW_DAYS = 60;
+
 const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
@@ -429,6 +431,8 @@ type InsightFetchResult = {
   rows: MetaInsightRow[];
   accountId: string;
   tokenSource: 'tenant';
+  windowSince: string;
+  windowUntil: string;
 };
 
 async function fetchTenantInsights(
@@ -448,8 +452,54 @@ async function fetchTenantInsights(
     throw new Error('Meta connection missing selected ad account. Choose an account in the admin panel.');
   }
 
-  const rows = await fetchMetaInsightsFromApi(tenantId, accessToken, accountId, window);
-  return { rows, accountId, tokenSource: 'tenant' };
+  const startDate = new Date(window.since);
+  const endDate = new Date(window.until);
+
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    throw new Error('Invalid sync window for Meta insights.');
+  }
+
+  const aggregatedRows: MetaInsightRow[] = [];
+  let lastUntil = window.since;
+
+  for (
+    let cursor = new Date(startDate);
+    cursor <= endDate;
+    cursor.setDate(cursor.getDate() + MAX_WINDOW_DAYS)
+  ) {
+    const chunkSinceDate = new Date(cursor);
+    const chunkUntilDate = new Date(cursor);
+    chunkUntilDate.setDate(chunkUntilDate.getDate() + MAX_WINDOW_DAYS - 1);
+    if (chunkUntilDate > endDate) {
+      chunkUntilDate.setTime(endDate.getTime());
+    }
+
+    const chunkWindow = {
+      since: chunkSinceDate.toISOString().slice(0, 10),
+      until: chunkUntilDate.toISOString().slice(0, 10),
+    };
+
+    const chunkRows = await fetchMetaInsightsFromApi(tenantId, accessToken, accountId, chunkWindow);
+    aggregatedRows.push(
+      ...chunkRows.map((row) => ({
+        ...row,
+        tenant_id: tenantId,
+      })),
+    );
+    lastUntil = chunkWindow.until;
+
+    if (chunkUntilDate >= endDate) {
+      break;
+    }
+  }
+
+  return {
+    rows: aggregatedRows,
+    accountId,
+    tokenSource: 'tenant',
+    windowSince: window.since,
+    windowUntil: lastUntil,
+  };
 }
 
 function aggregateKpis(rows: MetaInsightRow[]) {
@@ -560,7 +610,10 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
     const finishedAt = new Date().toISOString();
 
     connectionMeta.last_synced_at = finishedAt;
-    connectionMeta.last_synced_range = syncWindow;
+    connectionMeta.last_synced_range = {
+      since: insightsResult.windowSince,
+      until: insightsResult.windowUntil,
+    };
     connectionMeta.last_synced_account_id = insightsResult.accountId;
     connectionMeta.last_synced_token_source = insightsResult.tokenSource;
 
