@@ -1,3 +1,5 @@
+import { createClient } from '@supabase/supabase-js';
+
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_FUNCTION_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -21,30 +23,28 @@ function ensureEnv() {
   }
 }
 
-function getFunctionUrl(source: Source) {
-  ensureEnv();
-  const normalized = SUPABASE_URL!.replace(/\/$/, '');
-  return `${normalized}/functions/v1/sync-${source}`;
-}
-
 async function invokeWithRetry({ source, payload, attempt = 1 }: InvokeOptions): Promise<{ status: number }> {
-  const url = getFunctionUrl(source);
+  ensureEnv();
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${SUPABASE_FUNCTION_KEY}`,
-      apikey: SUPABASE_FUNCTION_KEY!,
+  const supabase = createClient(SUPABASE_URL!, SUPABASE_FUNCTION_KEY!, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
     },
-    body: JSON.stringify(payload ?? {}),
   });
 
-  if (response.ok) {
-    return { status: response.status };
+  const response = await supabase.functions.invoke(`sync-${source}`, {
+    body: payload ?? {},
+  });
+
+  if (response.error === null) {
+    return { status: response.response?.status ?? 200 };
   }
 
-  if (response.status === 429 || response.status >= 500) {
+  const status = response.response?.status ?? 500;
+  const error = response.error;
+
+  if (status === 429 || status >= 500) {
     if (attempt >= MAX_RETRIES) {
       throw new Error(`Failed to invoke sync-${source} after ${attempt} attempts.`);
     }
@@ -54,8 +54,7 @@ async function invokeWithRetry({ source, payload, attempt = 1 }: InvokeOptions):
     return invokeWithRetry({ source, payload, attempt: attempt + 1 });
   }
 
-  const body = await response.text();
-  throw new Error(`Invocation failed: ${response.status} ${body}`);
+  throw new Error(`Invocation failed: ${status} ${error?.message ?? 'Unknown error'}`);
 }
 
 export async function triggerSyncJob(source: Source) {
