@@ -590,9 +590,19 @@ export async function updateMetaSelectedAccount(formData: FormData) {
     throw new Error('Selected ad account is not available for this connection.')
   }
 
+  const baseMeta = (connection.meta ?? {}) as Record<string, unknown>
+  const previousSelectedAccount = typeof baseMeta.selected_account_id === 'string' ? baseMeta.selected_account_id : null
+  const resolvedAccountId = matchedAccount.id ?? matchedAccount.account_id ?? result.data.accountId
+
   const nextMeta = {
-    ...(connection.meta ?? {}),
-    selected_account_id: matchedAccount.id ?? matchedAccount.account_id ?? result.data.accountId,
+    ...baseMeta,
+    selected_account_id: resolvedAccountId,
+  }
+
+  if (previousSelectedAccount !== resolvedAccountId) {
+    nextMeta.last_synced_at = null
+    nextMeta.last_synced_range = null
+    nextMeta.last_synced_account_id = null
   }
 
   const { error: updateError } = await client
@@ -602,6 +612,21 @@ export async function updateMetaSelectedAccount(formData: FormData) {
 
   if (updateError) {
     throw new Error(`Failed to update Meta ad account: ${updateError.message}`)
+  }
+
+  if (previousSelectedAccount !== resolvedAccountId) {
+    void triggerSyncJobForTenant('meta', result.data.tenantId).catch((error: unknown) => {
+      logger.error(
+        {
+          route: 'admin.meta',
+          action: 'sync_after_account_change',
+          tenantId: result.data.tenantId,
+          accountId: resolvedAccountId,
+          error_message: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to trigger Meta sync after account selection change',
+      )
+    })
   }
 
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
