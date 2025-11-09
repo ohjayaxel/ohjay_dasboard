@@ -273,17 +273,34 @@ function decodeEncryptedPayload(payload: unknown): Uint8Array | null {
     return null;
   }
 
+  const normalize = (bytes: Uint8Array | null): Uint8Array | null => {
+    if (!bytes || bytes.length === 0) {
+      return bytes;
+    }
+    if (bytes[0] === 0x7b) {
+      try {
+        const parsed = JSON.parse(textDecoder.decode(bytes));
+        if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
+          return Uint8Array.from(parsed.data);
+        }
+      } catch {
+        // not JSON, return raw bytes
+      }
+    }
+    return bytes;
+  };
+
   if (payload instanceof Uint8Array) {
-    return payload;
+    return normalize(payload);
   }
 
   if (payload instanceof ArrayBuffer) {
-    return new Uint8Array(payload);
+    return normalize(new Uint8Array(payload));
   }
 
   if (ArrayBuffer.isView(payload)) {
     const view = payload as ArrayBufferView;
-    return new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+    return normalize(new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength)));
   }
 
   if (typeof payload === 'object' && payload !== null && 'data' in (payload as Record<string, unknown>)) {
@@ -294,23 +311,33 @@ function decodeEncryptedPayload(payload: unknown): Uint8Array | null {
   }
 
   if (typeof payload === 'string') {
-    let value = payload.trim();
-    if (value.startsWith('\\\\x')) {
-      value = value.replace(/^\\+x/, '');
-      return hexToBytes(value);
-    }
-    if (value.startsWith('\\x')) {
-      value = value.slice(2);
-      return hexToBytes(value);
-    }
-    if (/^[0-9a-fA-F]+$/.test(value)) {
-      return hexToBytes(value);
-    }
+    const value = payload.trim();
+
     try {
-      return base64ToBytes(value);
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
+        return Uint8Array.from(parsed.data);
+      }
     } catch {
-      // fall through
+      // not JSON literal, fall through
     }
+
+    let candidate: Uint8Array | null = null;
+    if (value.startsWith('\\\\x')) {
+      candidate = hexToBytes(value.replace(/^\\+x/, ''));
+    } else if (value.startsWith('\\x')) {
+      candidate = hexToBytes(value.slice(2));
+    } else if (/^[0-9a-fA-F]+$/.test(value)) {
+      candidate = hexToBytes(value);
+    } else {
+      try {
+        candidate = base64ToBytes(value);
+      } catch {
+        candidate = null;
+      }
+    }
+
+    return normalize(candidate);
   }
 
   return null;
