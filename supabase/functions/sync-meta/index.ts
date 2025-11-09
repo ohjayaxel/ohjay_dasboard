@@ -224,7 +224,13 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
   await upsertJobLog(client, { tenantId, status: 'running', startedAt });
 
   try {
-    const insights = await fetchMetaInsights(tenantId);
+    const insightsRaw = await fetchMetaInsights(tenantId);
+    const insights = insightsRaw.map((row) => ({
+      ...row,
+      campaign_id: row.campaign_id ?? 'unknown',
+      adset_id: row.adset_id ?? 'unknown',
+      ad_id: row.ad_id ?? 'unknown',
+    }));
 
     if (insights.length > 0) {
       const { error: upsertError } = await client.from('meta_insights_daily').upsert(insights, {
