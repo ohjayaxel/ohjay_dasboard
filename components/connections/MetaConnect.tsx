@@ -3,8 +3,8 @@
 import { useMemo, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 
 type ConnectActionResult = {
@@ -18,25 +18,22 @@ export type MetaConnectProps = {
   status: 'connected' | 'disconnected' | 'error'
   lastSyncedAt?: string | null
   lastSyncedLabel?: string | null
+  selectedAccountName?: string | null
   onConnect?: AsyncAction<ConnectActionResult>
   onDisconnect?: AsyncAction
 }
 
-export function MetaConnect({ status, lastSyncedAt, lastSyncedLabel, onConnect, onDisconnect }: MetaConnectProps) {
+export function MetaConnect({
+  status,
+  lastSyncedAt,
+  lastSyncedLabel,
+  selectedAccountName,
+  onConnect,
+  onDisconnect,
+}: MetaConnectProps) {
   const { toast } = useToast();
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-
-  const statusLabel = useMemo(() => {
-    switch (status) {
-      case 'connected':
-        return { label: 'Connected', variant: 'default' as const };
-      case 'error':
-        return { label: 'Error', variant: 'destructive' as const };
-      default:
-        return { label: 'Disconnected', variant: 'secondary' as const };
-    }
-  }, [status]);
 
   const formattedSync = useMemo(() => {
     if (lastSyncedLabel) {
@@ -49,6 +46,9 @@ export function MetaConnect({ status, lastSyncedAt, lastSyncedLabel, onConnect, 
 
     return lastSyncedAt;
   }, [lastSyncedAt, lastSyncedLabel]);
+
+  const isConnected = status === 'connected';
+  const accountLabel = selectedAccountName ?? 'Not set';
 
   const handleConnect = () => {
     startTransition(async () => {
@@ -104,17 +104,26 @@ export function MetaConnect({ status, lastSyncedAt, lastSyncedLabel, onConnect, 
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-col gap-2">
         <div>
           <h3 className="text-lg font-semibold">Meta Ads</h3>
           <p className="text-sm text-muted-foreground">
             Connect a Meta Business account to sync campaign insights.
           </p>
         </div>
-        <Badge variant={statusLabel.variant}>{statusLabel.label}</Badge>
       </div>
 
       <dl className="grid gap-2 text-sm">
+        <div className="flex items-center justify-between">
+          <dt className="text-muted-foreground">Status</dt>
+          <dd className={cn('font-medium', isConnected ? 'text-emerald-600' : 'text-muted-foreground')}>
+            {isConnected ? 'Connected' : status === 'error' ? 'Error' : 'Disconnected'}
+          </dd>
+        </div>
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+          <dt className="text-muted-foreground">Selected ad account</dt>
+          <dd className="font-medium sm:text-right">{accountLabel}</dd>
+        </div>
         <div className="flex items-center justify-between">
           <dt className="text-muted-foreground">Last synced</dt>
           <dd>{formattedSync}</dd>
@@ -122,8 +131,14 @@ export function MetaConnect({ status, lastSyncedAt, lastSyncedLabel, onConnect, 
       </dl>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={handleConnect} disabled={isPending || status === 'connected'}>
-          {status === 'connected' ? 'Reconnect Meta' : 'Connect Meta'}
+        <Button
+          onClick={handleConnect}
+          disabled={isPending}
+          className={cn(
+            isConnected && 'bg-emerald-500 text-white hover:bg-emerald-600',
+          )}
+        >
+          {isConnected ? 'Meta Connected' : 'Connect Meta'}
         </Button>
         <Button
           variant="outline"
