@@ -27,6 +27,9 @@ function createSupabaseClient(): SupabaseClient {
 
 type MetaConnection = {
   tenant_id: string;
+  access_token_enc: unknown;
+  refresh_token_enc: unknown;
+  expires_at: string | null;
   meta: Record<string, any> | null;
 };
 
@@ -54,6 +57,14 @@ type JobResult = {
 const META_API_VERSION = Deno.env.get('META_API_VERSION') ?? 'v18.0';
 const META_DEV_ACCESS_TOKEN = Deno.env.get('META_DEV_ACCESS_TOKEN');
 const META_DEV_AD_ACCOUNT_ID = Deno.env.get('META_DEV_AD_ACCOUNT_ID');
+const ENCRYPTION_KEY = Deno.env.get('ENCRYPTION_KEY');
+
+const KEY_LENGTH = 32;
+const IV_LENGTH = 12;
+const AUTH_TAG_LENGTH = 16;
+
+let cachedCryptoKey: CryptoKey | null = null;
+const textDecoder = new TextDecoder();
 
 type SyncWindow = {
   since: string;
@@ -237,38 +248,187 @@ async function fetchMetaInsightsFromApi(
   });
 }
 
-async function fetchMetaInsights(
-  tenantId: string,
-  window: SyncWindow,
-  connectionMeta: Record<string, any> | null,
-): Promise<MetaInsightRow[]> {
-  const selectedAccount =
-    connectionMeta && typeof connectionMeta.selected_account_id === 'string'
-      ? connectionMeta.selected_account_id as string
-      : null;
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.length % 2 === 0 ? hex : `0${hex}`;
+  const length = clean.length / 2;
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < length; i++) {
+    const byte = clean.slice(i * 2, i * 2 + 2);
+    bytes[i] = parseInt(byte, 16);
+  }
+  return bytes;
+}
 
-  const fallbackAccount =
-    connectionMeta && Array.isArray(connectionMeta.ad_accounts)
-      ? connectionMeta.ad_accounts.find((account: any) => typeof account?.id === 'string' || typeof account?.account_id === 'string')
-      : null;
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
 
-  const resolvedAccount =
-    selectedAccount ??
-    (fallbackAccount?.id as string | undefined) ??
-    (fallbackAccount?.account_id as string | undefined) ??
-    META_DEV_AD_ACCOUNT_ID ??
-    null;
+function decodeEncryptedPayload(payload: unknown): Uint8Array | null {
+  if (payload === null || payload === undefined) {
+    return null;
+  }
 
-  if (META_DEV_ACCESS_TOKEN && META_DEV_AD_ACCOUNT_ID) {
-    try {
-      const accountId = resolvedAccount ?? META_DEV_AD_ACCOUNT_ID;
-      return await fetchMetaInsightsFromApi(tenantId, META_DEV_ACCESS_TOKEN, accountId, window);
-    } catch (error) {
-      console.error('Failed to fetch Meta insights via Marketing API, falling back to mock data:', error);
+  if (payload instanceof Uint8Array) {
+    return payload;
+  }
+
+  if (payload instanceof ArrayBuffer) {
+    return new Uint8Array(payload);
+  }
+
+  if (ArrayBuffer.isView(payload)) {
+    const view = payload as ArrayBufferView;
+    return new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+  }
+
+  if (typeof payload === 'object' && payload !== null && 'data' in (payload as Record<string, unknown>)) {
+    const data = (payload as { data: number[] }).data;
+    if (Array.isArray(data)) {
+      return Uint8Array.from(data);
     }
   }
 
-  return mockMetaInsights(tenantId, window);
+  if (typeof payload === 'string') {
+    let value = payload.trim();
+    if (value.startsWith('\\\\x')) {
+      value = value.replace(/^\\+x/, '');
+      return hexToBytes(value);
+    }
+    if (value.startsWith('\\x')) {
+      value = value.slice(2);
+      return hexToBytes(value);
+    }
+    if (/^[0-9a-fA-F]+$/.test(value)) {
+      return hexToBytes(value);
+    }
+    try {
+      return base64ToBytes(value);
+    } catch {
+      // fall through
+    }
+  }
+
+  return null;
+}
+
+function parseEncryptionKey(): Uint8Array {
+  if (!ENCRYPTION_KEY) {
+    throw new Error('Missing ENCRYPTION_KEY environment variable.');
+  }
+
+  const rawKey = ENCRYPTION_KEY.trim();
+
+  if (/^[0-9a-fA-F]+$/.test(rawKey) && rawKey.length === KEY_LENGTH * 2) {
+    return hexToBytes(rawKey);
+  }
+
+  if (rawKey.length === KEY_LENGTH) {
+    return new TextEncoder().encode(rawKey);
+  }
+
+  return base64ToBytes(rawKey);
+}
+
+async function getAesKey(): Promise<CryptoKey> {
+  if (cachedCryptoKey) {
+    return cachedCryptoKey;
+  }
+
+  const keyBytes = parseEncryptionKey();
+
+  if (keyBytes.length !== KEY_LENGTH) {
+    throw new Error(`ENCRYPTION_KEY must resolve to ${KEY_LENGTH} bytes.`);
+  }
+
+  cachedCryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+  return cachedCryptoKey;
+}
+
+async function decryptAccessToken(payload: unknown): Promise<string | null> {
+  const encrypted = decodeEncryptedPayload(payload);
+  if (!encrypted) {
+    return null;
+  }
+
+  if (encrypted.length < IV_LENGTH + AUTH_TAG_LENGTH + 1) {
+    throw new Error('Encrypted payload too short to contain IV, auth tag, and ciphertext.');
+  }
+
+  const iv = encrypted.subarray(0, IV_LENGTH);
+  const authTag = encrypted.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+  const ciphertext = encrypted.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+
+  const combined = new Uint8Array(ciphertext.length + authTag.length);
+  combined.set(ciphertext);
+  combined.set(authTag, ciphertext.length);
+
+  try {
+    const key = await getAesKey();
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv, tagLength: AUTH_TAG_LENGTH * 8 },
+      key,
+      combined,
+    );
+    return textDecoder.decode(decrypted);
+  } catch (error) {
+    console.error('Failed to decrypt Meta access token:', error);
+    throw new Error('Unable to decrypt Meta access token for tenant.');
+  }
+}
+
+function getPreferredAccountId(meta: Record<string, any>): string | null {
+  if (typeof meta.selected_account_id === 'string' && meta.selected_account_id.length > 0) {
+    return ensureActPrefix(meta.selected_account_id);
+  }
+
+  if (Array.isArray(meta.ad_accounts)) {
+    for (const candidate of meta.ad_accounts) {
+      if (candidate && (typeof candidate.id === 'string' || typeof candidate.account_id === 'string')) {
+        const id = typeof candidate.id === 'string' ? candidate.id : candidate.account_id;
+        return ensureActPrefix(id as string);
+      }
+    }
+  }
+
+  return null;
+}
+
+type InsightFetchResult = {
+  rows: MetaInsightRow[];
+  accountId: string;
+  tokenSource: 'tenant' | 'dev';
+};
+
+async function fetchTenantInsights(
+  tenantId: string,
+  connection: MetaConnection,
+  connectionMeta: Record<string, any>,
+  window: SyncWindow,
+): Promise<InsightFetchResult> {
+  const accessToken = await decryptAccessToken(connection.access_token_enc);
+  const accountId = getPreferredAccountId(connectionMeta);
+
+  if (accessToken && accountId) {
+    const rows = await fetchMetaInsightsFromApi(tenantId, accessToken, accountId, window);
+    return { rows, accountId, tokenSource: 'tenant' };
+  }
+
+  if (!accessToken) {
+    if (META_DEV_ACCESS_TOKEN && META_DEV_AD_ACCOUNT_ID) {
+      console.warn(`[sync-meta] Tenant ${tenantId} missing Meta access token; using META_DEV fallback.`);
+      const rows = await fetchMetaInsightsFromApi(tenantId, META_DEV_ACCESS_TOKEN, META_DEV_AD_ACCOUNT_ID, window);
+      return { rows, accountId: META_DEV_AD_ACCOUNT_ID, tokenSource: 'dev' };
+    }
+
+    throw new Error('No Meta access token stored for tenant. Connect Meta to enable syncing.');
+  }
+
+  throw new Error('Meta connection missing selected ad account. Choose an account in the admin panel.');
 }
 
 function aggregateKpis(rows: MetaInsightRow[]) {
@@ -332,7 +492,11 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
   await upsertJobLog(client, { tenantId, status: 'running', startedAt });
 
   try {
-    const insightsRaw = await fetchMetaInsights(tenantId, syncWindow, connectionMeta ?? null);
+    const insightsResult = await fetchTenantInsights(tenantId, connection, connectionMeta ?? {}, syncWindow);
+    const insightsRaw = insightsResult.rows.map((row) => ({
+      ...row,
+      tenant_id: tenantId,
+    }));
     const insights = insightsRaw.map((row) => ({
       ...row,
       campaign_id: row.campaign_id ?? 'unknown',
@@ -374,14 +538,15 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
 
     const finishedAt = new Date().toISOString();
 
+    connectionMeta.last_synced_at = finishedAt;
+    connectionMeta.last_synced_range = syncWindow;
+    connectionMeta.last_synced_account_id = insightsResult.accountId;
+    connectionMeta.last_synced_token_source = insightsResult.tokenSource;
+
     const { error: connectionUpdateError } = await client
       .from('connections')
       .update({
-        meta: {
-          ...connectionMeta,
-          last_synced_at: finishedAt,
-          last_synced_range: syncWindow,
-        },
+        meta: connectionMeta,
         updated_at: finishedAt,
       })
       .eq('tenant_id', tenantId)
@@ -418,7 +583,7 @@ serve(async () => {
     const client = createSupabaseClient();
     const { data, error } = await client
       .from('connections')
-      .select('tenant_id, meta')
+      .select('tenant_id, access_token_enc, refresh_token_enc, expires_at, meta')
       .eq('source', SOURCE)
       .eq('status', 'connected');
 
