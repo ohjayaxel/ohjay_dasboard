@@ -60,9 +60,11 @@ export default async function TenantOverviewPage(props: PageProps) {
   const { totals, series } = await getKpiDaily({ tenantId, from, to })
   const latest = series.at(-1)
 
+  const numberLocale = 'en-US'
+
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
-      ? new Intl.NumberFormat(undefined, {
+      ? new Intl.NumberFormat(numberLocale, {
           style: 'currency',
           currency: 'USD',
           maximumFractionDigits: 0,
@@ -70,7 +72,9 @@ export default async function TenantOverviewPage(props: PageProps) {
       : '—'
 
   const formatNumber = (value: number | null) =>
-    value !== null && Number.isFinite(value) ? new Intl.NumberFormat().format(value) : '0'
+    value !== null && Number.isFinite(value)
+      ? new Intl.NumberFormat(numberLocale).format(value)
+      : '0'
 
   const formatRatio = (value: number | null) =>
     value === null || Number.isNaN(value) ? '—' : value.toFixed(2)

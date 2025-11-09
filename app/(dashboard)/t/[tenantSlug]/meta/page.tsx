@@ -21,9 +21,11 @@ export default async function MetaDashboardPage(props: PageProps) {
 
   const { totals, series } = await getKpiDaily({ tenantId, from, to, source: 'meta' })
 
+  const numberLocale = 'en-US'
+
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
-      ? new Intl.NumberFormat(undefined, {
+      ? new Intl.NumberFormat(numberLocale, {
           style: 'currency',
           currency: 'USD',
           maximumFractionDigits: 0,
@@ -34,7 +36,7 @@ export default async function MetaDashboardPage(props: PageProps) {
     value === null || Number.isNaN(value) ? '—' : value.toFixed(2)
 
   const formatNumber = (value: number) =>
-    Number.isFinite(value) ? new Intl.NumberFormat().format(value) : '0'
+    Number.isFinite(value) ? new Intl.NumberFormat(numberLocale).format(value) : '0'
 
   return (
     <div className="space-y-6">
