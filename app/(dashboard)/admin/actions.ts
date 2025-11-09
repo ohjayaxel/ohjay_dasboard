@@ -9,6 +9,7 @@ import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { logger, withRequestContext } from '@/lib/logger'
+import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
 
 const roleEnum = z.enum([
   Roles.platformAdmin,
@@ -449,7 +450,7 @@ export async function updateIntegrationSettings(formData: FormData) {
   const client = getSupabaseServiceClient()
   const { data: connection, error: fetchError } = await client
     .from('connections')
-    .select('id, meta')
+    .select('id, meta, status')
     .eq('tenant_id', tenantId)
     .eq('source', source)
     .maybeSingle()
@@ -519,6 +520,25 @@ export async function updateIntegrationSettings(formData: FormData) {
 
   if (updateError) {
     throw new Error(`Failed to update integration settings: ${updateError.message}`)
+  }
+
+  const connectionStatus =
+    typeof (connection as { status?: string }).status === 'string'
+      ? ((connection as { status?: string }).status as string)
+      : null
+
+  if (shouldResetSyncState && connectionStatus === 'connected') {
+    void triggerSyncJobForTenant(source, tenantId).catch((error: unknown) => {
+      logger.error(
+        {
+          service: source,
+          tenantId,
+          syncStartDate,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to trigger sync after updating integration settings',
+      )
+    })
   }
 
   await revalidateTenantViews(tenantId, tenantSlug)
