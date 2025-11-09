@@ -441,17 +441,23 @@ export async function updateMetaSelectedAccount(formData: FormData) {
     throw new Error('No Meta connection found for this tenant.')
   }
 
-  const accounts = Array.isArray((connection.meta as any)?.accounts)
-    ? ((connection.meta as any).accounts as Array<{ account_id?: string }>)
-    : []
+  const accounts = Array.isArray((connection.meta as any)?.ad_accounts)
+    ? ((connection.meta as any).ad_accounts as Array<{ id?: string; account_id?: string }>)
+    : Array.isArray((connection.meta as any)?.accounts)
+      ? ((connection.meta as any).accounts as Array<{ id?: string; account_id?: string }>)
+      : []
 
-  if (!accounts.some((account) => account?.account_id === result.data.accountId)) {
+  const matchedAccount = accounts.find(
+    (account) => account?.id === result.data.accountId || account?.account_id === result.data.accountId,
+  )
+
+  if (!matchedAccount) {
     throw new Error('Selected ad account is not available for this connection.')
   }
 
   const nextMeta = {
     ...(connection.meta ?? {}),
-    selected_account_id: result.data.accountId,
+    selected_account_id: matchedAccount.id ?? matchedAccount.account_id ?? result.data.accountId,
   }
 
   const { error: updateError } = await client
@@ -464,6 +470,8 @@ export async function updateMetaSelectedAccount(formData: FormData) {
   }
 
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
+
+  redirect(`/admin/tenants/${result.data.tenantSlug}?status=meta-account-updated`)
 }
 
 
