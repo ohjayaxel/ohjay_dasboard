@@ -60,6 +60,20 @@ const updateMetaAccountSchema = z.object({
 })
 
 const INTEGRATION_SOURCES = ['meta', 'google_ads', 'shopify'] as const
+const integrationSourceEnum = z.enum(INTEGRATION_SOURCES)
+
+const updateIntegrationSettingsSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+  source: integrationSourceEnum,
+  syncStartDate: z
+    .string()
+    .optional()
+    .transform((value) => (value && value.length > 0 ? value : null)),
+  kpis: z.array(z.string()).optional(),
+})
 
 const slugify = (value: string) =>
   value
@@ -409,6 +423,70 @@ export async function disconnectMeta(payload: { tenantId: string; tenantSlug: st
   }
 
   await revalidateTenantViews(tenantId, tenantSlug)
+}
+
+export async function updateIntegrationSettings(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const kpiValues = formData
+    .getAll('kpis')
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+
+  const result = updateIntegrationSettingsSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+    source: formData.get('source'),
+    syncStartDate: formData.get('syncStartDate'),
+    kpis: kpiValues,
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid integration settings payload.')
+  }
+
+  const { tenantId, tenantSlug, source, syncStartDate, kpis } = result.data
+
+  const client = getSupabaseServiceClient()
+  const { data: connection, error: fetchError } = await client
+    .from('connections')
+    .select('id, meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', source)
+    .maybeSingle()
+
+  if (fetchError) {
+    throw new Error(`Failed to load integration settings: ${fetchError.message}`)
+  }
+
+  if (!connection) {
+    throw new Error('Integration connection not initialized for this tenant.')
+  }
+
+  const baseMeta =
+    connection.meta && typeof connection.meta === 'object' ? (connection.meta as Record<string, unknown>) : {}
+
+  const nextMeta = {
+    ...baseMeta,
+    sync_start_date: syncStartDate,
+    display_kpis: kpis ?? [],
+    display_kpis_updated_at: new Date().toISOString(),
+  }
+
+  const { error: updateError } = await client
+    .from('connections')
+    .update({
+      meta: nextMeta,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', connection.id)
+
+  if (updateError) {
+    throw new Error(`Failed to update integration settings: ${updateError.message}`)
+  }
+
+  await revalidateTenantViews(tenantId, tenantSlug)
+
+  redirect(`/admin/tenants/${tenantSlug}?status=settings-updated&source=${source}`)
 }
 
 export async function updateMetaSelectedAccount(formData: FormData) {
