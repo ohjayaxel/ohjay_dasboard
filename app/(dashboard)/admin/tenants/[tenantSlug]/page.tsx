@@ -8,6 +8,7 @@ import {
   disconnectMeta,
   removeTenantMember,
   startMetaConnect,
+  triggerMetaSyncNow,
   updateMetaSelectedAccount,
   updateIntegrationSettings,
 } from '@/app/(dashboard)/admin/actions'
@@ -176,6 +177,8 @@ export default async function AdminTenantDetailPage(props: PageProps) {
             const label = statusSource ? SOURCE_LABELS[statusSource] : null
             return label ? `${label} preferences saved.` : 'Integration settings saved.'
           }
+          case 'meta-sync-triggered':
+            return 'Meta sync triggered. Data will refresh shortly.'
           default:
             return 'Changes saved.'
         }
@@ -229,6 +232,28 @@ export default async function AdminTenantDetailPage(props: PageProps) {
       </div>
     ) : null
 
+  const metaManualSyncForm =
+    meta.status === 'connected' ? (
+      <form
+        action={triggerMetaSyncNow}
+        className="flex flex-col gap-2 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:flex-row md:items-center md:justify-between"
+      >
+        <div className="space-y-1">
+          <p className="font-medium text-foreground">Manual sync</p>
+          <p className="text-xs text-muted-foreground">
+            Start an immediate Meta sync using the current account and preferences.
+          </p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <input type="hidden" name="tenantId" value={tenant.id} />
+          <input type="hidden" name="tenantSlug" value={tenant.slug} />
+          <Button type="submit" variant="secondary" className="md:w-auto">
+            Trigger Meta sync
+          </Button>
+        </div>
+      </form>
+    ) : null
+
   const integrationSections = [
     {
       source: 'meta' as const,
@@ -245,7 +270,12 @@ export default async function AdminTenantDetailPage(props: PageProps) {
       syncStartDate: metaSyncStartDate,
       selectedKpis: metaDisplayKpis,
       preferencesHint: 'Control the Meta backfill window and KPIs that appear in dashboards.',
-      extra: metaAccountForm,
+      extra: (
+        <div className="space-y-3">
+          {metaAccountForm}
+          {metaManualSyncForm}
+        </div>
+      ),
     },
     {
       source: 'google_ads' as const,

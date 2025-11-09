@@ -60,6 +60,13 @@ const updateMetaAccountSchema = z.object({
     .min(1, { message: 'Select an ad account.' }),
 })
 
+const triggerMetaSyncSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+})
+
 const INTEGRATION_SOURCES = ['meta', 'google_ads', 'shopify'] as const
 const integrationSourceEnum = z.enum(INTEGRATION_SOURCES)
 
@@ -644,6 +651,51 @@ export async function updateMetaSelectedAccount(formData: FormData) {
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
 
   redirect(`/admin/tenants/${result.data.tenantSlug}?status=meta-account-updated`)
+}
+
+export async function triggerMetaSyncNow(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const result = triggerMetaSyncSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid Meta sync request.')
+  }
+
+  try {
+    await triggerSyncJobForTenant('meta', result.data.tenantId)
+  } catch (error) {
+    logger.error(
+      {
+        route: 'admin.meta',
+        action: 'manual_sync',
+        tenantId: result.data.tenantId,
+        error_message: error instanceof Error ? error.message : String(error),
+      },
+      'Failed to trigger Meta sync manually',
+    )
+    redirect(
+      `/admin/tenants/${result.data.tenantSlug}?error=${encodeURIComponent(
+        'Failed to start Meta sync. Check logs for details.',
+      )}`,
+    )
+  }
+
+  logger.info(
+    {
+      route: 'admin.meta',
+      action: 'manual_sync',
+      tenantId: result.data.tenantId,
+    },
+    'Manual Meta sync triggered',
+  )
+
+  await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
+
+  redirect(`/admin/tenants/${result.data.tenantSlug}?status=meta-sync-triggered`)
 }
 
 
