@@ -61,6 +61,19 @@ const ENCRYPTION_KEY = Deno.env.get('ENCRYPTION_KEY');
 
 const MAX_WINDOW_DAYS = 60;
 
+function logSyncEvent(event: string, payload: Record<string, unknown>) {
+  try {
+    console.log(
+      JSON.stringify({
+        event: `sync-meta:${event}`,
+        ...payload,
+      }),
+    );
+  } catch (error) {
+    console.log(`[sync-meta:${event}]`, payload, error);
+  }
+}
+
 const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
@@ -486,6 +499,13 @@ async function fetchTenantInsights(
         tenant_id: tenantId,
       })),
     );
+    logSyncEvent('chunk_fetch', {
+      tenantId,
+      accountId,
+      since: chunkWindow.since,
+      until: chunkWindow.until,
+      rows: chunkRows.length,
+    });
     lastUntil = chunkWindow.until;
 
     if (chunkUntilDate >= endDate) {
@@ -629,6 +649,16 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
         insightsResult.windowSince,
         insightsResult.windowUntil,
       );
+      logSyncEvent('aggregates', {
+        tenantId,
+        accountId: insightsResult.accountId,
+        windowSince: insightsResult.windowSince,
+        windowUntil: insightsResult.windowUntil,
+        aggregateDates: normalizedAggregates.length,
+        nonZeroDays: normalizedAggregates.filter(
+          (row) => (row.spend ?? 0) > 0 || (row.revenue ?? 0) > 0 || (row.conversions ?? 0) > 0,
+        ).length,
+      });
       const kpiRows = normalizedAggregates.map((row) => ({
         tenant_id: tenantId,
         date: row.date,
@@ -669,6 +699,14 @@ async function processTenant(client: SupabaseClient, connection: MetaConnection)
       })
       .eq('tenant_id', tenantId)
       .eq('source', SOURCE);
+
+    logSyncEvent('sync_complete', {
+      tenantId,
+      accountId: insightsResult.accountId,
+      rowsInserted: insights.length,
+      windowSince: insightsResult.windowSince,
+      windowUntil: insightsResult.windowUntil,
+    });
 
     if (connectionUpdateError) {
       console.error(`Failed to update connection metadata for tenant ${tenantId}:`, connectionUpdateError);

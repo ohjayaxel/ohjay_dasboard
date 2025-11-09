@@ -629,6 +629,18 @@ export async function updateMetaSelectedAccount(formData: FormData) {
     })
   }
 
+  logger.info(
+    {
+      route: 'admin.meta',
+      action: 'account_updated',
+      tenantId: result.data.tenantId,
+      tenantSlug: result.data.tenantSlug,
+      selected_account_id: resolvedAccountId,
+      previous_account_id: previousSelectedAccount,
+    },
+    'Meta ad account selection saved',
+  )
+
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
 
   redirect(`/admin/tenants/${result.data.tenantSlug}?status=meta-account-updated`)

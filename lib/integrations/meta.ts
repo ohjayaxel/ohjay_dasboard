@@ -790,6 +790,19 @@ export async function handleMetaOAuthCallback(options: {
   }
 
   const selectedAccountId = accounts[0]?.id ?? null
+  logger.info(
+    {
+      route: 'meta.oauth',
+      action: 'account_selection',
+      tenantId: options.tenantId,
+      userId: options.userId,
+      state: options.state,
+      state_prefix: statePrefix(options.state),
+      selected_account_id: selectedAccountId,
+      available_accounts: accounts.length,
+    },
+    'Resolved default Meta ad account after OAuth callback',
+  )
 
   let campaigns: MetaCampaignPayload[] = []
   let campaignsTraceId: string | undefined
