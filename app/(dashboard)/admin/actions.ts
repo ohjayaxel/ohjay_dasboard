@@ -682,6 +682,15 @@ export async function triggerMetaSyncNow(formData: FormData) {
     throw new Error(result.error.errors[0]?.message ?? 'Invalid Meta sync request.')
   }
 
+  logger.debug(
+    {
+      route: 'admin.meta',
+      action: 'manual_sync',
+      tenantId: result.data.tenantId,
+    },
+    'Manual Meta sync requested',
+  )
+
   try {
     await triggerSyncJobForTenant('meta', result.data.tenantId)
   } catch (error) {
@@ -757,6 +766,18 @@ export async function triggerMetaBackfill(formData: FormData) {
   if (accountId) {
     payload.accountId = accountId
   }
+
+  logger.debug(
+    {
+      route: 'admin.meta',
+      action: 'manual_backfill',
+      tenantId,
+      since,
+      until,
+      accountId,
+    },
+    'Manual Meta backfill requested',
+  )
 
   try {
     await triggerSyncJobForTenant('meta', tenantId, payload)

@@ -17,6 +17,7 @@ import { getAdminTenantBySlug } from '@/lib/admin/tenants'
 import { Roles } from '@/lib/auth/roles'
 
 import { KpiDropdown } from '@/components/admin/kpi-dropdown'
+import { FormSubmitButton } from '@/components/admin/form-submit-button'
 import { GoogleAdsConnect } from '@/components/connections/GoogleAdsConnect'
 import { MetaConnect } from '@/components/connections/MetaConnect'
 import { ShopifyConnect } from '@/components/connections/ShopifyConnect'
@@ -252,9 +253,9 @@ export default async function AdminTenantDetailPage(props: PageProps) {
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <input type="hidden" name="tenantId" value={tenant.id} />
           <input type="hidden" name="tenantSlug" value={tenant.slug} />
-          <Button type="submit" variant="secondary" className="md:w-auto">
+          <FormSubmitButton type="submit" variant="secondary" className="md:w-auto" pendingLabel="Triggar...">
             Trigger Meta sync
-          </Button>
+          </FormSubmitButton>
         </div>
       </form>
     ) : null
@@ -289,9 +290,9 @@ export default async function AdminTenantDetailPage(props: PageProps) {
           <Label htmlFor="meta-backfill-until">Till datum</Label>
           <Input id="meta-backfill-until" type="date" name="until" defaultValue={todayIso} className="h-10" required />
         </div>
-        <Button type="submit" className="md:w-auto">
+        <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Startar...">
           Starta backfill
-        </Button>
+        </FormSubmitButton>
       </form>
     ) : null
 
