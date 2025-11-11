@@ -21,6 +21,8 @@ yarn-error.log*
 .supabase/
 .DS_Store
 §/
+env/local.*.sh
+env/local.*.env
 
 # vercel
 .vercel

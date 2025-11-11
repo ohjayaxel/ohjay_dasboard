@@ -8,4 +8,5 @@
 \i migrations/004_metrics_schema.sql
 \i migrations/005_meta_table_renames.sql
 \i migrations/006_meta_campaigns.sql
+\i migrations/007_meta_insights_daily_expand.sql
 

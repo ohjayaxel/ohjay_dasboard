@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Production Supabase project
+export NEXT_PUBLIC_SUPABASE_URL="https://your-prod-project.supabase.co"
+export NEXT_PUBLIC_SUPABASE_ANON_KEY="prod-anon-key"
+export SUPABASE_SERVICE_ROLE_KEY="prod-service-role-key"
+
+# Base URLs
+export APP_ENV="production"
+export APP_BASE_URL="https://app.example.com"
+export NEXT_PUBLIC_BASE_URL="https://app.example.com"
+
+# Meta Marketing API
+export META_APP_ID="your-meta-app-id"
+export META_APP_SECRET="your-meta-app-secret"
+# export META_SYSTEM_USER_TOKEN=""  # optional fallback token; document if shared
+
+# Security
+export ENCRYPTION_KEY="32-byte-hex-or-base64-prod-key"
+
+echo "[env] Loaded production profile -> ${NEXT_PUBLIC_SUPABASE_URL}"

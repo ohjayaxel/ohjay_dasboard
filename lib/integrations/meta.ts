@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto'
 import { logger } from '@/lib/logger'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 
-import { decryptSecret, encryptSecret } from './crypto'
+import { decryptSecret, encryptSecret, getEncryptionKeyFingerprint } from './crypto'
 import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
 
 const META_API_VERSION = process.env.META_API_VERSION ?? 'v18.0'
@@ -204,12 +204,20 @@ async function upsertConnection(
   const existing = await getExistingMetaConnection(tenantId)
   const mergedMeta = mergeMeta(existing?.meta as Record<string, unknown> | null, payload.meta)
   const now = new Date().toISOString()
+  const environmentTag = process.env.APP_ENV ?? process.env.NODE_ENV ?? 'development'
+  const encryptionKeyFingerprint = getEncryptionKeyFingerprint()
+  const metaPayload = {
+    ...mergedMeta,
+    environment: environmentTag,
+    encryption_key_fingerprint: encryptionKeyFingerprint,
+    encryption_key_fingerprint_updated_at: now,
+  }
 
   if (existing) {
     const updates: Record<string, unknown> = {
       status: payload.status,
       updated_at: now,
-      meta: mergedMeta,
+      meta: metaPayload,
     }
 
     if (hasOwn(payload, 'accessToken')) {
@@ -241,7 +249,7 @@ async function upsertConnection(
     source: CONNECTION_SOURCE,
     status: payload.status,
     updated_at: now,
-    meta: mergedMeta,
+    meta: metaPayload,
     access_token_enc: payload.accessToken ? encryptSecret(payload.accessToken) : null,
     refresh_token_enc: payload.refreshToken ? encryptSecret(payload.refreshToken) : null,
     expires_at: payload.expiresAt ?? null,

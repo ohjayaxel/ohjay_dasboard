@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Development Supabase project
+export NEXT_PUBLIC_SUPABASE_URL="https://your-dev-project.supabase.co"
+export NEXT_PUBLIC_SUPABASE_ANON_KEY="dev-anon-key"
+export SUPABASE_SERVICE_ROLE_KEY="dev-service-role-key"
+
+# Base URLs
+export APP_ENV="development"
+export APP_BASE_URL="http://localhost:3000"
+export NEXT_PUBLIC_BASE_URL="http://localhost:3000"
+
+# Meta Marketing API (development sandbox)
+export META_APP_ID="your-meta-app-id"
+export META_APP_SECRET="your-meta-app-secret"
+# export META_DEV_ACCESS_TOKEN=""  # optional helper token when using system user
+
+# Security
+export ENCRYPTION_KEY="32-byte-hex-or-base64-dev-key"
+
+echo "[env] Loaded development profile -> ${NEXT_PUBLIC_SUPABASE_URL}"

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto';
 
 const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
@@ -65,4 +65,11 @@ export function decryptSecret(payload: Buffer | Uint8Array | null): string | nul
   const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
   return decrypted.toString('utf8');
 }
+
+export function getEncryptionKeyFingerprint(): string {
+  const key = parseEncryptionKey();
+  ensureKeyLength(key);
+  return createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
 

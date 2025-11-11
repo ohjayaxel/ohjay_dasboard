@@ -24,6 +24,33 @@ This project requires separate configuration for development and production. Use
 | `ENCRYPTION_KEY` | Server | 32-byte key for encrypting tokens | Generate locally (32 bytes base64/hex) |
 | `SENTRY_DSN` | Server | Error logging (optional) | Sentry Project Settings |
 
+## Environment Profiles
+
+Keeping the Supabase keys and the Meta encryption key in sync across environments is critical. The repository ships with shell profile templates in `env/`:
+
+- `env/local.dev.sh.example`
+- `env/local.prod.sh.example`
+
+Copy the example files to `env/local.dev.sh` / `env/local.prod.sh`, replace the placeholder values, and source the profile before running scripts:
+
+```bash
+source env/local.dev.sh    # work against the dev database + encryption key
+# or
+source env/local.prod.sh   # work against production
+```
+
+The profile scripts export `APP_ENV`, Supabase credentials, Meta OAuth credentials, and the `ENCRYPTION_KEY`. The active profile is echoed in the shell so it is obvious which environment is in use. The populated `.sh` files are git-ignored by default.
+
+### Quick Consistency Check
+
+`pnpm tsx scripts/meta_insights_probe.ts` now prints an environment diagnostics block that includes:
+
+- currently loaded Supabase URL
+- fingerprint of the locally sourced `ENCRYPTION_KEY`
+- fingerprint + environment stored in the remote `connections.meta`
+
+If the fingerprints differ, reconnect Meta in the target environment after the correct profile has been sourced.
+
 ## Verification
 
 - Fill `.env.local` with dev values, then run `npm run env:check:dev`.
