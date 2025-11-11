@@ -15,7 +15,7 @@ function toDatabaseRow(row: NormalizedInsightRow, context: UpsertDailyContext) {
 
   return {
     tenant_id: context.tenantId,
-    account_id: row.accountId,
+    ad_account_id: row.accountId,
     campaign_id: row.campaignId,
     campaign_name: row.campaignName,
     adset_id: row.adsetId,

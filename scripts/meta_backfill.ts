@@ -25,9 +25,15 @@ import { createClient } from '@supabase/supabase-js'
 
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { decryptSecret, getEncryptionKeyFingerprint } from '@/lib/integrations/crypto'
-import { createMetaInsightsStorageAdapter } from '@/lib/storage/metaInsightsStorage'
-import { runMonthlyChunk, LEVELS, ACTION_REPORT_TIMES, ATTR_WINDOWS, BREAKDOWN_SETS } from '@/lib/integrations/metaInsightsRunner'
-import type { InsightLevel, ActionReportTime, AttributionWindow } from '@/lib/integrations/metaInsightsRunner'
+import { runMonthlyChunk, LEVELS, ACTION_REPORT_TIMES, ATTR_WINDOWS, BREAKDOWN_SETS, hashBreakdowns } from '@/lib/integrations/metaInsightsRunner'
+import type {
+  InsightLevel,
+  ActionReportTime,
+  AttributionWindow,
+  MetaInsightsStorageAdapter,
+  NormalizedInsightRow,
+  UpsertDailyContext,
+} from '@/lib/integrations/metaInsightsRunner'
 import { logger } from '@/lib/logger'
 
 type ChunkConfig = {
@@ -40,6 +46,7 @@ type RunContext = {
   accountId: string
   accessToken: string
   supabase: ReturnType<typeof getSupabaseServiceClient>
+  storage: MetaInsightsStorageAdapter
 }
 
 type ParsedArgs = {
@@ -49,6 +56,185 @@ type ParsedArgs = {
   until: string
   chunkSize: number
   concurrency: number
+}
+
+const UPSERT_BATCH_SIZE = 500
+const CANONICAL_ACTION_REPORT_TIME: ActionReportTime = 'impression'
+const CANONICAL_ATTR_WINDOW: AttributionWindow = '7d_click'
+
+async function detectSchemaMode(
+  supabase: ReturnType<typeof getSupabaseServiceClient>,
+): Promise<'extended' | 'legacy'> {
+  const probe = await supabase.from('meta_insights_daily').select('action_report_time').limit(1)
+  if (probe.error) {
+    const message = probe.error.message ?? ''
+    if (message.includes('action_report_time') || message.includes('schema cache') || probe.error.code === 'PGRST204') {
+      return 'legacy'
+    }
+  }
+  return 'extended'
+}
+
+class AdaptiveMetaInsightsStorage implements MetaInsightsStorageAdapter {
+  private fallbackMode: 'unknown' | 'extended' | 'legacy'
+
+  constructor(
+    private readonly supabase = getSupabaseServiceClient(),
+    initialMode: 'extended' | 'legacy' = 'extended',
+  ) {
+    this.fallbackMode = initialMode === 'legacy' ? 'legacy' : 'unknown'
+  }
+
+  private async upsertExtended(rows: ReturnType<typeof toExtendedRow>[]) {
+    for (let cursor = 0; cursor < rows.length; cursor += UPSERT_BATCH_SIZE) {
+      const batch = rows.slice(cursor, cursor + UPSERT_BATCH_SIZE)
+      const { error } = await this.supabase
+        .from('meta_insights_daily')
+        .upsert(batch, {
+          onConflict: 'tenant_id,date,level,entity_id,action_report_time,attribution_window,breakdowns_hash',
+        })
+      if (error) {
+        throw error
+      }
+    }
+  }
+
+  private async upsertLegacy(rows: NormalizedInsightRow[], context: UpsertDailyContext) {
+    const payload = rows.map((row) => ({
+      tenant_id: context.tenantId,
+      date: row.dateStart,
+      ad_account_id: context.accountId,
+      campaign_id:
+        row.campaignId ??
+        (context.level === 'account'
+          ? '__account__'
+          : context.level === 'adset' || context.level === 'ad'
+            ? row.campaignId ?? '__adset_parent__'
+            : '__campaign__'),
+      adset_id:
+        row.adsetId ??
+        (context.level === 'account'
+          ? '__account__'
+          : context.level === 'campaign'
+            ? '__campaign__'
+            : context.level === 'ad'
+              ? row.adsetId ?? '__ad_parent__'
+              : '__adset__'),
+      ad_id:
+        row.adId ??
+        (context.level === 'account'
+          ? '__account__'
+          : context.level === 'campaign'
+            ? '__campaign__'
+            : context.level === 'adset'
+              ? '__adset__'
+              : '__ad__'),
+      spend: row.spend,
+      impressions: row.impressions,
+      clicks: row.clicks,
+      purchases: row.purchases,
+      revenue: row.revenue,
+    }))
+
+    for (let cursor = 0; cursor < payload.length; cursor += UPSERT_BATCH_SIZE) {
+      const batch = payload.slice(cursor, cursor + UPSERT_BATCH_SIZE)
+      const { error } = await this.supabase.from('meta_insights_daily').upsert(batch, {
+        onConflict: 'tenant_id,date,ad_account_id,campaign_id,adset_id,ad_id',
+      })
+      if (error) {
+        throw error
+      }
+    }
+  }
+
+  async upsertDaily(rows: NormalizedInsightRow[], context: UpsertDailyContext): Promise<void> {
+    if (rows.length === 0) {
+      return
+    }
+
+    if (this.fallbackMode === 'legacy') {
+      await this.upsertLegacy(rows, context)
+      return
+    }
+
+    const extendedRows = rows.map((row) => toExtendedRow(row, context))
+
+    try {
+      await this.upsertExtended(extendedRows)
+      this.fallbackMode = 'extended'
+    } catch (error) {
+      let message: string
+      if (error instanceof Error) {
+        message = error.message
+      } else if (error && typeof error === 'object' && 'message' in error && typeof (error as any).message === 'string') {
+        message = (error as any).message
+      } else {
+        message = String(error)
+      }
+      if (
+        message.includes("column 'action_report_time'") ||
+        message.includes("column \"action_report_time\"") ||
+        message.includes("column 'account_id'") ||
+        message.includes('schema cache')
+      ) {
+        logger.warn({ message }, 'Falling back to legacy meta_insights_daily schema')
+        this.fallbackMode = 'legacy'
+        await this.upsertLegacy(rows, context)
+        return
+      }
+      throw error
+    }
+  }
+}
+
+function toExtendedRow(row: NormalizedInsightRow, context: UpsertDailyContext) {
+  const breakdownsHash = hashBreakdowns(row.breakdowns)
+
+  return {
+    tenant_id: context.tenantId,
+    ad_account_id: context.accountId,
+    campaign_id: row.campaignId,
+    campaign_name: row.campaignName,
+    adset_id: row.adsetId,
+    adset_name: row.adsetName,
+    ad_id: row.adId,
+    ad_name: row.adName,
+    entity_id: row.entityId,
+    date: row.dateStart,
+    date_stop: row.dateStop,
+    level: context.level,
+    action_report_time: context.actionReportTime,
+    attribution_window: context.attributionWindow,
+    breakdowns_key: context.breakdownsKey || null,
+    breakdowns_hash: breakdownsHash,
+    breakdowns: row.breakdowns,
+    actions: row.actions,
+    action_values: row.actionValues,
+    spend: row.spend,
+    impressions: row.impressions,
+    reach: row.reach,
+    clicks: row.clicks,
+    unique_clicks: row.uniqueClicks,
+    inline_link_clicks: row.inlineLinkClicks,
+    conversions: row.conversions,
+    purchases: row.purchases,
+    add_to_cart: row.addToCart,
+    leads: row.leads,
+    revenue: row.revenue,
+    purchase_roas: row.purchaseRoas,
+    cost_per_action_type: row.costPerActionType,
+    cpm: row.cpm,
+    cpc: row.cpc,
+    ctr: row.ctr,
+    frequency: row.frequency,
+    objective: row.objective,
+    effective_status: row.effectiveStatus,
+    configured_status: row.configuredStatus,
+    buying_type: row.buyingType,
+    daily_budget: row.dailyBudget,
+    lifetime_budget: row.lifetimeBudget,
+    currency: row.currency,
+  }
 }
 
 function parseArgs(): ParsedArgs {
@@ -133,7 +319,6 @@ async function runChunk(
   attributionWindow: AttributionWindow,
 ): Promise<void> {
   const breakdownKeys = breakdowns ? breakdowns.split(',').filter(Boolean) : []
-  const storage = createMetaInsightsStorageAdapter()
 
   logger.info(
     {
@@ -150,11 +335,11 @@ async function runChunk(
     'Backfill chunk start',
   )
 
-  const rows = await runMonthlyChunk({
+  await runMonthlyChunk({
     tenantId: ctx.tenantId,
     accountId: ctx.accountId,
     accessToken: ctx.accessToken,
-    storage,
+    storage: ctx.storage,
     level,
     breakdownKey,
     breakdowns,
@@ -174,7 +359,6 @@ async function runChunk(
       attributionWindow,
       since: chunk.monthSince,
       until: chunk.monthUntil,
-      rows: rows.length,
     },
     'Backfill chunk completed',
   )
@@ -230,6 +414,9 @@ async function main() {
     throw new Error('Missing Supabase credentials (NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)')
   }
 
+  const storageClient = getSupabaseServiceClient()
+  const schemaMode = await detectSchemaMode(storageClient)
+
   logger.info(
     {
       tenantId: args.tenant,
@@ -241,6 +428,7 @@ async function main() {
       env: process.env.APP_ENV ?? process.env.NODE_ENV ?? 'development',
       supabaseUrl: SUPABASE_URL,
       encryptionKeyFingerprint: getEncryptionKeyFingerprint(),
+      schemaMode,
     },
     'Starting Meta backfill',
   )
@@ -248,14 +436,21 @@ async function main() {
   const accessToken = await resolveAccessToken(args.tenant)
 
   const chunks = enumerateChunks(args.since, args.until, args.chunkSize)
-  const storageClient = getSupabaseServiceClient()
+  const storageAdapter = new AdaptiveMetaInsightsStorage(storageClient, schemaMode)
 
   const tasks: Array<() => Promise<void>> = []
 
+  const breakdownEntries = Object.entries(BREAKDOWN_SETS).filter(([key]) =>
+    schemaMode === 'legacy' ? key === 'none' : true,
+  )
+  const actionReportTimes =
+    schemaMode === 'legacy' ? [CANONICAL_ACTION_REPORT_TIME] : ACTION_REPORT_TIMES
+  const attributionWindows = schemaMode === 'legacy' ? [CANONICAL_ATTR_WINDOW] : ATTR_WINDOWS
+
   for (const level of LEVELS) {
-    for (const [breakdownKey, breakdowns] of Object.entries(BREAKDOWN_SETS)) {
-      for (const actionReportTime of ACTION_REPORT_TIMES) {
-        for (const attributionWindow of ATTR_WINDOWS) {
+    for (const [breakdownKey, breakdowns] of breakdownEntries) {
+      for (const actionReportTime of actionReportTimes) {
+        for (const attributionWindow of attributionWindows) {
           for (const chunk of chunks) {
             tasks.push(async () =>
               runChunk(
@@ -264,6 +459,7 @@ async function main() {
                   accountId: args.account,
                   accessToken,
                   supabase: storageClient,
+                  storage: storageAdapter,
                 },
                 chunk,
                 level,
@@ -300,7 +496,12 @@ async function main() {
 }
 
 main().catch((error) => {
-  logger.error({ error }, 'Meta backfill failed')
+  logger.error(
+    {
+      error: error instanceof Error ? { message: error.message, stack: error.stack } : error,
+    },
+    'Meta backfill failed',
+  )
   process.exit(1)
 })
 

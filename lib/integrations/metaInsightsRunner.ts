@@ -20,15 +20,31 @@ export const BREAKDOWN_SETS: Record<string, string> = {
   D: 'device_platform',
 }
 
-export const FIELDS = [
+const ACCOUNT_FIELDS: readonly string[] = [
+  'account_id',
+  'date_start',
+  'date_stop',
+  'impressions',
+  'reach',
+  'clicks',
+  'unique_clicks',
+  'inline_link_clicks',
+  'spend',
+  'cpm',
+  'cpc',
+  'ctr',
+  'actions',
+  'action_values',
+  'purchase_roas',
+  'cost_per_action_type',
+  'frequency',
+  'account_currency',
+]
+
+const ENTITY_FIELDS: readonly string[] = [
   'account_id',
   'campaign_id',
   'campaign_name',
-  'campaign_effective_status',
-  'campaign_status',
-  'buying_type',
-  'daily_budget',
-  'lifetime_budget',
   'adset_id',
   'adset_name',
   'ad_id',
@@ -46,14 +62,11 @@ export const FIELDS = [
   'ctr',
   'actions',
   'action_values',
-  'conversions',
   'purchase_roas',
   'cost_per_action_type',
   'frequency',
-  'objective',
-  'buying_type',
   'account_currency',
-] as const
+]
 
 export type UpsertDailyContext = {
   tenantId: string
@@ -87,7 +100,7 @@ export function buildParams({
   attributionWindow,
 }: BuildParamsInput) {
   const params: Record<string, unknown> = {
-    fields: FIELDS.join(','),
+    fields: (level === 'account' ? ACCOUNT_FIELDS : ENTITY_FIELDS).join(','),
     level,
     time_range: { since, until },
     time_increment: 1,
@@ -138,7 +151,7 @@ function extractActionCount(actions: any[] | null, predicate: (actionType: strin
     if (!predicate(actionType)) {
       continue
     }
-    const value = entry?.value ?? entry?.count ?? entry?.1
+    const value = entry?.value ?? entry?.count ?? entry?.['1']
     const parsed = parseNumber(value)
     if (parsed !== null) {
       return parsed

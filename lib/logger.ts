@@ -11,6 +11,7 @@ type RequestScope = {
 const storage = new AsyncLocalStorage<RequestScope>()
 
 export type Logger = {
+  debug: (context: LogContext, message: string) => void
   info: (context: LogContext, message: string) => void
   warn: (context: LogContext, message: string) => void
   error: (context: LogContext, message: string) => void
@@ -50,16 +51,24 @@ function withBaseContext(context: LogContext): LogContext {
   }
 }
 
-function emit(level: 'info' | 'warn' | 'error', context: LogContext, message: string) {
+function emit(level: 'debug' | 'info' | 'warn' | 'error', context: LogContext, message: string) {
   const payload = withBaseContext(context)
 
   if (baseLogger) {
+    if (level === 'debug' && typeof baseLogger.debug !== 'function') {
+      baseLogger.info({ ...payload, level: 'debug' }, message)
+      return
+    }
     baseLogger[level](payload, message)
     return
   }
 
   const line = `[${level.toUpperCase()}] ${message}`
   switch (level) {
+    case 'debug': {
+      console.debug(line, payload)
+      break
+    }
     case 'warn': {
       console.warn(line, payload)
       break
@@ -76,6 +85,9 @@ function emit(level: 'info' | 'warn' | 'error', context: LogContext, message: st
 
 function createLogger(context: LogContext = {}): Logger {
   return {
+    debug(additionalContext, message) {
+      emit('debug', { ...context, ...additionalContext }, message)
+    },
     info(additionalContext, message) {
       emit('info', { ...context, ...additionalContext }, message)
     },
