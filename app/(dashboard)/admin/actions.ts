@@ -67,6 +67,23 @@ const triggerMetaSyncSchema = z.object({
     .min(1, { message: 'Tenant slug is required.' }),
 })
 
+const triggerMetaBackfillSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+  since: z
+    .string({ required_error: 'Start date is required.' })
+    .min(1, { message: 'Start date is required.' }),
+  until: z
+    .string({ required_error: 'End date is required.' })
+    .min(1, { message: 'End date is required.' }),
+  accountId: z
+    .string()
+    .optional()
+    .transform((value) => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : null)),
+})
+
 const INTEGRATION_SOURCES = ['meta', 'google_ads', 'shopify'] as const
 const integrationSourceEnum = z.enum(INTEGRATION_SOURCES)
 
@@ -696,6 +713,86 @@ export async function triggerMetaSyncNow(formData: FormData) {
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
 
   redirect(`/admin/tenants/${result.data.tenantSlug}?status=meta-sync-triggered`)
+}
+
+export async function triggerMetaBackfill(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const parsed = triggerMetaBackfillSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+    since: formData.get('since'),
+    until: formData.get('until'),
+    accountId: formData.get('accountId'),
+  })
+
+  if (!parsed.success) {
+    throw new Error(parsed.error.errors[0]?.message ?? 'Invalid Meta backfill request.')
+  }
+
+  const { tenantId, tenantSlug, accountId } = parsed.data
+
+  const normalizeDate = (value: string, label: string) => {
+    const trimmed = value.trim()
+    const parsedDate = new Date(`${trimmed}T00:00:00Z`)
+    if (Number.isNaN(parsedDate.getTime())) {
+      throw new Error(`${label} är inte ett giltigt datum.`)
+    }
+    return parsedDate.toISOString().slice(0, 10)
+  }
+
+  const since = normalizeDate(parsed.data.since, 'Startdatum')
+  const until = normalizeDate(parsed.data.until, 'Slutdatum')
+
+  if (since > until) {
+    throw new Error('Slutdatum måste vara samma som eller senare än startdatum.')
+  }
+
+  const payload: Record<string, unknown> = {
+    mode: 'backfill',
+    since,
+    until,
+  }
+
+  if (accountId) {
+    payload.accountId = accountId
+  }
+
+  try {
+    await triggerSyncJobForTenant('meta', tenantId, payload)
+  } catch (error) {
+    logger.error(
+      {
+        route: 'admin.meta',
+        action: 'manual_backfill',
+        tenantId,
+        error_message: error instanceof Error ? error.message : String(error),
+      },
+      'Failed to trigger Meta backfill manually',
+    )
+
+    redirect(
+      `/admin/tenants/${tenantSlug}?error=${encodeURIComponent(
+        'Kunde inte starta Meta-backfill. Kontrollera loggarna för mer information.',
+      )}`,
+    )
+  }
+
+  logger.info(
+    {
+      route: 'admin.meta',
+      action: 'manual_backfill',
+      tenantId,
+      since,
+      until,
+      accountId,
+    },
+    'Manual Meta backfill triggered',
+  )
+
+  await revalidateTenantViews(tenantId, tenantSlug)
+
+  redirect(`/admin/tenants/${tenantSlug}?status=meta-backfill-triggered`)
 }
 
 

@@ -8,6 +8,7 @@ import {
   disconnectMeta,
   removeTenantMember,
   startMetaConnect,
+  triggerMetaBackfill,
   triggerMetaSyncNow,
   updateMetaSelectedAccount,
   updateIntegrationSettings,
@@ -107,6 +108,8 @@ export default async function AdminTenantDetailPage(props: PageProps) {
   const googleDetails = (google.meta ?? {}) as Record<string, unknown>
   const shopifyDetails = (shopify.meta ?? {}) as Record<string, unknown>
 
+  const todayIso = new Date().toISOString().slice(0, 10)
+
   const metaSyncStartDate = toDateInputValue(metaDetails.sync_start_date)
   const googleSyncStartDate = toDateInputValue(googleDetails.sync_start_date)
   const shopifySyncStartDate = toDateInputValue(shopifyDetails.sync_start_date)
@@ -179,6 +182,8 @@ export default async function AdminTenantDetailPage(props: PageProps) {
           }
           case 'meta-sync-triggered':
             return 'Meta sync triggered. Data will refresh shortly.'
+          case 'meta-backfill-triggered':
+            return 'Meta-backfill startad. Data fylls på i bakgrunden.'
           default:
             return 'Changes saved.'
         }
@@ -254,6 +259,42 @@ export default async function AdminTenantDetailPage(props: PageProps) {
       </form>
     ) : null
 
+  const metaBackfillForm =
+    meta.status === 'connected' ? (
+      <form
+        action={triggerMetaBackfill}
+        className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[repeat(3,minmax(0,1fr))_auto] md:items-end"
+      >
+        <input type="hidden" name="tenantId" value={tenant.id} />
+        <input type="hidden" name="tenantSlug" value={tenant.slug} />
+        {selectedMetaAccountId ? <input type="hidden" name="accountId" value={selectedMetaAccountId} /> : null}
+        <div className="md:col-span-3 space-y-1">
+          <p className="font-medium text-foreground">Manual backfill</p>
+          <p className="text-xs text-muted-foreground">
+            Hämta historisk data mellan två datum för det valda Meta-kontot.
+          </p>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="meta-backfill-since">Från datum</Label>
+          <Input
+            id="meta-backfill-since"
+            type="date"
+            name="since"
+            defaultValue={metaSyncStartDate || todayIso}
+            className="h-10"
+            required
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="meta-backfill-until">Till datum</Label>
+          <Input id="meta-backfill-until" type="date" name="until" defaultValue={todayIso} className="h-10" required />
+        </div>
+        <Button type="submit" className="md:w-auto">
+          Starta backfill
+        </Button>
+      </form>
+    ) : null
+
   const integrationSections = [
     {
       source: 'meta' as const,
@@ -274,6 +315,7 @@ export default async function AdminTenantDetailPage(props: PageProps) {
         <div className="space-y-3">
           {metaAccountForm}
           {metaManualSyncForm}
+          {metaBackfillForm}
         </div>
       ),
     },

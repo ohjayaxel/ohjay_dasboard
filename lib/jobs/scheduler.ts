@@ -63,10 +63,17 @@ export async function triggerSyncJob(source: Source) {
   return invokeWithRetry({ source });
 }
 
-export async function triggerSyncJobForTenant(source: Source, tenantId: string) {
+export async function triggerSyncJobForTenant(
+  source: Source,
+  tenantId: string,
+  extraPayload?: Record<string, unknown>,
+) {
   return invokeWithRetry({
     source,
-    payload: { tenantId },
+    payload: {
+      tenantId,
+      ...(extraPayload ?? {}),
+    },
   });
 }
 
