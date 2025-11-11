@@ -41,7 +41,55 @@ export function encryptSecret(plainText: string): Buffer {
   return Buffer.concat([iv, authTag, encrypted]);
 }
 
-export function decryptSecret(payload: Buffer | Uint8Array | null): string | null {
+function parseBufferLike(payload: Buffer | Uint8Array | string): Buffer {
+  if (Buffer.isBuffer(payload)) {
+    return payload;
+  }
+
+  if (payload instanceof Uint8Array) {
+    return Buffer.from(payload);
+  }
+
+  if (typeof payload === 'string') {
+    let input = payload.trim();
+
+    if (input.startsWith('\\x')) {
+      const hexPayload = input.slice(2);
+      const hexBuffer = Buffer.from(hexPayload, 'hex');
+      const asString = hexBuffer.toString('utf8');
+
+      if (asString.startsWith('{') && asString.includes('"type":"Buffer"')) {
+        try {
+          const parsed = JSON.parse(asString) as { data?: number[] };
+          if (Array.isArray(parsed?.data)) {
+            return Buffer.from(parsed.data);
+          }
+        } catch {
+          // fall through to returning hexBuffer
+        }
+      }
+
+      return hexBuffer;
+    }
+
+    if (input.startsWith('{') && input.includes('"type":"Buffer"')) {
+      try {
+        const parsed = JSON.parse(input) as { data?: number[] };
+        if (Array.isArray(parsed?.data)) {
+          return Buffer.from(parsed.data);
+        }
+      } catch {
+        // fall through to base64 decode
+      }
+    }
+
+    return Buffer.from(input, 'base64');
+  }
+
+  return Buffer.from([]);
+}
+
+export function decryptSecret(payload: Buffer | Uint8Array | string | null): string | null {
   if (!payload) {
     return null;
   }
@@ -49,7 +97,7 @@ export function decryptSecret(payload: Buffer | Uint8Array | null): string | nul
   const key = parseEncryptionKey();
   ensureKeyLength(key);
 
-  const buffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const buffer = parseBufferLike(payload);
 
   if (buffer.length < IV_LENGTH + AUTH_TAG_LENGTH) {
     throw new Error('Encrypted payload too short to contain IV and auth tag.');

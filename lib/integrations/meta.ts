@@ -32,8 +32,8 @@ export const META_STATE_TTL_MS = STATE_TTL_MS
 
 type ConnectionRow = {
   id: string
-  access_token_enc: Buffer | null
-  refresh_token_enc: Buffer | null
+  access_token_enc: Buffer | string | null
+  refresh_token_enc: Buffer | string | null
   expires_at: string | null
   meta: Record<string, unknown> | null
 }
