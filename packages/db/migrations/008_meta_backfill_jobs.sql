@@ -12,6 +12,7 @@ create table if not exists meta_backfill_jobs (
   progress_total integer not null default 0,
   chunk_count integer,
   combination_count integer,
+  aggregate_currency boolean not null default false,
   started_at timestamptz,
   finished_at timestamptz,
   error_message text,

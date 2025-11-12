@@ -110,6 +110,25 @@ function buildCliArgs(job: BackfillJobRow) {
   return args
 }
 
+async function spawnCli(args: string[]) {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('pnpm', args, {
+      stdio: 'inherit',
+      env: process.env,
+    })
+
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        reject(new Error(`Command ${args.join(' ')} exited with code ${code ?? 'null'}`))
+      }
+    })
+
+    child.on('error', reject)
+  })
+}
+
 async function runJob(job: BackfillJobRow) {
   const config = (job.config_json ?? {}) as RunnerConfigurationInput & {
     chunkSize?: number
@@ -155,30 +174,37 @@ async function runJob(job: BackfillJobRow) {
     'Starting Meta backfill job',
   )
 
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn('pnpm', cliArgs, {
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        META_BACKFILL_JOB_ID: job.id,
-      },
-    })
+  await spawnCli(cliArgs)
 
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve()
-      } else {
-        reject(new Error(`Backfill process exited with code ${code ?? 'null'}`))
-      }
-    })
+  logger.info(
+    {
+      jobId: job.id,
+      tenantId: job.tenant_id,
+      accountId: job.account_id,
+      since: job.since,
+      until: job.until,
+    },
+    'Meta backfill finished, starting KPI aggregation',
+  )
 
-    child.on('error', reject)
-  })
+  await spawnCli([
+    'tsx',
+    'scripts/meta_kpi_upsert.ts',
+    '--tenant',
+    job.tenant_id,
+    '--account',
+    job.account_id,
+    '--since',
+    job.since,
+    '--until',
+    job.until,
+  ])
 
   await updateJob(job.id, {
     status: 'completed',
     progress_completed: totalJobs,
     finished_at: new Date().toISOString(),
+    aggregate_currency: true,
   })
 
   logger.info({ jobId: job.id }, 'Meta backfill job completed')
