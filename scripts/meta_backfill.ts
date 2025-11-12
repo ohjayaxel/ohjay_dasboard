@@ -25,7 +25,17 @@ import { createClient } from '@supabase/supabase-js'
 
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { decryptSecret, getEncryptionKeyFingerprint } from '@/lib/integrations/crypto'
-import { runMonthlyChunk, LEVELS, ACTION_REPORT_TIMES, ATTR_WINDOWS, BREAKDOWN_SETS, hashBreakdowns } from '@/lib/integrations/metaInsightsRunner'
+import {
+  runMonthlyChunk,
+  LEVELS,
+  ACTION_REPORT_TIMES,
+  ATTR_WINDOWS,
+  BREAKDOWN_SETS,
+  hashBreakdowns,
+  buildMatrixCombinations,
+  resolveRunnerConfiguration,
+} from '@/lib/integrations/metaInsightsRunner'
+import type { RunnerConfigurationInput } from '@/lib/integrations/metaInsightsRunner'
 import type {
   InsightLevel,
   ActionReportTime,
@@ -56,11 +66,42 @@ type ParsedArgs = {
   until: string
   chunkSize: number
   concurrency: number
+  levels?: string[]
+  breakdowns?: string[]
+  actionTimes?: string[]
+  attributionWindows?: string[]
 }
 
 const UPSERT_BATCH_SIZE = 500
 const CANONICAL_ACTION_REPORT_TIME: ActionReportTime = 'impression'
 const CANONICAL_ATTR_WINDOW: AttributionWindow = '7d_click'
+const AVG_SECONDS_PER_JOB = 45
+
+function filterInsightLevels(values?: string[]): InsightLevel[] | undefined {
+  if (!values) return undefined
+  const valid = values.filter((value): value is InsightLevel => (LEVELS as readonly string[]).includes(value))
+  return valid.length > 0 ? Array.from(new Set(valid)) : undefined
+}
+
+function filterBreakdownKeys(values?: string[]): string[] | undefined {
+  if (!values) return undefined
+  const valid = values.filter((value) => Object.prototype.hasOwnProperty.call(BREAKDOWN_SETS, value))
+  return valid.length > 0 ? Array.from(new Set(valid)) : undefined
+}
+
+function filterActionTimes(values?: string[]): ActionReportTime[] | undefined {
+  if (!values) return undefined
+  const valid = values.filter((value): value is ActionReportTime =>
+    (ACTION_REPORT_TIMES as readonly string[]).includes(value),
+  )
+  return valid.length > 0 ? Array.from(new Set(valid)) : undefined
+}
+
+function filterAttrWindows(values?: string[]): AttributionWindow[] | undefined {
+  if (!values) return undefined
+  const valid = values.filter((value): value is AttributionWindow => (ATTR_WINDOWS as readonly string[]).includes(value))
+  return valid.length > 0 ? Array.from(new Set(valid)) : undefined
+}
 
 async function detectSchemaMode(
   supabase: ReturnType<typeof getSupabaseServiceClient>,
@@ -257,16 +298,40 @@ function parseArgs(): ParsedArgs {
     type: 'int',
     help: 'Number of concurrent chunk runners (default 2)',
   })
+  parser.add_argument('--levels', {
+    help: 'Comma-separated levels (account,campaign,adset,ad)',
+  })
+  parser.add_argument('--breakdowns', {
+    help: 'Comma-separated breakdown keys (none,A,B,C,D)',
+  })
+  parser.add_argument('--action-times', {
+    help: 'Comma-separated action report times (impression,conversion)',
+  })
+  parser.add_argument('--attr-windows', {
+    help: 'Comma-separated attribution windows (1d_click,7d_click,1d_view)',
+  })
 
-  const args = parser.parse_args() as Partial<ParsedArgs>
+  const args = parser.parse_args()
+
+  const parseCsv = (value?: string | null): string[] | undefined =>
+    typeof value === 'string' && value.trim().length > 0
+      ? value
+          .split(',')
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0)
+      : undefined
 
   return {
-    tenant: args.tenant!,
-    account: args.account!,
-    since: args.since!,
-    until: args.until!,
-    chunkSize: Math.max(1, args.chunkSize ?? 1),
-    concurrency: Math.max(1, args.concurrency ?? 2),
+    tenant: args.tenant as string,
+    account: args.account as string,
+    since: args.since as string,
+    until: args.until as string,
+    chunkSize: Math.max(1, (args.chunkSize as number | undefined) ?? 1),
+    concurrency: Math.max(1, (args.concurrency as number | undefined) ?? 2),
+    levels: parseCsv(args.levels as string | undefined),
+    breakdowns: parseCsv(args.breakdowns as string | undefined),
+    actionTimes: parseCsv(args.action_times as string | undefined),
+    attributionWindows: parseCsv(args.attr_windows as string | undefined),
   }
 }
 
@@ -417,6 +482,44 @@ async function main() {
   const storageClient = getSupabaseServiceClient()
   const schemaMode = await detectSchemaMode(storageClient)
 
+  const overrides: RunnerConfigurationInput = {}
+  const overrideLevels = filterInsightLevels(args.levels)
+  if (overrideLevels) {
+    overrides.levels = overrideLevels
+  }
+  const overrideBreakdowns = filterBreakdownKeys(args.breakdowns)
+  if (overrideBreakdowns) {
+    overrides.breakdownKeys = overrideBreakdowns
+  }
+  const overrideActionTimes = filterActionTimes(args.actionTimes)
+  if (overrideActionTimes) {
+    overrides.actionReportTimes = overrideActionTimes
+  }
+  const overrideAttrWindows = filterAttrWindows(args.attributionWindows)
+  if (overrideAttrWindows) {
+    overrides.attributionWindows = overrideAttrWindows
+  }
+
+  let runnerConfig = resolveRunnerConfiguration(overrides)
+  if (schemaMode === 'legacy') {
+    runnerConfig = {
+      ...runnerConfig,
+      breakdownKeys: ['none'],
+      actionReportTimes: [CANONICAL_ACTION_REPORT_TIME],
+      attributionWindows: [CANONICAL_ATTR_WINDOW],
+    }
+  }
+
+  const combinations = buildMatrixCombinations(runnerConfig)
+  if (combinations.length === 0) {
+    throw new Error('No valid parameter combinations resolved. Check provided filters.')
+  }
+
+  const chunks = enumerateChunks(args.since, args.until, args.chunkSize)
+  const totalJobs = combinations.length * chunks.length
+  const estSeconds = totalJobs * AVG_SECONDS_PER_JOB
+  const estWallSeconds = Math.ceil(estSeconds / Math.max(1, args.concurrency))
+
   logger.info(
     {
       tenantId: args.tenant,
@@ -429,49 +532,44 @@ async function main() {
       supabaseUrl: SUPABASE_URL,
       encryptionKeyFingerprint: getEncryptionKeyFingerprint(),
       schemaMode,
+      levels: runnerConfig.levels,
+      breakdownKeys: runnerConfig.breakdownKeys,
+      actionReportTimes: runnerConfig.actionReportTimes,
+      attributionWindows: runnerConfig.attributionWindows,
+      totalMonths: chunks.length,
+      totalCombinations: combinations.length,
+      totalJobs,
+      estimatedDurationMinutes: Math.ceil(estWallSeconds / 60),
+      estimatedDurationSeconds: estWallSeconds,
     },
     'Starting Meta backfill',
   )
 
   const accessToken = await resolveAccessToken(args.tenant)
 
-  const chunks = enumerateChunks(args.since, args.until, args.chunkSize)
   const storageAdapter = new AdaptiveMetaInsightsStorage(storageClient, schemaMode)
 
   const tasks: Array<() => Promise<void>> = []
 
-  const breakdownEntries = Object.entries(BREAKDOWN_SETS).filter(([key]) =>
-    schemaMode === 'legacy' ? key === 'none' : true,
-  )
-  const actionReportTimes =
-    schemaMode === 'legacy' ? [CANONICAL_ACTION_REPORT_TIME] : ACTION_REPORT_TIMES
-  const attributionWindows = schemaMode === 'legacy' ? [CANONICAL_ATTR_WINDOW] : ATTR_WINDOWS
-
-  for (const level of LEVELS) {
-    for (const [breakdownKey, breakdowns] of breakdownEntries) {
-      for (const actionReportTime of actionReportTimes) {
-        for (const attributionWindow of attributionWindows) {
-          for (const chunk of chunks) {
-            tasks.push(async () =>
-              runChunk(
-                {
-                  tenantId: args.tenant,
-                  accountId: args.account,
-                  accessToken,
-                  supabase: storageClient,
-                  storage: storageAdapter,
-                },
-                chunk,
-                level,
-                breakdownKey,
-                breakdowns,
-                actionReportTime,
-                attributionWindow,
-              ),
-            )
-          }
-        }
-      }
+  for (const combo of combinations) {
+    for (const chunk of chunks) {
+      tasks.push(async () =>
+        runChunk(
+          {
+            tenantId: args.tenant,
+            accountId: args.account,
+            accessToken,
+            supabase: storageClient,
+            storage: storageAdapter,
+          },
+          chunk,
+          combo.level,
+          combo.breakdownKey,
+          combo.breakdowns,
+          combo.actionReportTime,
+          combo.attributionWindow,
+        ),
+      )
     }
   }
 

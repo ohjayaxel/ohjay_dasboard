@@ -9,4 +9,5 @@
 \i migrations/005_meta_table_renames.sql
 \i migrations/006_meta_campaigns.sql
 \i migrations/007_meta_insights_daily_expand.sql
+\i migrations/008_meta_backfill_jobs.sql
 

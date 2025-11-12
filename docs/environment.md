@@ -46,6 +46,12 @@ Core variables:
   supabase functions deploy sync-meta --project-ref <prod-project>
   ```
 
+### Meta backfill vs. inkrementell sync
+
+- Edge-funktionen `sync-meta` ska köras tätt (via cron eller admin-knappen) för att hålla de senaste ~30 dagarna uppdaterade.
+- För längre historik (månad/år): kör `scripts/meta_backfill.ts` manuellt. Se `docs/META_BACKFILL.md` för full instruktion.
+- Backfill-skriptet körs utanför Edge Functions och klarar därför stora intervall utan 504-timeouts.
+
 ## QA Checklist Before Production Promote
 
 - Supabase RLS enforced: cross-tenant reads blocked.

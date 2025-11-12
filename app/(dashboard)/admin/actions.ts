@@ -67,6 +67,22 @@ const triggerMetaSyncSchema = z.object({
     .min(1, { message: 'Tenant slug is required.' }),
 })
 
+const queueMetaBackfillSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+  accountId: z
+    .string({ required_error: 'Select an ad account.' })
+    .min(1, { message: 'Select an ad account.' }),
+  since: z
+    .string({ required_error: 'Start date is required.' })
+    .min(1, { message: 'Start date is required.' }),
+  until: z
+    .string({ required_error: 'End date is required.' })
+    .min(1, { message: 'End date is required.' }),
+})
+
 const triggerMetaBackfillSchema = z.object({
   tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
   tenantSlug: z
@@ -814,6 +830,116 @@ export async function triggerMetaBackfill(formData: FormData) {
   await revalidateTenantViews(tenantId, tenantSlug)
 
   redirect(`/admin/tenants/${tenantSlug}?status=meta-backfill-triggered`)
+}
+
+export async function queueMetaBackfillJobs(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const parsed = queueMetaBackfillSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+    accountId: formData.get('accountId'),
+    since: formData.get('since'),
+    until: formData.get('until'),
+  })
+
+  if (!parsed.success) {
+    throw new Error(parsed.error.errors[0]?.message ?? 'Invalid Meta backfill queue payload.')
+  }
+
+  const { tenantId, tenantSlug, accountId, since, until } = parsed.data
+
+  const normalizeDate = (value: string, label: string) => {
+    const trimmed = value.trim()
+    const parsedDate = new Date(`${trimmed}T00:00:00Z`)
+    if (Number.isNaN(parsedDate.getTime())) {
+      throw new Error(`${label} är inte ett giltigt datum.`)
+    }
+    return parsedDate.toISOString().slice(0, 10)
+  }
+
+  const normalizedSince = normalizeDate(since, 'Startdatum')
+  const normalizedUntil = normalizeDate(until, 'Slutdatum')
+
+  if (normalizedSince > normalizedUntil) {
+    throw new Error('Slutdatum måste vara samma som eller senare än startdatum.')
+  }
+
+  const client = getSupabaseServiceClient()
+  const now = new Date().toISOString()
+
+  const baseJob = {
+    tenant_id: tenantId,
+    account_id: accountId,
+    since: normalizedSince,
+    until: normalizedUntil,
+    created_at: now,
+    updated_at: now,
+  }
+
+  const jobs = [
+    {
+      ...baseJob,
+      mode: 'fast',
+      config_json: {
+        levels: ['account'],
+        breakdownKeys: ['none'],
+        actionReportTimes: ['impression', 'conversion'],
+        attributionWindows: ['1d_click', '7d_click'],
+        chunkSize: 1,
+        concurrency: 2,
+      },
+    },
+    {
+      ...baseJob,
+      mode: 'full',
+      config_json: {
+        levels: ['campaign', 'adset', 'ad'],
+        breakdownKeys: ['A', 'B', 'C', 'D'],
+        actionReportTimes: ['impression', 'conversion'],
+        attributionWindows: ['1d_click', '7d_click', '1d_view'],
+        chunkSize: 1,
+        concurrency: 2,
+      },
+    },
+  ]
+
+  const { error } = await client.from('meta_backfill_jobs').insert(jobs)
+
+  if (error) {
+    logger.error(
+      {
+        route: 'admin.meta',
+        action: 'queue_backfill',
+        tenantId,
+        accountId,
+        error_message: error.message,
+      },
+      'Failed to queue Meta backfill jobs',
+    )
+
+    redirect(
+      `/admin/tenants/${tenantSlug}?error=${encodeURIComponent(
+        'Kunde inte skapa backfill-jobb. Kontrollera loggar för mer information.',
+      )}`,
+    )
+  }
+
+  logger.info(
+    {
+      route: 'admin.meta',
+      action: 'queue_backfill',
+      tenantId,
+      accountId,
+      since: normalizedSince,
+      until: normalizedUntil,
+    },
+    'Queued Meta backfill jobs',
+  )
+
+  await revalidateTenantViews(tenantId, tenantSlug)
+
+  redirect(`/admin/tenants/${tenantSlug}?status=meta-backfill-queued`)
 }
 
 

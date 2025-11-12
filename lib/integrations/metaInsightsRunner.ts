@@ -1,4 +1,5 @@
 import { createHash } from 'crypto'
+import { setTimeout as sleep } from 'timers/promises'
 
 import { logger } from '@/lib/logger'
 import { fetchResultPage, pollJob, startInsightsJob } from '@/lib/integrations/metaClient'
@@ -18,6 +19,110 @@ export const BREAKDOWN_SETS: Record<string, string> = {
   B: 'age,gender',
   C: 'country',
   D: 'device_platform',
+}
+
+export type RunnerConfigurationInput = Partial<{
+  levels: InsightLevel[]
+  breakdownKeys: string[]
+  actionReportTimes: ActionReportTime[]
+  attributionWindows: AttributionWindow[]
+}>
+
+export type RunnerConfiguration = {
+  levels: InsightLevel[]
+  breakdownKeys: string[]
+  actionReportTimes: ActionReportTime[]
+  attributionWindows: AttributionWindow[]
+}
+
+const DEFAULT_RUNNER_CONFIGURATION: RunnerConfiguration = {
+  levels: [...LEVELS],
+  breakdownKeys: Object.keys(BREAKDOWN_SETS),
+  actionReportTimes: [...ACTION_REPORT_TIMES],
+  attributionWindows: [...ATTR_WINDOWS],
+}
+
+const VALID_LEVELS = new Set<InsightLevel>(LEVELS)
+const VALID_BREAKDOWN_KEYS = new Set(Object.keys(BREAKDOWN_SETS))
+const VALID_ACTION_TIMES = new Set<ActionReportTime>(ACTION_REPORT_TIMES)
+const VALID_ATTR_WINDOWS = new Set<AttributionWindow>(ATTR_WINDOWS)
+
+function unique<T>(values: T[]): T[] {
+  return Array.from(new Set(values))
+}
+
+function filterWithFallback<T>(
+  requested: readonly T[] | undefined,
+  validator: (value: T) => boolean,
+  fallback: readonly T[],
+): T[] {
+  if (!requested || requested.length === 0) {
+    return [...fallback]
+  }
+  const filtered = requested.filter(validator)
+  return filtered.length > 0 ? unique(filtered) : [...fallback]
+}
+
+export function resolveRunnerConfiguration(overrides?: RunnerConfigurationInput): RunnerConfiguration {
+  if (!overrides) {
+    return { ...DEFAULT_RUNNER_CONFIGURATION }
+  }
+
+  const levels = filterWithFallback(overrides.levels, (value): value is InsightLevel => VALID_LEVELS.has(value), LEVELS)
+  const breakdownKeys = filterWithFallback(
+    overrides.breakdownKeys,
+    (value): value is string => VALID_BREAKDOWN_KEYS.has(value),
+    Object.keys(BREAKDOWN_SETS),
+  )
+  const actionReportTimes = filterWithFallback(
+    overrides.actionReportTimes,
+    (value): value is ActionReportTime => VALID_ACTION_TIMES.has(value),
+    ACTION_REPORT_TIMES,
+  )
+  const attributionWindows = filterWithFallback(
+    overrides.attributionWindows,
+    (value): value is AttributionWindow => VALID_ATTR_WINDOWS.has(value),
+    ATTR_WINDOWS,
+  )
+
+  return {
+    levels,
+    breakdownKeys,
+    actionReportTimes,
+    attributionWindows,
+  }
+}
+
+export type MatrixCombination = {
+  level: InsightLevel
+  breakdownKey: string
+  breakdowns: string
+  actionReportTime: ActionReportTime
+  attributionWindow: AttributionWindow
+}
+
+export function buildMatrixCombinations(config?: RunnerConfigurationInput): MatrixCombination[] {
+  const resolved = resolveRunnerConfiguration(config)
+  const combinations: MatrixCombination[] = []
+
+  for (const level of resolved.levels) {
+    for (const breakdownKey of resolved.breakdownKeys) {
+      const breakdowns = BREAKDOWN_SETS[breakdownKey] ?? ''
+      for (const actionReportTime of resolved.actionReportTimes) {
+        for (const attributionWindow of resolved.attributionWindows) {
+          combinations.push({
+            level,
+            breakdownKey,
+            breakdowns,
+            actionReportTime,
+            attributionWindow,
+          })
+        }
+      }
+    }
+  }
+
+  return combinations
 }
 
 const ACCOUNT_FIELDS: readonly string[] = [
@@ -67,6 +172,9 @@ const ENTITY_FIELDS: readonly string[] = [
   'frequency',
   'account_currency',
 ]
+
+const MAX_CHUNK_ATTEMPTS = 3
+const CHUNK_RETRY_BASE_DELAY_MS = 2000
 
 export type UpsertDailyContext = {
   tenantId: string
@@ -341,6 +449,22 @@ type RunMonthlyChunkArgs = {
   attributionWindow: AttributionWindow
 }
 
+function isTransientJobError(error: unknown): boolean {
+  if (!error || !(error instanceof Error)) {
+    return false
+  }
+
+  const message = error.message.toLowerCase()
+
+  return (
+    message.includes('unsupported get request') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('not completed yet') ||
+    message.includes('job timed out') ||
+    message.includes('internal error')
+  )
+}
+
 export async function runMonthlyChunk({
   tenantId,
   accountId,
@@ -363,102 +487,112 @@ export async function runMonthlyChunk({
     attributionWindow,
   })
 
-  const { jobId, resultUrl } = await startInsightsJob({
-    accountId,
-    params,
-    accessToken,
-    logContext: {
-      tenantId,
-      level,
-      breakdownKey,
-      since,
-      until,
-      actionReportTime,
-      attributionWindow,
-    },
-  })
-
-  const { files } = await pollJob({
-    jobId,
-    accessToken,
-    logContext: {
-      tenantId,
-      level,
-      breakdownKey,
-      since,
-      until,
-      actionReportTime,
-      attributionWindow,
-    },
-  })
-
-  const breakdownNames = breakdowns ? breakdowns.split(',').filter(Boolean) : []
-
-  const rowsToPersist: NormalizedInsightRow[] = []
-
-  for (const fileUrl of files.length > 0 ? files : [resultUrl]) {
-    let nextUrl: string | undefined = fileUrl
-
-    while (nextUrl) {
-      const page = await fetchResultPage({
-        url: nextUrl,
-        accessToken,
-        logContext: {
-          tenantId,
-          level,
-          breakdownKey,
-          since,
-          until,
-          actionReportTime,
-          attributionWindow,
-        },
-      })
-
-      for (const rawRow of page.data) {
-        if (!rawRow || typeof rawRow !== 'object') {
-          continue
-        }
-        const normalized = normalizeRow(rawRow as Record<string, unknown>, {
-          level,
-          breakdownKeys: breakdownNames,
-        })
-        if (!normalized) {
-          continue
-        }
-        rowsToPersist.push(normalized)
-      }
-
-      nextUrl = page.next
-    }
-  }
-
-  if (rowsToPersist.length === 0) {
-    logger.info(
-      {
-        tenantId,
-        accountId,
-        level,
-        breakdownKey,
-        since,
-        until,
-        actionReportTime,
-        attributionWindow,
-        rows: 0,
-      },
-      'Meta monthly chunk produced no rows',
-    )
-    return
-  }
-
-  await storage.upsertDaily(rowsToPersist, {
+  const baseContext = {
     tenantId,
     accountId,
     level,
+    breakdownKey,
+    since,
+    until,
     actionReportTime,
     attributionWindow,
-    breakdownsKey: breakdownKey,
-    breakdownKeys: breakdownNames,
-  })
+  }
+
+  for (let attempt = 1; attempt <= MAX_CHUNK_ATTEMPTS; attempt += 1) {
+    const attemptContext = attempt === 1 ? baseContext : { ...baseContext, attempt }
+
+    try {
+      const { jobId, resultUrl } = await startInsightsJob({
+        accountId,
+        params,
+        accessToken,
+        logContext: attemptContext,
+      })
+
+      const { files } = await pollJob({
+        jobId,
+        accessToken,
+        logContext: attemptContext,
+      })
+
+      const breakdownNames = breakdowns ? breakdowns.split(',').filter(Boolean) : []
+
+      const rowsToPersist: NormalizedInsightRow[] = []
+
+      for (const fileUrl of files.length > 0 ? files : [resultUrl]) {
+        let nextUrl: string | undefined = fileUrl
+
+        while (nextUrl) {
+          const page = await fetchResultPage({
+            url: nextUrl,
+            accessToken,
+            logContext: attemptContext,
+          })
+
+          for (const rawRow of page.data) {
+            if (!rawRow || typeof rawRow !== 'object') {
+              continue
+            }
+            const normalized = normalizeRow(rawRow as Record<string, unknown>, {
+              level,
+              breakdownKeys: breakdownNames,
+            })
+            if (!normalized) {
+              continue
+            }
+            rowsToPersist.push(normalized)
+          }
+
+          nextUrl = page.next
+        }
+      }
+
+      if (rowsToPersist.length === 0) {
+        logger.info({ ...attemptContext, rows: 0 }, 'Meta monthly chunk produced no rows')
+        return
+      }
+
+      await storage.upsertDaily(rowsToPersist, {
+        tenantId,
+        accountId,
+        level,
+        actionReportTime,
+        attributionWindow,
+        breakdownsKey: breakdownKey,
+        breakdownKeys: breakdownNames,
+      })
+
+      return
+    } catch (error) {
+      if (isTransientJobError(error) && attempt < MAX_CHUNK_ATTEMPTS) {
+        const delayMs = CHUNK_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)
+        logger.warn(
+          {
+            ...attemptContext,
+            attempt,
+            maxAttempts: MAX_CHUNK_ATTEMPTS,
+            delay_ms: delayMs,
+            error_message: error instanceof Error ? error.message : String(error),
+          },
+          'Meta monthly chunk transient error, retrying',
+        )
+        await sleep(delayMs)
+        continue
+      }
+
+      logger.error(
+        {
+          ...attemptContext,
+          attempt,
+          maxAttempts: MAX_CHUNK_ATTEMPTS,
+          error_message: error instanceof Error ? error.message : String(error),
+        },
+        'Meta monthly chunk failed',
+      )
+
+      throw error
+    }
+  }
 }
 
 type RunFullMatrixArgs = {
@@ -468,6 +602,7 @@ type RunFullMatrixArgs = {
   storage: MetaInsightsStorageAdapter
   since: string
   until: string
+  config?: RunnerConfigurationInput
 }
 
 export async function runFullMatrix({
@@ -477,48 +612,44 @@ export async function runFullMatrix({
   storage,
   since,
   until,
+  config,
 }: RunFullMatrixArgs): Promise<void> {
   const months = enumerateMonths(since, until)
+  const combinations = buildMatrixCombinations(config)
 
-  for (const level of LEVELS) {
-    for (const [breakdownKey, breakdowns] of Object.entries(BREAKDOWN_SETS)) {
-      for (const actionReportTime of ACTION_REPORT_TIMES) {
-        for (const attributionWindow of ATTR_WINDOWS) {
-          for (const { monthSince, monthUntil } of months) {
-            try {
-              await runMonthlyChunk({
-                tenantId,
-                accountId,
-                accessToken,
-                storage,
-                level,
-                breakdownKey,
-                breakdowns,
-                since: monthSince,
-                until: monthUntil,
-                actionReportTime,
-                attributionWindow,
-              })
-            } catch (error) {
-              logger.error(
-                {
-                  tenantId,
-                  accountId,
-                  level,
-                  breakdownKey,
-                  breakdowns,
-                  since: monthSince,
-                  until: monthUntil,
-                  actionReportTime,
-                  attributionWindow,
-                  error,
-                },
-                'Meta insights monthly chunk failed',
-              )
-              throw error
-            }
-          }
-        }
+  for (const combo of combinations) {
+    for (const { monthSince, monthUntil } of months) {
+      try {
+        await runMonthlyChunk({
+          tenantId,
+          accountId,
+          accessToken,
+          storage,
+          level: combo.level,
+          breakdownKey: combo.breakdownKey,
+          breakdowns: combo.breakdowns,
+          since: monthSince,
+          until: monthUntil,
+          actionReportTime: combo.actionReportTime,
+          attributionWindow: combo.attributionWindow,
+        })
+      } catch (error) {
+        logger.error(
+          {
+            tenantId,
+            accountId,
+            level: combo.level,
+            breakdownKey: combo.breakdownKey,
+            breakdowns: combo.breakdowns,
+            since: monthSince,
+            until: monthUntil,
+            actionReportTime: combo.actionReportTime,
+            attributionWindow: combo.attributionWindow,
+            error,
+          },
+          'Meta insights monthly chunk failed',
+        )
+        throw error
       }
     }
   }

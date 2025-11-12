@@ -6,15 +6,16 @@ import { notFound } from 'next/navigation'
 import {
   addTenantMember,
   disconnectMeta,
+  queueMetaBackfillJobs,
   removeTenantMember,
   startMetaConnect,
-  triggerMetaBackfill,
   triggerMetaSyncNow,
   updateMetaSelectedAccount,
   updateIntegrationSettings,
 } from '@/app/(dashboard)/admin/actions'
 import { getAdminTenantBySlug } from '@/lib/admin/tenants'
 import { Roles } from '@/lib/auth/roles'
+import { getSupabaseServiceClient } from '@/lib/supabase/server'
 
 import { KpiDropdown } from '@/components/admin/kpi-dropdown'
 import { FormSubmitButton } from '@/components/admin/form-submit-button'
@@ -109,6 +110,20 @@ export default async function AdminTenantDetailPage(props: PageProps) {
   const googleDetails = (google.meta ?? {}) as Record<string, unknown>
   const shopifyDetails = (shopify.meta ?? {}) as Record<string, unknown>
 
+  const supabase = getSupabaseServiceClient()
+  const { data: metaBackfillJobs, error: metaBackfillJobsError } = await supabase
+    .from('meta_backfill_jobs')
+    .select(
+      'id, mode, status, since, until, progress_completed, progress_total, started_at, finished_at, error_message, created_at, updated_at',
+    )
+    .eq('tenant_id', tenant.id)
+    .order('created_at', { ascending: false })
+    .limit(10)
+
+  if (metaBackfillJobsError) {
+    console.warn('Failed to load Meta backfill jobs:', metaBackfillJobsError.message)
+  }
+
   const todayIso = new Date().toISOString().slice(0, 10)
 
   const metaSyncStartDate = toDateInputValue(metaDetails.sync_start_date)
@@ -183,6 +198,8 @@ export default async function AdminTenantDetailPage(props: PageProps) {
           }
           case 'meta-sync-triggered':
             return 'Meta sync triggered. Data will refresh shortly.'
+          case 'meta-backfill-queued':
+            return 'Två backfill-jobb skapade. Du ser statusen nedan.'
           case 'meta-backfill-triggered':
             return 'Meta-backfill startad. Data fylls på i bakgrunden.'
           default:
@@ -260,40 +277,98 @@ export default async function AdminTenantDetailPage(props: PageProps) {
       </form>
     ) : null
 
-  const metaBackfillForm =
-    meta.status === 'connected' ? (
-      <form
-        action={triggerMetaBackfill}
-        className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[repeat(3,minmax(0,1fr))_auto] md:items-end"
-      >
-        <input type="hidden" name="tenantId" value={tenant.id} />
-        <input type="hidden" name="tenantSlug" value={tenant.slug} />
-        {selectedMetaAccountId ? <input type="hidden" name="accountId" value={selectedMetaAccountId} /> : null}
-        <div className="md:col-span-3 space-y-1">
-          <p className="font-medium text-foreground">Manual backfill</p>
-          <p className="text-xs text-muted-foreground">
-            Hämta historisk data mellan två datum för det valda Meta-kontot.
-          </p>
-        </div>
+  const hasSelectedMetaAccount = Boolean(selectedMetaAccountId)
+
+  const metaQueueForm =
+    meta.status === 'connected'
+      ? hasSelectedMetaAccount
+        ? (
+          <form
+            action={queueMetaBackfillJobs}
+            className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[repeat(3,minmax(0,1fr))_auto] md:items-end"
+          >
+            <input type="hidden" name="tenantId" value={tenant.id} />
+            <input type="hidden" name="tenantSlug" value={tenant.slug} />
+            <input type="hidden" name="accountId" value={selectedMetaAccountId ?? ''} />
+            <div className="md:col-span-3 space-y-1">
+              <p className="font-medium text-foreground">Köa backfill-jobb</p>
+              <p className="text-xs text-muted-foreground">
+                Skapar ett snabbt kontojobb och ett detaljerat breakdown-jobb i kön.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="meta-backfill-since">Från datum</Label>
+              <Input
+                id="meta-backfill-since"
+                type="date"
+                name="since"
+                defaultValue={metaSyncStartDate || todayIso}
+                className="h-10"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="meta-backfill-until">Till datum</Label>
+              <Input
+                id="meta-backfill-until"
+                type="date"
+                name="until"
+                defaultValue={todayIso}
+                className="h-10"
+                required
+              />
+            </div>
+            <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Lägger till...">
+              Lägg till i kön
+            </FormSubmitButton>
+          </form>
+          )
+        : (
+          <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm text-muted-foreground">
+            Välj ett Meta-konto innan du kan köa backfill-jobb.
+          </div>
+          )
+      : null
+
+  const metaBackfillQueue =
+    metaBackfillJobs && metaBackfillJobs.length > 0 ? (
+      <div className="space-y-2 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm">
+        <p className="font-medium text-foreground">Backfill-kö</p>
+        <p className="text-xs text-muted-foreground">Senaste backfill-jobben för detta tenant.</p>
         <div className="space-y-2">
-          <Label htmlFor="meta-backfill-since">Från datum</Label>
-          <Input
-            id="meta-backfill-since"
-            type="date"
-            name="since"
-            defaultValue={metaSyncStartDate || todayIso}
-            className="h-10"
-            required
-          />
+          {metaBackfillJobs.map((job) => {
+            const total = job.progress_total ?? 0
+            const completed = job.progress_completed ?? 0
+            const percent = total > 0 ? Math.floor((completed / total) * 100) : 0
+
+            return (
+              <div
+                key={job.id}
+                className="space-y-1 rounded-lg border border-dashed border-muted/40 bg-background/60 p-3 text-xs text-muted-foreground"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-wide">
+                  <span className="font-semibold text-foreground">{job.mode}</span>
+                  <span className="text-muted-foreground">{job.status}</span>
+                </div>
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <span>
+                    Period:{' '}
+                    <span className="font-mono">{job.since}</span> → <span className="font-mono">{job.until}</span>
+                  </span>
+                  <span className="text-muted-foreground">
+                    Progress: {completed}/{total} {total > 0 ? `(${percent}%)` : ''}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <span>Startad: {job.started_at ? formatTimestamp(job.started_at) ?? job.started_at : '–'}</span>
+                  <span>Klar: {job.finished_at ? formatTimestamp(job.finished_at) ?? job.finished_at : '–'}</span>
+                </div>
+                {job.error_message ? <div className="text-destructive">Fel: {job.error_message}</div> : null}
+              </div>
+            )
+          })}
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="meta-backfill-until">Till datum</Label>
-          <Input id="meta-backfill-until" type="date" name="until" defaultValue={todayIso} className="h-10" required />
-        </div>
-        <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Startar...">
-          Starta backfill
-        </FormSubmitButton>
-      </form>
+      </div>
     ) : null
 
   const integrationSections = [
@@ -316,7 +391,8 @@ export default async function AdminTenantDetailPage(props: PageProps) {
         <div className="space-y-3">
           {metaAccountForm}
           {metaManualSyncForm}
-          {metaBackfillForm}
+          {metaQueueForm}
+          {metaBackfillQueue}
         </div>
       ),
     },
