@@ -48,7 +48,7 @@ async function main() {
 
   const { data, error } = await client
     .from('meta_insights_daily')
-    .select('tenant_id, date, spend, inline_link_clicks, conversions, revenue, currency')
+    .select('tenant_id, date, spend, inline_link_clicks, purchases, conversions, revenue, currency')
     .eq('tenant_id', args.tenant)
     .eq('ad_account_id', args.account)
     .eq('level', 'account')
@@ -70,6 +70,7 @@ async function main() {
       spend: number
       clicks: number
       conversions: number
+      results: number
       revenue: number
       currency: string | null
     }
@@ -90,7 +91,9 @@ async function main() {
     existing.spend += Number(row.spend ?? 0)
     const linkClicks = Number((row as { inline_link_clicks?: number | null }).inline_link_clicks ?? 0)
     existing.clicks += linkClicks
-    existing.conversions += Number(row.conversions ?? 0)
+    const totalResults =
+      Number((row as { purchases?: number | null }).purchases ?? 0) + Number(row.conversions ?? 0)
+    existing.conversions += totalResults
     existing.revenue += Number(row.revenue ?? 0)
     if (!existing.currency && (row as { currency?: string | null })?.currency) {
       existing.currency = (row as { currency?: string | null }).currency ?? null
