@@ -24,6 +24,7 @@ type BackfillJobRow = {
   status: string
   progress_completed: number | null
   progress_total: number | null
+  aggregate_currency: boolean
 }
 
 function enumerateMonths(since: string, until: string, chunkSize: number): Array<{ since: string; until: string }> {

@@ -33,6 +33,7 @@ type MetaInsightRow = {
   purchases: number | null
   revenue: number | null
   currency: string | null
+  link_clicks: number | null
 }
 
 type MetaCampaignRecord = {
@@ -1171,6 +1172,8 @@ function toMetaRow(tenantId: string, accountId: string, normalized: NormalizedIn
     clicks: normalized.clicks,
     purchases: normalized.purchases,
     revenue: normalized.revenue,
+    currency: normalized.currency ?? null,
+    link_clicks: normalized.inlineLinkClicks ?? null,
   }
 }
 
@@ -1362,14 +1365,29 @@ async function runFullMatrix(
 function aggregateKpis(rows: MetaInsightRow[]) {
   const byDate = new Map<
     string,
-    { spend: number; clicks: number; conversions: number; revenue: number; currency: string | null }
+    {
+      spend: number
+      clicks: number
+      linkClicks: number
+      conversions: number
+      revenue: number
+      currency: string | null
+    }
   >()
 
   for (const row of rows) {
     const bucket =
-      byDate.get(row.date) ?? { spend: 0, clicks: 0, conversions: 0, revenue: 0, currency: row.currency ?? null }
+      byDate.get(row.date) ?? {
+        spend: 0,
+        clicks: 0,
+        linkClicks: 0,
+        conversions: 0,
+        revenue: 0,
+        currency: row.currency ?? null,
+      }
     bucket.spend += row.spend ?? 0
     bucket.clicks += row.clicks ?? 0
+    bucket.linkClicks += row.link_clicks ?? 0
     bucket.conversions += row.purchases ?? 0
     bucket.revenue += row.revenue ?? 0
     if (!bucket.currency && row.currency) {
@@ -1386,7 +1404,7 @@ function aggregateKpis(rows: MetaInsightRow[]) {
     return {
       date,
       spend: values.spend || null,
-      clicks: values.clicks || null,
+      clicks: values.linkClicks || null,
       conversions: values.conversions || null,
       revenue: values.revenue || null,
       aov,

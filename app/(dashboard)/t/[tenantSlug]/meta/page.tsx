@@ -68,7 +68,7 @@ export default async function MetaDashboardPage(props: PageProps) {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Purchases</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">Results</CardTitle>
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-semibold tracking-tight">{formatNumber(totals.conversions)}</p>
@@ -90,7 +90,7 @@ export default async function MetaDashboardPage(props: PageProps) {
                   <th className="px-4 py-2 text-left font-medium">Date</th>
                   <th className="px-4 py-2 text-left font-medium">Spend</th>
                   <th className="px-4 py-2 text-left font-medium">Revenue</th>
-                  <th className="px-4 py-2 text-left font-medium">Purchases</th>
+                  <th className="px-4 py-2 text-left font-medium">Results</th>
                   <th className="px-4 py-2 text-left font-medium">ROAS</th>
                 </tr>
               </thead>
