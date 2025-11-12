@@ -92,25 +92,48 @@ async function main() {
     byDate.set(date, existing)
   }
 
-  const rows = Array.from(byDate.entries()).map(([date, aggregate]) => {
-    const { spend, clicks, conversions, revenue } = aggregate
-    const aov = conversions > 0 ? revenue / conversions : null
-    const cos = revenue > 0 ? spend / revenue : null
-    const roas = spend > 0 ? revenue / spend : null
+  const rows: {
+    tenant_id: string
+    date: string
+    source: 'meta'
+    spend: number | null
+    clicks: number | null
+    conversions: number | null
+    revenue: number | null
+    aov: number | null
+    cos: number | null
+    roas: number | null
+  }[] = []
 
-    return {
-      tenant_id: aggregate.tenantId,
-      date,
-      source: 'meta' as const,
-      spend,
-      clicks,
-      conversions,
-      revenue,
-      aov,
-      cos,
-      roas,
-    }
-  })
+  const startDate = new Date(since)
+  const endDate = new Date(until)
+
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    throw new Error('Invalid date range provided.')
+  }
+
+  for (const cursor = new Date(startDate); cursor <= endDate; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+    const key = cursor.toISOString().slice(0, 10)
+    const aggregate = byDate.get(key)
+    const tenantId = aggregate?.tenantId ?? args.tenant
+    const spend = aggregate?.spend ?? 0
+    const clicks = aggregate?.clicks ?? 0
+    const conversions = aggregate?.conversions ?? 0
+    const revenue = aggregate?.revenue ?? 0
+
+    rows.push({
+      tenant_id: tenantId,
+      date: key,
+      source: 'meta',
+      spend: spend || null,
+      clicks: clicks || null,
+      conversions: conversions || null,
+      revenue: revenue || null,
+      aov: conversions > 0 ? revenue / conversions : null,
+      cos: revenue > 0 ? spend / revenue : null,
+      roas: spend > 0 ? revenue / spend : null,
+    })
+  }
 
   if (rows.length === 0) {
     console.log('No account-level rows found to aggregate.')
