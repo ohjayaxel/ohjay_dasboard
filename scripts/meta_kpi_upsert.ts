@@ -48,12 +48,13 @@ async function main() {
 
   const { data, error } = await client
     .from('meta_insights_daily')
-    .select('tenant_id, date, spend, clicks, conversions, revenue')
+    .select('tenant_id, date, spend, clicks, conversions, revenue, currency')
     .eq('tenant_id', args.tenant)
     .eq('ad_account_id', args.account)
     .eq('level', 'account')
-    .eq('action_report_time', 'impression')
+    .eq('action_report_time', 'conversion')
     .eq('attribution_window', '1d_click')
+    .eq('breakdowns_key', 'none')
     .gte('date', since)
     .lte('date', until)
     .order('date', { ascending: true })
@@ -82,15 +83,21 @@ async function main() {
       clicks: 0,
       conversions: 0,
       revenue: 0,
+      currency: (row as { currency?: string | null })?.currency ?? null,
     }
 
     existing.spend += Number(row.spend ?? 0)
     existing.clicks += Number(row.clicks ?? 0)
     existing.conversions += Number(row.conversions ?? 0)
     existing.revenue += Number(row.revenue ?? 0)
+    if (!existing.currency && (row as { currency?: string | null })?.currency) {
+      existing.currency = (row as { currency?: string | null }).currency ?? null
+    }
 
     byDate.set(date, existing)
   }
+
+  const defaultCurrency = Array.from(byDate.values()).find((entry) => entry.currency)?.currency ?? null
 
   const rows: {
     tenant_id: string
@@ -103,6 +110,7 @@ async function main() {
     aov: number | null
     cos: number | null
     roas: number | null
+    currency: string | null
   }[] = []
 
   const startDate = new Date(since)
@@ -120,6 +128,7 @@ async function main() {
     const clicks = aggregate?.clicks ?? 0
     const conversions = aggregate?.conversions ?? 0
     const revenue = aggregate?.revenue ?? 0
+    const rowCurrency = aggregate?.currency ?? defaultCurrency ?? null
 
     rows.push({
       tenant_id: tenantId,
@@ -132,6 +141,7 @@ async function main() {
       aov: conversions > 0 ? revenue / conversions : null,
       cos: revenue > 0 ? spend / revenue : null,
       roas: spend > 0 ? revenue / spend : null,
+      currency: rowCurrency,
     })
   }
 

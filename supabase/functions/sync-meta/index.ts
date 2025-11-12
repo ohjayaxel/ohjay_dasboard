@@ -32,6 +32,7 @@ type MetaInsightRow = {
   clicks: number | null
   purchases: number | null
   revenue: number | null
+  currency: string | null
 }
 
 type MetaCampaignRecord = {
@@ -1359,14 +1360,21 @@ async function runFullMatrix(
   }
 }
 function aggregateKpis(rows: MetaInsightRow[]) {
-  const byDate = new Map<string, { spend: number; clicks: number; conversions: number; revenue: number }>()
+  const byDate = new Map<
+    string,
+    { spend: number; clicks: number; conversions: number; revenue: number; currency: string | null }
+  >()
 
   for (const row of rows) {
-    const bucket = byDate.get(row.date) ?? { spend: 0, clicks: 0, conversions: 0, revenue: 0 }
+    const bucket =
+      byDate.get(row.date) ?? { spend: 0, clicks: 0, conversions: 0, revenue: 0, currency: row.currency ?? null }
     bucket.spend += row.spend ?? 0
     bucket.clicks += row.clicks ?? 0
     bucket.conversions += row.purchases ?? 0
     bucket.revenue += row.revenue ?? 0
+    if (!bucket.currency && row.currency) {
+      bucket.currency = row.currency
+    }
     byDate.set(row.date, bucket)
   }
 
@@ -1384,6 +1392,7 @@ function aggregateKpis(rows: MetaInsightRow[]) {
       aov,
       cos,
       roas,
+      currency: values.currency ?? null,
     }
   })
 }
@@ -1419,6 +1428,7 @@ function fillMissingAggregateDates(
       aov: null,
       cos: null,
       roas: null,
+      currency: aggregates.find((entry) => entry.currency)?.currency ?? null,
     })
   }
 
@@ -1673,6 +1683,7 @@ async function processTenant(
         aov: row.aov,
         cos: row.cos,
         roas: row.roas,
+      currency: row.currency ?? null,
       }))
 
       const { error: kpiError } = await client.from('kpi_daily').upsert(kpiRows, {

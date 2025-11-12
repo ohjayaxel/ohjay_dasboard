@@ -19,15 +19,16 @@ export default async function GoogleAdsDashboardPage(props: PageProps) {
   const from = startWindow.toISOString().slice(0, 10)
   const to = today.toISOString().slice(0, 10)
 
-  const { totals, series } = await getKpiDaily({ tenantId, from, to, source: 'google_ads' })
+  const { totals, series, currency } = await getKpiDaily({ tenantId, from, to, source: 'google_ads' })
 
   const numberLocale = 'en-US'
+  const currencyCode = currency ?? 'USD'
 
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
       ? new Intl.NumberFormat(numberLocale, {
           style: 'currency',
-          currency: 'USD',
+          currency: currencyCode,
           maximumFractionDigits: 0,
         }).format(value)
       : '—'

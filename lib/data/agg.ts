@@ -29,6 +29,7 @@ export type KpiSeriesResult = {
   rows: KpiDailyRow[];
   totals: KpiTotals;
   series: KpiSeriesPoint[];
+  currency: string | null;
 };
 
 function sum(values: Array<number | null | undefined>) {
@@ -119,8 +120,9 @@ export const getKpiDaily = cache(async (params: GetKpiDailyParams): Promise<KpiS
 
   const series = buildSeries(rows);
   const totals = buildTotals(rows);
+  const currency = rows.find((row) => row.currency)?.currency ?? null;
 
-  return { rows, series, totals };
+  return { rows, series, totals, currency };
 });
 
 export const getLatestKpiSummary = cache(async (params: {
@@ -133,10 +135,13 @@ export const getLatestKpiSummary = cache(async (params: {
     return null;
   }
 
+  const totals = buildTotals([row]);
+
   return {
     date: row.date,
     source: row.source,
-    metrics: buildTotals([row]),
+    metrics: totals,
+    currency: row.currency ?? null,
   };
 });
 

@@ -57,16 +57,17 @@ export default async function TenantOverviewPage(props: PageProps) {
 
   const selectedMetricKeys = metricsSelection.length > 0 ? metricsSelection : defaultMetrics
 
-  const { totals, series } = await getKpiDaily({ tenantId, from, to })
+  const { totals, series, currency } = await getKpiDaily({ tenantId, from, to })
   const latest = series.at(-1)
 
   const numberLocale = 'en-US'
+  const currencyCode = currency ?? 'USD'
 
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
       ? new Intl.NumberFormat(numberLocale, {
           style: 'currency',
-          currency: 'USD',
+          currency: currencyCode,
           maximumFractionDigits: 0,
         }).format(value)
       : '—'
