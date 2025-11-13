@@ -885,6 +885,7 @@ export async function queueMetaBackfillJobs(formData: FormData) {
         preset: 'account-country-lite',
         chunkSize: 1,
         concurrency: 4,
+        skipKpi: true,
       },
     },
   ]

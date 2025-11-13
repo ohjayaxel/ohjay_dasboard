@@ -24,6 +24,62 @@ export const BREAKDOWN_SETS: Record<string, string> = {
 
 const COUNTRY_PRIORITY_CODES = new Set(['DE', 'SE', 'NO', 'FI'])
 
+function addNumber(base: number, value: number | null | undefined): number {
+  return base + (typeof value === 'number' ? value : 0)
+}
+
+function aggregateCountryPriorityRows(rows: NormalizedInsightRow[]): NormalizedInsightRow[] {
+  const aggregated = new Map<string, NormalizedInsightRow>()
+
+  for (const row of rows) {
+    const country = row.breakdowns.country ?? null
+    const key = `${row.dateStart}|${row.entityId}|${country ?? 'NULL'}`
+
+    let target = aggregated.get(key)
+    if (!target) {
+      target = {
+        ...row,
+        spend: 0,
+        impressions: 0,
+        reach: 0,
+        clicks: 0,
+        uniqueClicks: 0,
+        inlineLinkClicks: 0,
+        conversions: 0,
+        purchases: 0,
+        addToCart: 0,
+        leads: 0,
+        revenue: 0,
+        purchaseRoas: null,
+        costPerActionType: null,
+        cpm: null,
+        cpc: null,
+        ctr: null,
+        frequency: null,
+        actions: null,
+        actionValues: null,
+        dailyBudget: null,
+        lifetimeBudget: null,
+      }
+      aggregated.set(key, target)
+    }
+
+    target.spend = addNumber(target.spend ?? 0, row.spend)
+    target.impressions = addNumber(target.impressions ?? 0, row.impressions)
+    target.reach = addNumber(target.reach ?? 0, row.reach)
+    target.clicks = addNumber(target.clicks ?? 0, row.clicks)
+    target.uniqueClicks = addNumber(target.uniqueClicks ?? 0, row.uniqueClicks)
+    target.inlineLinkClicks = addNumber(target.inlineLinkClicks ?? 0, row.inlineLinkClicks)
+    target.conversions = addNumber(target.conversions ?? 0, row.conversions)
+    target.purchases = addNumber(target.purchases ?? 0, row.purchases)
+    target.addToCart = addNumber(target.addToCart ?? 0, row.addToCart)
+    target.leads = addNumber(target.leads ?? 0, row.leads)
+    target.revenue = addNumber(target.revenue ?? 0, row.revenue)
+  }
+
+  return Array.from(aggregated.values())
+}
+
 export type RunnerConfigurationInput = Partial<{
   levels: InsightLevel[]
   breakdownKeys: string[]
@@ -571,7 +627,12 @@ export async function runMonthlyChunk({
         return
       }
 
-      await storage.upsertDaily(rowsToPersist, {
+      let rowsForUpsert = rowsToPersist
+      if (breakdownKey === 'country_priority') {
+        rowsForUpsert = aggregateCountryPriorityRows(rowsToPersist)
+      }
+
+      await storage.upsertDaily(rowsForUpsert, {
         tenantId,
         accountId,
         level,

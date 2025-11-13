@@ -90,6 +90,7 @@ function buildCliArgs(job: BackfillJobRow) {
     chunkSize?: number
     concurrency?: number
     preset?: string
+    skipKpi?: boolean
   }
 
   const args: string[] = [
@@ -124,6 +125,9 @@ function buildCliArgs(job: BackfillJobRow) {
   if (config.preset) {
     args.push('--preset', config.preset)
   }
+  if (config.skipKpi) {
+    args.push('--skip-kpi')
+  }
 
   return args
 }
@@ -152,6 +156,7 @@ async function runJob(job: BackfillJobRow) {
     chunkSize?: number
     concurrency?: number
     preset?: string
+    skipKpi?: boolean
   }
   const chunkSize = Math.max(1, config.chunkSize ?? 1)
 

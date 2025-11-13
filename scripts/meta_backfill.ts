@@ -19,6 +19,8 @@
  *   --concurrency <n>        (standard 2) antal chunk-jobb parallellt
  */
 
+import { spawn } from 'node:child_process'
+
 import { ArgumentParser } from 'argparse'
 
 import { createClient } from '@supabase/supabase-js'
@@ -67,6 +69,7 @@ type ParsedArgs = {
   chunkSize: number
   concurrency: number
   preset: string
+  skipKpi: boolean
   levels?: string[]
   breakdowns?: string[]
   actionTimes?: string[]
@@ -314,6 +317,11 @@ function parseArgs(): ParsedArgs {
     default: 'full',
     help: 'Predefined parameter profile (default full)',
   })
+  parser.add_argument('--skip-kpi', {
+    dest: 'skip_kpi',
+    action: 'store_true',
+    help: 'Skip automatic KPI aggregation after backfill completes',
+  })
   parser.add_argument('--levels', {
     help: 'Comma-separated levels (account,campaign,adset,ad)',
   })
@@ -345,6 +353,7 @@ function parseArgs(): ParsedArgs {
     chunkSize: Math.max(1, (args.chunkSize as number | undefined) ?? 1),
     concurrency: Math.max(1, (args.concurrency as number | undefined) ?? 2),
     preset: (args.preset as string) ?? 'full',
+    skipKpi: Boolean(args.skip_kpi),
     levels: parseCsv(args.levels as string | undefined),
     breakdowns: parseCsv(args.breakdowns as string | undefined),
     actionTimes: parseCsv(args.action_times as string | undefined),
@@ -465,6 +474,40 @@ async function runWithConcurrency<T>(items: T[], limit: number, handler: (item: 
   await Promise.all(executing)
 }
 
+async function runKpiAggregation(args: ParsedArgs): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      'pnpm',
+      [
+        'tsx',
+        'scripts/meta_kpi_upsert.ts',
+        '--tenant',
+        args.tenant,
+        '--account',
+        args.account,
+        '--since',
+        args.since,
+        '--until',
+        args.until,
+      ],
+      {
+        stdio: 'inherit',
+        env: process.env,
+      },
+    )
+
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        reject(new Error(`meta_kpi_upsert.ts exited with code ${code ?? 'null'}`))
+      }
+    })
+
+    child.on('error', reject)
+  })
+}
+
 async function resolveAccessToken(tenantId: string): Promise<string> {
   const supabaseAdmin = getSupabaseServiceClient()
   const { data, error } = await supabaseAdmin
@@ -562,6 +605,7 @@ async function main() {
       totalJobs,
       estimatedDurationMinutes: Math.ceil(estWallSeconds / 60),
       estimatedDurationSeconds: estWallSeconds,
+      skipKpi: args.skipKpi,
     },
     'Starting Meta backfill',
   )
@@ -612,6 +656,20 @@ async function main() {
     },
     'Backfill finished',
   )
+
+  if (!args.skipKpi) {
+    logger.info(
+      {
+        tenantId: args.tenant,
+        accountId: args.account,
+        since: args.since,
+        until: args.until,
+      },
+      'Running KPI aggregation',
+    )
+
+    await runKpiAggregation(args)
+  }
 }
 
 main().catch((error) => {
