@@ -2,16 +2,26 @@
 
 Den här guiden beskriver hur vi automatiserar insamlingen av Meta Marketing API-data varje timme och låter workern ta hand om backfills/KPI-uppdateringar.
 
-## 1. Timvis incremental sync
+## 1. Timvis incremental sync (Supabase Scheduler)
 
-Vi använder en GitHub Actions-workflow (`.github/workflows/meta-sync-hourly.yml`) som körs varje timme (`cron: '5 * * * *'`). Workflowen POST:ar mot Supabase Edge-funktionen `sync-meta` med `{"mode":"incremental"}`. Konfigurera följande GitHub-hemligheter innan du aktiverar workflowen:
+Supabase har inbyggt stöd för schemalagda Edge Function-körningar. Vi skapar ett cron-jobb som ropar `sync-meta` varje timme:
 
-- `SUPABASE_URL` – `https://<project>.supabase.co`
-- `SUPABASE_SERVICE_ROLE_KEY` – service role key för projektet
+1. Säkerställ att du har Supabase CLI ≥ v1.181 installerad och att `SUPABASE_ACCESS_TOKEN` är satt.
+2. Kör skriptet i repot:
 
-Workflowen kan även köras manuellt via “Run workflow”.
+   ```bash
+   SUPABASE_PROJECT_REF=punicovacaktaszqcckp \
+   META_SYNC_CRON="5 * * * *" \
+   scripts/setup_meta_sync_schedule.sh
+   ```
 
-> Om du hellre vill använda Supabase CLI’s schemaläggning kan du exekvera `supabase functions schedule create` mot `sync-meta` med samma payload. Workflowen är ett enkelt sätt att komma igång utan extra infrastruktur.
+   - `SUPABASE_PROJECT_REF` kan sättas via env eller matas in när skriptet körs.
+   - `META_SYNC_CRON` är valfri; default är `5 * * * *` (fem över varje heltimme).
+3. Bekräfta i Supabase Dashboard → Edge Functions → Schedules att `meta-sync-hourly` finns och är aktiv.
+
+Cron-jobbet skickar payloaden `{"mode":"incremental"}`, vilket gör att `sync-meta` kör sin 30-dagars inkrementella synk med D+3 overlap varje timme.
+
+> Fallback: om Supabase Scheduler inte skulle räcka (t.ex. vid behov av second-level intervall) kan man använda GitHub Actions eller Vercel Cron. Supabase-lösningen är dock enklast att underhålla eftersom den körs i samma infrastruktur som Edge Functions.
 
 ## 2. Meta-backfill-worker i drift
 
@@ -41,8 +51,8 @@ LOG_LEVEL=info
 
 ## 4. Hantera fel
 
-- GitHub Actions-loggar visar om `sync-meta` svarade 4xx/5xx. Vid återkommande 504 → öka timeout (kör incremental i mindre fönster) eller flytta schemat till Supabase.
-- Workern loggar rate limits/fel. Om processen dör startar Fly/hosten om den (se hostens autoscaling).
-- Vid behov kan du pausa workflowen (Disable) eller workern (scale to 0) utan att påverka UI:t.
+- Supabase Dashboard → Edge Functions → Logs visar svaren från `sync-meta`. Vid återkommande 504, överväg att minska fönstret eller sprida konton över flera körningar.
+- Workern loggar rate limits/fel. Om processen dör startar din host (Fly/Railway/VM) om den – kontrollera autoscaling/policy.
+- Behöver du pausa: ta bort/pause cron-jobbet via `supabase functions schedule delete meta-sync-hourly` eller skala ner workern till 0 instanser.
 
 

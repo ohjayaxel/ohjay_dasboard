@@ -56,4 +56,13 @@ Följande variabler måste finnas i runtime-miljön:
 
 Workern avslutar aldrig (loopar med `sleep`). När inga jobb finns väntar den 10 sekunder och försöker igen.
 
+## Koppla ihop med Supabase-cron
+
+Se `docs/meta_automation.md` eller kör `scripts/setup_meta_sync_schedule.sh` för att skapa den timvisa `sync-meta`-körningen. Kombinationen:
+
+1. Supabase Scheduler → `sync-meta` varje timme.
+2. Den här workern → backfill + KPI-aggregering.
+
+säkerställer att dashboardsen uppdateras automatiskt utan manuell insats.
+
 
