@@ -46,21 +46,40 @@ async function main() {
 
   const client = getSupabaseServiceClient()
 
-  const { data, error } = await client
-    .from('meta_insights_daily')
-    .select('tenant_id, date, spend, inline_link_clicks, purchases, conversions, revenue, currency')
-    .eq('tenant_id', args.tenant)
-    .eq('ad_account_id', args.account)
-    .eq('level', 'account')
-    .eq('action_report_time', 'conversion')
-    .eq('attribution_window', '1d_click')
-    .in('breakdowns_key', ['none', 'country_priority'])
-    .gte('date', since)
-    .lte('date', until)
-    .order('date', { ascending: true })
+  const PAGE_SIZE = 1000
+  const data: Array<Record<string, unknown>> = []
+  let offset = 0
 
-  if (error) {
-    throw new Error(`Failed to fetch aggregated meta insights: ${error.message}`)
+  for (;;) {
+    const { data: page, error } = await client
+      .from('meta_insights_daily')
+      .select('tenant_id, date, spend, inline_link_clicks, purchases, conversions, revenue, currency')
+      .eq('tenant_id', args.tenant)
+      .eq('ad_account_id', args.account)
+      .eq('level', 'account')
+      .eq('action_report_time', 'conversion')
+      .eq('attribution_window', '1d_click')
+      .in('breakdowns_key', ['none', 'country_priority'])
+      .gte('date', since)
+      .lte('date', until)
+      .order('date', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1)
+
+    if (error) {
+      throw new Error(`Failed to fetch aggregated meta insights: ${error.message}`)
+    }
+
+    if (!page || page.length === 0) {
+      break
+    }
+
+    data.push(...page)
+
+    if (page.length < PAGE_SIZE) {
+      break
+    }
+
+    offset += PAGE_SIZE
   }
 
   const byDate = new Map<
