@@ -10,7 +10,7 @@ type PageProps = {
   searchParams?: Promise<Record<string, string | string[] | undefined>>
 }
 
-type MetricKey = 'spend' | 'revenue' | 'conversions' | 'clicks' | 'roas' | 'cos'
+type MetricKey = 'spend' | 'revenue' | 'conversions' | 'clicks' | 'roas' | 'cpa'
 
 type MetricDefinition = {
   key: MetricKey
@@ -42,7 +42,7 @@ export default async function TenantOverviewPage(props: PageProps) {
   const from = typeof fromParam === 'string' && fromParam.length > 0 ? fromParam : defaultFrom
   const to = typeof toParam === 'string' && toParam.length > 0 ? toParam : defaultTo
 
-  const defaultMetrics: MetricKey[] = ['spend', 'revenue', 'roas', 'cos', 'conversions', 'clicks']
+  const defaultMetrics: MetricKey[] = ['spend', 'revenue', 'roas', 'cpa', 'conversions', 'clicks']
 
   const metricsParam = rawSearchParams?.metric
   const metricsFromQuery = Array.isArray(metricsParam)
@@ -122,12 +122,12 @@ export default async function TenantOverviewPage(props: PageProps) {
       extractPoint: (point) => point.roas,
     },
     {
-      key: 'cos',
-      label: 'COS',
-      description: 'Cost of sale (spend / revenue)',
+      key: 'cpa',
+      label: 'CPA',
+      description: 'Cost per result (spend / results)',
       format: formatRatio,
-      extractTotal: (value) => value.cos,
-      extractPoint: (point) => point.cos,
+      extractTotal: (value) => value.cpa,
+      extractPoint: (point) => point.cpa,
     },
   ]
 

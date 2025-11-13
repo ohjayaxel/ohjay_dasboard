@@ -10,8 +10,9 @@ export type KpiTotals = {
   conversions: number;
   revenue: number;
   aov: number | null;
-  cos: number | null;
+  cpa: number | null;
   roas: number | null;
+  cos: number | null;
 };
 
 export type KpiSeriesPoint = {
@@ -21,8 +22,9 @@ export type KpiSeriesPoint = {
   conversions: number;
   revenue: number;
   aov: number | null;
-  cos: number | null;
+  cpa: number | null;
   roas: number | null;
+  cos: number | null;
 };
 
 export type KpiSeriesResult = {
@@ -46,11 +48,12 @@ function deriveMetrics({
   revenue: number;
   conversions: number;
   clicks: number;
-}): Pick<KpiTotals, 'aov' | 'cos' | 'roas'> {
+}): { aov: number | null; cos: number | null; roas: number | null; cpa: number | null } {
   const aov = conversions > 0 ? revenue / conversions : null;
   const cos = revenue > 0 ? spend / revenue : null;
   const roas = spend > 0 ? revenue / spend : null;
-  return { aov, cos, roas };
+  const cpa = conversions > 0 ? spend / conversions : null;
+  return { aov, cos, roas, cpa };
 }
 
 function buildSeries(rows: KpiDailyRow[]): KpiSeriesPoint[] {
@@ -66,6 +69,7 @@ function buildSeries(rows: KpiDailyRow[]): KpiSeriesPoint[] {
       aov: null,
       cos: null,
       roas: null,
+      cpa: null,
     };
 
     existing.spend += row.spend ?? 0;
@@ -77,15 +81,21 @@ function buildSeries(rows: KpiDailyRow[]): KpiSeriesPoint[] {
 
   return Array.from(byDate.values())
     .sort((a, b) => a.date.localeCompare(b.date))
-    .map((point) => ({
-      ...point,
-      ...deriveMetrics({
+    .map((point) => {
+      const metrics = deriveMetrics({
         spend: point.spend,
         revenue: point.revenue,
         conversions: point.conversions,
         clicks: point.clicks,
-      }),
-    }));
+      });
+      return {
+        ...point,
+        aov: metrics.aov,
+        cos: metrics.cos,
+        roas: metrics.roas,
+        cpa: metrics.cpa,
+      };
+    });
 }
 
 function buildTotals(rows: KpiDailyRow[]): KpiTotals {

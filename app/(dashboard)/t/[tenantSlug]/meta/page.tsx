@@ -68,6 +68,14 @@ export default async function MetaDashboardPage(props: PageProps) {
         </Card>
         <Card>
           <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-muted-foreground">CPA</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold tracking-tight">{formatCurrency(totals.cpa)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Results</CardTitle>
           </CardHeader>
           <CardContent>
@@ -92,6 +100,7 @@ export default async function MetaDashboardPage(props: PageProps) {
                   <th className="px-4 py-2 text-left font-medium">Revenue</th>
                   <th className="px-4 py-2 text-left font-medium">Results</th>
                   <th className="px-4 py-2 text-left font-medium">ROAS</th>
+                  <th className="px-4 py-2 text-left font-medium">CPA</th>
                 </tr>
               </thead>
               <tbody>
@@ -109,6 +118,7 @@ export default async function MetaDashboardPage(props: PageProps) {
                       <td className="px-4 py-2">{formatCurrency(point.revenue)}</td>
                       <td className="px-4 py-2">{formatNumber(point.conversions)}</td>
                       <td className="px-4 py-2">{formatRatio(point.roas)}</td>
+                      <td className="px-4 py-2">{formatCurrency(point.cpa)}</td>
                     </tr>
                   ))
                 )}
