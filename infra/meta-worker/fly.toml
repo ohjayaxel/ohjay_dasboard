@@ -1,0 +1,12 @@
+app = "ohjay-meta-worker"
+
+[build]
+  dockerfile = "infra/meta-worker/Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+
+[processes]
+  worker = "pnpm tsx scripts/meta_backfill_worker.ts"
+
+
