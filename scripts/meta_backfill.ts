@@ -66,6 +66,7 @@ type ParsedArgs = {
   until: string
   chunkSize: number
   concurrency: number
+  preset: string
   levels?: string[]
   breakdowns?: string[]
   actionTimes?: string[]
@@ -76,6 +77,16 @@ const UPSERT_BATCH_SIZE = 500
 const CANONICAL_ACTION_REPORT_TIME: ActionReportTime = 'impression'
 const CANONICAL_ATTR_WINDOW: AttributionWindow = '7d_click'
 const AVG_SECONDS_PER_JOB = 45
+
+const RUNNER_PRESETS: Record<string, RunnerConfigurationInput> = {
+  full: {},
+  'account-country-lite': {
+    levels: ['account'],
+    breakdownKeys: ['country_priority'],
+    actionReportTimes: ['conversion'],
+    attributionWindows: ['1d_click'],
+  },
+}
 
 function filterInsightLevels(values?: string[]): InsightLevel[] | undefined {
   if (!values) return undefined
@@ -298,11 +309,16 @@ function parseArgs(): ParsedArgs {
     type: 'int',
     help: 'Number of concurrent chunk runners (default 2)',
   })
+  parser.add_argument('--preset', {
+    choices: Object.keys(RUNNER_PRESETS),
+    default: 'full',
+    help: 'Predefined parameter profile (default full)',
+  })
   parser.add_argument('--levels', {
     help: 'Comma-separated levels (account,campaign,adset,ad)',
   })
   parser.add_argument('--breakdowns', {
-    help: 'Comma-separated breakdown keys (none,A,B,C,D)',
+    help: 'Comma-separated breakdown keys (none,A,B,C,D,country_priority)',
   })
   parser.add_argument('--action-times', {
     help: 'Comma-separated action report times (impression,conversion)',
@@ -328,6 +344,7 @@ function parseArgs(): ParsedArgs {
     until: args.until as string,
     chunkSize: Math.max(1, (args.chunkSize as number | undefined) ?? 1),
     concurrency: Math.max(1, (args.concurrency as number | undefined) ?? 2),
+    preset: (args.preset as string) ?? 'full',
     levels: parseCsv(args.levels as string | undefined),
     breakdowns: parseCsv(args.breakdowns as string | undefined),
     actionTimes: parseCsv(args.action_times as string | undefined),
@@ -482,20 +499,23 @@ async function main() {
   const storageClient = getSupabaseServiceClient()
   const schemaMode = await detectSchemaMode(storageClient)
 
+  const presetConfig = RUNNER_PRESETS[args.preset] ?? RUNNER_PRESETS.full
+  const overrideLevels = filterInsightLevels(args.levels) ?? presetConfig.levels
+  const overrideBreakdowns = filterBreakdownKeys(args.breakdowns) ?? presetConfig.breakdownKeys
+  const overrideActionTimes = filterActionTimes(args.actionTimes) ?? presetConfig.actionReportTimes
+  const overrideAttrWindows =
+    filterAttrWindows(args.attributionWindows) ?? presetConfig.attributionWindows
+
   const overrides: RunnerConfigurationInput = {}
-  const overrideLevels = filterInsightLevels(args.levels)
   if (overrideLevels) {
     overrides.levels = overrideLevels
   }
-  const overrideBreakdowns = filterBreakdownKeys(args.breakdowns)
   if (overrideBreakdowns) {
     overrides.breakdownKeys = overrideBreakdowns
   }
-  const overrideActionTimes = filterActionTimes(args.actionTimes)
   if (overrideActionTimes) {
     overrides.actionReportTimes = overrideActionTimes
   }
-  const overrideAttrWindows = filterAttrWindows(args.attributionWindows)
   if (overrideAttrWindows) {
     overrides.attributionWindows = overrideAttrWindows
   }
@@ -532,6 +552,7 @@ async function main() {
       supabaseUrl: SUPABASE_URL,
       encryptionKeyFingerprint: getEncryptionKeyFingerprint(),
       schemaMode,
+      preset: args.preset,
       levels: runnerConfig.levels,
       breakdownKeys: runnerConfig.breakdownKeys,
       actionReportTimes: runnerConfig.actionReportTimes,

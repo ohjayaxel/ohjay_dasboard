@@ -19,7 +19,10 @@ export const BREAKDOWN_SETS: Record<string, string> = {
   B: 'age,gender',
   C: 'country',
   D: 'device_platform',
+  country_priority: 'country',
 }
+
+const COUNTRY_PRIORITY_CODES = new Set(['DE', 'SE', 'NO', 'FI'])
 
 export type RunnerConfigurationInput = Partial<{
   levels: InsightLevel[]
@@ -345,9 +348,11 @@ export function normalizeRow(
   {
     level,
     breakdownKeys,
+    breakdownsKey,
   }: {
     level: InsightLevel
     breakdownKeys: string[]
+    breakdownsKey: string
   },
 ): NormalizedInsightRow | null {
   const dateStart =
@@ -378,12 +383,25 @@ export function normalizeRow(
 
   const breakdowns: Record<string, string | null> = {}
   for (const key of breakdownKeys) {
-    breakdowns[key] =
-      typeof row[key] === 'string'
-        ? (row[key] as string)
-        : row[key] === null || row[key] === undefined
-          ? null
-          : String(row[key])
+    let value: string | null
+    if (typeof row[key] === 'string') {
+      value = row[key] as string
+    } else if (row[key] === null || row[key] === undefined) {
+      value = null
+    } else {
+      value = String(row[key])
+    }
+
+    if (breakdownsKey === 'country_priority' && key === 'country') {
+      if (!value) {
+        value = null
+      } else {
+        const upper = value.toUpperCase()
+        value = COUNTRY_PRIORITY_CODES.has(upper) ? upper : 'OTHER'
+      }
+    }
+
+    breakdowns[key] = value
   }
 
   return {
@@ -536,6 +554,7 @@ export async function runMonthlyChunk({
             const normalized = normalizeRow(rawRow as Record<string, unknown>, {
               level,
               breakdownKeys: breakdownNames,
+              breakdownsKey: breakdownKey,
             })
             if (!normalized) {
               continue

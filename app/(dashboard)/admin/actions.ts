@@ -880,26 +880,11 @@ export async function queueMetaBackfillJobs(formData: FormData) {
   const jobs = [
     {
       ...baseJob,
-      mode: 'fast',
+      mode: 'country-lite',
       config_json: {
-        levels: ['account'],
-        breakdownKeys: ['none'],
-        actionReportTimes: ['impression', 'conversion'],
-        attributionWindows: ['1d_click', '7d_click'],
+        preset: 'account-country-lite',
         chunkSize: 1,
-        concurrency: 2,
-      },
-    },
-    {
-      ...baseJob,
-      mode: 'full',
-      config_json: {
-        levels: ['campaign', 'adset', 'ad'],
-        breakdownKeys: ['A', 'B', 'C', 'D'],
-        actionReportTimes: ['impression', 'conversion'],
-        attributionWindows: ['1d_click', '7d_click', '1d_view'],
-        chunkSize: 1,
-        concurrency: 2,
+        concurrency: 4,
       },
     },
   ]

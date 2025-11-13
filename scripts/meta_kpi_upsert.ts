@@ -54,7 +54,7 @@ async function main() {
     .eq('level', 'account')
     .eq('action_report_time', 'conversion')
     .eq('attribution_window', '1d_click')
-    .eq('breakdowns_key', 'none')
+    .in('breakdowns_key', ['none', 'country_priority'])
     .gte('date', since)
     .lte('date', until)
     .order('date', { ascending: true })

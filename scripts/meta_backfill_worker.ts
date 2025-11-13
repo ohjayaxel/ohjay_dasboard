@@ -8,10 +8,23 @@ import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import {
   buildMatrixCombinations,
   resolveRunnerConfiguration,
+  type ActionReportTime,
+  type AttributionWindow,
+  type InsightLevel,
   type RunnerConfigurationInput,
 } from '@/lib/integrations/metaInsightsRunner'
 
 const POLL_INTERVAL_MS = 10_000
+
+const RUNNER_PRESETS: Record<string, RunnerConfigurationInput> = {
+  full: {},
+  'account-country-lite': {
+    levels: ['account'],
+    breakdownKeys: ['country_priority'],
+    actionReportTimes: ['conversion'],
+    attributionWindows: ['1d_click'],
+  },
+}
 
 type BackfillJobRow = {
   id: string
@@ -76,6 +89,7 @@ function buildCliArgs(job: BackfillJobRow) {
   const config = (job.config_json ?? {}) as RunnerConfigurationInput & {
     chunkSize?: number
     concurrency?: number
+    preset?: string
   }
 
   const args: string[] = [
@@ -107,6 +121,9 @@ function buildCliArgs(job: BackfillJobRow) {
   if (config.attributionWindows && config.attributionWindows.length > 0) {
     args.push('--attr-windows', config.attributionWindows.join(','))
   }
+  if (config.preset) {
+    args.push('--preset', config.preset)
+  }
 
   return args
 }
@@ -134,16 +151,26 @@ async function runJob(job: BackfillJobRow) {
   const config = (job.config_json ?? {}) as RunnerConfigurationInput & {
     chunkSize?: number
     concurrency?: number
+    preset?: string
   }
   const chunkSize = Math.max(1, config.chunkSize ?? 1)
 
+  const presetKey = typeof config.preset === 'string' ? config.preset : 'full'
+  const preset = RUNNER_PRESETS[presetKey] ?? RUNNER_PRESETS.full
+
   const resolvedConfig = resolveRunnerConfiguration({
-    levels: Array.isArray(config.levels) ? (config.levels as string[]) : undefined,
-    breakdownKeys: Array.isArray(config.breakdownKeys) ? (config.breakdownKeys as string[]) : undefined,
-    actionReportTimes: Array.isArray(config.actionReportTimes) ? (config.actionReportTimes as string[]) : undefined,
+    levels: Array.isArray(config.levels)
+      ? (config.levels as string[])
+      : (preset.levels as InsightLevel[] | undefined),
+    breakdownKeys: Array.isArray(config.breakdownKeys)
+      ? (config.breakdownKeys as string[])
+      : preset.breakdownKeys,
+    actionReportTimes: Array.isArray(config.actionReportTimes)
+      ? (config.actionReportTimes as ActionReportTime[])
+      : (preset.actionReportTimes as ActionReportTime[] | undefined),
     attributionWindows: Array.isArray(config.attributionWindows)
-      ? (config.attributionWindows as string[])
-      : undefined,
+      ? (config.attributionWindows as AttributionWindow[])
+      : (preset.attributionWindows as AttributionWindow[] | undefined),
   })
 
   const combinations = buildMatrixCombinations(resolvedConfig)
