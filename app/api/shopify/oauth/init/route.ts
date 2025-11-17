@@ -99,6 +99,12 @@ export async function POST(request: NextRequest) {
       state, // Passera den signerade state
     });
     
+    // Debug logging för OAuth init endpoint
+    console.log('=== OAuth Init Debug ===');
+    console.log('Tenant ID:', tenantId);
+    console.log('Shop Domain:', normalizedShop);
+    console.log('OAuth URL returned:', url);
+    
     return NextResponse.json({ url, state });
     
   } catch (error) {

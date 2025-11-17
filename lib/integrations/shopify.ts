@@ -19,9 +19,11 @@ type ConnectionRow = {
 
 const SHOPIFY_REDIRECT_PATH = '/api/oauth/shopify/callback';
 
-function buildRedirectUri() {
-  // TODO: allow configurable redirect URI via environment.
-  return `${APP_BASE_URL}${SHOPIFY_REDIRECT_PATH}`;
+function buildRedirectUri(): string {
+  // Se till att det inte finns trailing slash
+  const baseUrl = APP_BASE_URL.replace(/\/$/, '');
+  const redirectPath = SHOPIFY_REDIRECT_PATH.replace(/\/$/, '');
+  return `${baseUrl}${redirectPath}`;
 }
 
 function requireAppCredentials() {
@@ -105,14 +107,32 @@ export async function getShopifyAuthorizeUrl(options: {
   // Använd antingen den skickade state (från API) eller skapa en enkel state
   const state = options.state || randomBytes(16).toString('hex');
   
+  // Verifiera att scopes är exakt 'read_orders'
+  const scopes = SHOPIFY_SCOPES.join(',');
+  if (scopes !== 'read_orders') {
+    console.warn(`Warning: SHOPIFY_SCOPES is "${scopes}", expected "read_orders"`);
+  }
+  
+  // Bygg redirect URI (utan trailing slash)
+  const redirectUri = buildRedirectUri();
+  
+  // Bygg OAuth URL med URLSearchParams (encodar automatiskt)
   const params = new URLSearchParams({
     client_id: SHOPIFY_API_KEY!,
-    scope: SHOPIFY_SCOPES.join(','),
-    redirect_uri: buildRedirectUri(),
+    scope: scopes,
+    redirect_uri: redirectUri, // URLSearchParams encodar automatiskt
     state,
   });
 
   const authorizeUrl = `https://${normalizedShop}/admin/oauth/authorize?${params.toString()}`;
+
+  // Debug logging
+  console.log('=== Shopify OAuth Debug ===');
+  console.log('Client ID:', SHOPIFY_API_KEY);
+  console.log('Scopes:', scopes);
+  console.log('Redirect URI:', redirectUri);
+  console.log('Normalized Shop:', normalizedShop);
+  console.log('OAuth URL:', authorizeUrl);
 
   return {
     url: authorizeUrl,
