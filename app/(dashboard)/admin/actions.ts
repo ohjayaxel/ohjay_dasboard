@@ -1114,4 +1114,72 @@ export async function updatePlatformAdminRole(formData: FormData) {
   redirect(`/admin/settings?status=role-updated`)
 }
 
+export async function startShopifyConnect(tenantId: string, shopDomain: string) {
+  const user = await getCurrentUser();
+  
+  // Verifiera att användaren har access till tenant
+  const client = getSupabaseServiceClient();
+  
+  const { data: userMemberships } = await client
+    .from('members')
+    .select('role, tenant_id')
+    .eq('user_id', user.id)
+    .eq('role', 'platform_admin')
+    .limit(1);
+  
+  const isUserPlatformAdmin = isPlatformAdmin(user.role) || (userMemberships && userMemberships.length > 0);
+  
+  if (!isUserPlatformAdmin) {
+    const { data: membership } = await client
+      .from('members')
+      .select('id')
+      .eq('tenant_id', tenantId)
+      .eq('user_id', user.id)
+      .maybeSingle();
+    
+    if (!membership) {
+      throw new Error(`User does not have access to tenant ${tenantId}`);
+    }
+  }
+  
+  const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+  if (!ENCRYPTION_KEY) {
+    throw new Error('ENCRYPTION_KEY environment variable is required');
+  }
+  
+  const normalizedShop = shopDomain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase();
+  
+  // Skapa signed state
+  const stateData = {
+    tenantId,
+    shopDomain: normalizedShop,
+    userId: user.id,
+    timestamp: Date.now(),
+    nonce: crypto.randomUUID(),
+  };
+  
+  const statePayload = JSON.stringify(stateData);
+  const signature = createHmac('sha256', ENCRYPTION_KEY)
+    .update(statePayload)
+    .digest('hex');
+  
+  const state = Buffer.from(JSON.stringify({
+    data: stateData,
+    sig: signature
+  })).toString('base64');
+  
+  // Hämta OAuth URL
+  const { url } = await getShopifyAuthorizeUrl({
+    tenantId,
+    shopDomain: normalizedShop,
+    state,
+  });
+  
+  redirect(url);
+}
+
 
