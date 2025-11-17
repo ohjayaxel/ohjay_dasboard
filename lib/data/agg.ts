@@ -1,5 +1,3 @@
-import { cache } from 'react';
-
 import { revalidatePath } from 'next/cache';
 
 import { fetchKpiDaily, fetchLatestKpiRow, type KpiDailyRow, type KpiSource } from './fetchers';
@@ -120,7 +118,7 @@ type GetKpiDailyParams = {
   source?: KpiSource | KpiSource[];
 };
 
-export const getKpiDaily = cache(async (params: GetKpiDailyParams): Promise<KpiSeriesResult> => {
+export async function getKpiDaily(params: GetKpiDailyParams): Promise<KpiSeriesResult> {
   const rows = await fetchKpiDaily({
     tenantId: params.tenantId,
     from: params.from,
@@ -133,7 +131,7 @@ export const getKpiDaily = cache(async (params: GetKpiDailyParams): Promise<KpiS
   const currency = rows.find((row) => row.currency)?.currency ?? null;
 
   return { rows, series, totals, currency };
-});
+}
 
 export const getLatestKpiSummary = cache(async (params: {
   tenantId: string;
