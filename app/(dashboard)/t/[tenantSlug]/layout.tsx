@@ -24,20 +24,24 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
       icon: 'gauge',
     },
     {
-      title: 'Meta Ads',
-      url: `/t/${tenantSlug}/meta`,
-      icon: 'brand-meta',
+      title: 'Channels',
+      url: `/t/${tenantSlug}/channels`,
+      icon: 'chart-bar',
       items: [
         {
-          title: 'Markets',
-          url: `/t/${tenantSlug}/meta/markets`,
+          title: 'Meta Ads',
+          url: `/t/${tenantSlug}/meta`,
+        },
+        {
+          title: 'Google Ads',
+          url: `/t/${tenantSlug}/google`,
         },
       ],
     },
     {
-      title: 'Google Ads',
-      url: `/t/${tenantSlug}/google`,
-      icon: 'brand-google',
+      title: 'Markets',
+      url: `/t/${tenantSlug}/markets`,
+      icon: 'chart-dots',
     },
     {
       title: 'Shopify',

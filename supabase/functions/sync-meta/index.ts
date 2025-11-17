@@ -209,6 +209,11 @@ const INCREMENTAL_WINDOW_DAYS = 30
 const REINGEST_OVERLAP_DAYS = 3
 const MAX_BACKFILL_WINDOW_DAYS = 366
 
+// Optimizations for specific tenants
+const SKINOME_TENANT_ID = '642af254-0c2c-4274-86ca-507398ecf9a0'
+const SKINOME_OPTIMIZED_ACTION_REPORT_TIMES = ['impression'] as const
+const SKINOME_OPTIMIZED_ATTR_WINDOWS = ['1d_click'] as const
+
 const LEVELS = ['account'] as const
 const ACTION_REPORT_TIMES = ['impression', 'conversion'] as const
 const ATTR_WINDOWS = ['1d_click', '7d_click', '1d_view'] as const
@@ -1317,10 +1322,15 @@ async function runFullMatrix(
   const months = enumerateMonths(since, until)
   const tasks: MatrixTask[] = []
 
+  // Optimize for Skinome: use only impression + 1d_click to reduce API calls and timeout risk
+  const isSkinome = tenantId === SKINOME_TENANT_ID
+  const actionReportTimes = isSkinome ? SKINOME_OPTIMIZED_ACTION_REPORT_TIMES : ACTION_REPORT_TIMES
+  const attrWindows = isSkinome ? SKINOME_OPTIMIZED_ATTR_WINDOWS : ATTR_WINDOWS
+
   for (const level of LEVELS) {
     for (const [breakdownKey, breakdowns] of Object.entries(BREAKDOWN_SETS)) {
-      for (const actionReportTime of ACTION_REPORT_TIMES) {
-        for (const attributionWindow of ATTR_WINDOWS) {
+      for (const actionReportTime of actionReportTimes) {
+        for (const attributionWindow of attrWindows) {
           for (const { monthSince, monthUntil } of months) {
             tasks.push({
               tenantId,
@@ -1371,10 +1381,14 @@ async function runFullMatrix(
       }
     }
 
+    // For Skinome, canonical combo is impression + 1d_click + none breakdown
+    // For others, canonical combo is impression + 7d_click + none breakdown
+    const isSkinome = tenantId === SKINOME_TENANT_ID
+    const canonicalAttrWindow = isSkinome ? '1d_click' : CANONICAL_ATTRIBUTION_WINDOW
     const isCanonicalCombo =
       task.breakdownKey === CANONICAL_BREAKDOWN_KEY &&
       task.actionReportTime === CANONICAL_ACTION_REPORT_TIME &&
-      task.attributionWindow === CANONICAL_ATTRIBUTION_WINDOW
+      task.attributionWindow === canonicalAttrWindow
 
     if (isCanonicalCombo) {
       for (const row of normalizedRows) {
@@ -1627,13 +1641,19 @@ async function processTenant(
       }
     }
 
+    // Skip campaign catalog fetch for Skinome to avoid timeout
+    const isSkinome = tenantId === SKINOME_TENANT_ID
     let campaignCatalog: MetaCampaignRecord[] = []
-    try {
-      campaignCatalog = await fetchMetaCampaignCatalog(tenantId, accessToken, preferredAccountId)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      console.warn(`Failed to fetch campaign catalog for tenant ${tenantId}, account ${preferredAccountId}:`, message)
-      // Continue with insights sync even if campaign catalog fails
+    if (!isSkinome) {
+      try {
+        campaignCatalog = await fetchMetaCampaignCatalog(tenantId, accessToken, preferredAccountId)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`Failed to fetch campaign catalog for tenant ${tenantId}, account ${preferredAccountId}:`, message)
+        // Continue with insights sync even if campaign catalog fails
+      }
+    } else {
+      console.log(`Skipping campaign catalog fetch for Skinome tenant ${tenantId} to avoid timeout`)
     }
 
     const matrixResult = await runFullMatrix(

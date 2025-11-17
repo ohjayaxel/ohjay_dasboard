@@ -13,11 +13,12 @@ export async function POST(request: NextRequest) {
     const paths = path
       ? [path]
       : [
-          `/t/${tenantSlug}`,
-          `/t/${tenantSlug}/meta`,
-          `/t/${tenantSlug}/meta/markets`,
-          `/t/${tenantSlug}/google`,
-          `/t/${tenantSlug}/shopify`,
+        `/t/${tenantSlug}`,
+        `/t/${tenantSlug}/channels`,
+        `/t/${tenantSlug}/meta`,
+        `/t/${tenantSlug}/google`,
+        `/t/${tenantSlug}/markets`,
+        `/t/${tenantSlug}/shopify`,
         ]
 
     for (const p of paths) {

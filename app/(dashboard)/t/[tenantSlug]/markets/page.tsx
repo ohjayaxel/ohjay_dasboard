@@ -1,13 +1,13 @@
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { getMetaMarkets } from '@/lib/data/metaMarkets';
-import { resolveTenantId } from '@/lib/tenants/resolve-tenant';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { getMetaMarkets } from '@/lib/data/metaMarkets'
+import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
 
-export const revalidate = 60;
+export const revalidate = 60
 
 type PageProps = {
-  params: Promise<{ tenantSlug: string }>;
-};
+  params: Promise<{ tenantSlug: string }>
+}
 
 const COLUMNS = [
   { key: 'country', label: 'Market' },
@@ -18,22 +18,22 @@ const COLUMNS = [
   { key: 'revenue', label: 'Revenue' },
   { key: 'roas', label: 'ROAS' },
   { key: 'cpa', label: 'CPA' },
-] as const;
+] as const
 
-export default async function MetaMarketsPage(props: PageProps) {
-  const { tenantSlug } = await props.params;
-  const tenantId = await resolveTenantId(tenantSlug);
+export default async function MarketsPage(props: PageProps) {
+  const { tenantSlug } = await props.params
+  const tenantId = await resolveTenantId(tenantSlug)
 
-  const today = new Date();
-  const since = new Date(today);
-  since.setDate(since.getDate() - 29);
+  const today = new Date()
+  const since = new Date(today)
+  since.setDate(since.getDate() - 29)
 
-  const from = since.toISOString().slice(0, 10);
-  const to = today.toISOString().slice(0, 10);
+  const from = since.toISOString().slice(0, 10)
+  const to = today.toISOString().slice(0, 10)
 
-  const markets = await getMetaMarkets({ tenantId, from, to });
-  const numberLocale = 'en-US';
-  const currencyCode = markets.find((row) => row.currency)?.currency ?? 'USD';
+  const markets = await getMetaMarkets({ tenantId, from, to })
+  const numberLocale = 'en-US'
+  const currencyCode = markets.find((row) => row.currency)?.currency ?? 'USD'
 
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
@@ -42,20 +42,19 @@ export default async function MetaMarketsPage(props: PageProps) {
           currency: currencyCode,
           maximumFractionDigits: 0,
         }).format(value)
-      : '—';
+      : '—'
 
   const formatNumber = (value: number) =>
-    Number.isFinite(value) ? new Intl.NumberFormat(numberLocale).format(value) : '0';
+    Number.isFinite(value) ? new Intl.NumberFormat(numberLocale).format(value) : '0'
 
-  const formatRatio = (value: number | null) =>
-    value === null || Number.isNaN(value) ? '—' : value.toFixed(2);
+  const formatRatio = (value: number | null) => (value === null || Number.isNaN(value) ? '—' : value.toFixed(2))
 
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base font-semibold">Meta Markets</CardTitle>
-          <p className="text-sm text-muted-foreground">Performance by market (last 30 days, conversion / 1d click)</p>
+          <CardTitle className="text-base font-semibold">Markets</CardTitle>
+          <p className="text-sm text-muted-foreground">Meta Ads performance by market (last 30 days, conversion / 1d click)</p>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
@@ -78,7 +77,7 @@ export default async function MetaMarketsPage(props: PageProps) {
                   </TableRow>
                 ) : (
                   markets.map((market) => {
-                    const isTotal = market.country === 'Total';
+                    const isTotal = market.country === 'Total'
                     return (
                       <TableRow key={market.country} className={isTotal ? 'font-semibold' : undefined}>
                         <TableCell>{market.country}</TableCell>
@@ -90,7 +89,7 @@ export default async function MetaMarketsPage(props: PageProps) {
                         <TableCell>{formatRatio(market.roas)}</TableCell>
                         <TableCell>{formatCurrency(market.cpa)}</TableCell>
                       </TableRow>
-                    );
+                    )
                   })
                 )}
               </TableBody>
@@ -99,7 +98,7 @@ export default async function MetaMarketsPage(props: PageProps) {
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }
 
 
