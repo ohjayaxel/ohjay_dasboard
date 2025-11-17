@@ -1,4 +1,5 @@
 import { revalidatePath } from 'next/cache';
+import { cache } from 'react';
 
 import { fetchKpiDaily, fetchLatestKpiRow, type KpiDailyRow, type KpiSource } from './fetchers';
 
