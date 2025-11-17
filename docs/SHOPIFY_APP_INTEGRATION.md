@@ -222,132 +222,28 @@ export default function ConnectPage() {
 }
 ```
 
-### 2. OAuth Callback (`/app/auth/oauth/callback`)
+### 2. OAuth Callback (hanteras i huvudplattformen)
 
-Validera state, extrahera tenantId och spara connection.
+**⚠️ VIKTIGT:** OAuth callback hanteras i huvudplattformen (`/api/oauth/shopify/callback`), inte i Shopify-appen.
 
-**Implementation:**
-```typescript
-// app/auth/oauth/callback/route.ts
+Shopify redirectar tillbaka till huvudplattformens callback URL efter OAuth. Callback-routen:
+- Validerar state (HMAC-signatur, timestamp)
+- Extraherar tenantId från state
+- Verifierar att shop inte redan är kopplad till annan tenant
+- Utför token exchange med Shopify
+- Sparar connection i Supabase
+- Redirectar tillbaka till integrations-sidan
 
-import { redirect } from 'next/navigation';
-import { createHmac } from 'crypto';
+**Flow:**
+1. Användare väljer tenant i Shopify-appen (`/app/connect`)
+2. Shopify-appen anropar `/api/shopify/oauth/init` med tenantId och shopDomain
+3. Huvudplattformen returnerar OAuth URL med signerad state
+4. Användare redirectas till Shopify för OAuth
+5. Shopify redirectar tillbaka till huvudplattformens `/api/oauth/shopify/callback`
+6. Callback-routen validerar state, utför token exchange, sparar connection
+7. Användare redirectas till `/admin/tenants/[tenantSlug]/integrations?status=shopify-connected`
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const code = searchParams.get('code');
-  const state = searchParams.get('state');
-  const shop = searchParams.get('shop');
-  
-  if (!code || !state || !shop) {
-    return redirect('/app?error=missing_oauth_params');
-  }
-  
-  try {
-    // 1. Dekoda och validera state
-    const stateDecoded = JSON.parse(
-      Buffer.from(state, 'base64').toString()
-    );
-    
-    if (!stateDecoded.data || !stateDecoded.sig) {
-      throw new Error('Invalid state format');
-    }
-    
-    // 2. Verifiera HMAC-signatur
-    const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY!; // Samma som i huvudplattformen
-    const statePayload = JSON.stringify(stateDecoded.data);
-    const expectedSig = createHmac('sha256', ENCRYPTION_KEY)
-      .update(statePayload)
-      .digest('hex');
-    
-    if (stateDecoded.sig !== expectedSig) {
-      throw new Error('State signature verification failed');
-    }
-    
-    // 3. Validera timestamp (max 10 minuter gammal)
-    const stateAge = Date.now() - stateDecoded.data.timestamp;
-    if (stateAge > 10 * 60 * 1000) {
-      throw new Error('OAuth state expired');
-    }
-    
-    // 4. Extrahera tenantId och shopDomain
-    const { tenantId, shopDomain: expectedShopDomain } = stateDecoded.data;
-    
-    // 5. Normalisera och verifiera shop domain matchar
-    const normalizedShop = shop
-      .replace(/^https?:\/\//, '')
-      .replace(/^www\./, '')
-      .replace(/\/$/, '')
-      .toLowerCase();
-    
-    if (normalizedShop !== expectedShopDomain) {
-      throw new Error(`Shop domain mismatch: ${normalizedShop} !== ${expectedShopDomain}`);
-    }
-    
-    // 6. VERIFIERA att shop inte redan är kopplad till en annan tenant
-    const { data: existingConnection } = await supabase
-      .from('connections')
-      .select('tenant_id, meta')
-      .eq('source', 'shopify')
-      .eq('status', 'connected')
-      .eq('meta->>store_domain', normalizedShop)
-      .maybeSingle();
-    
-    if (existingConnection && existingConnection.tenant_id !== tenantId) {
-      // Shop är redan kopplad till annan tenant - AVBRYT
-      return redirect(
-        `/app?error=${encodeURIComponent(
-          'This Shopify store is already connected to another account. ' +
-          'Please disconnect it first or contact support.'
-        )}`
-      );
-    }
-    
-    // 7. Utför token exchange med Shopify
-    const tokenEndpoint = `https://${normalizedShop}/admin/oauth/access_token`;
-    const tokenRes = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: process.env.SHOPIFY_API_KEY!,
-        client_secret: process.env.SHOPIFY_API_SECRET!,
-        code: code,
-      }),
-    });
-    
-    if (!tokenRes.ok) {
-      throw new Error(`Token exchange failed: ${tokenRes.status}`);
-    }
-    
-    const tokenData = await tokenRes.json();
-    
-    // 8. Spara connection i Supabase via huvudplattformens API
-    // ELLER direkt i Supabase om du har service role key
-    await saveConnection(tenantId, tokenData.access_token, normalizedShop);
-    
-    // 9. Redirect tillbaka till huvudplattformen eller status-sida
-    return redirect(
-      `${process.env.NEXT_PUBLIC_ANALYTICS_URL}/admin/tenants/${tenantSlug}/integrations?status=shopify-connected`
-    );
-    
-  } catch (error) {
-    console.error('OAuth callback validation failed:', error);
-    return redirect(
-      `/app?error=${encodeURIComponent(
-        error instanceof Error ? error.message : 'OAuth validation failed'
-      )}`
-    );
-  }
-}
-
-function normalizeShopDomain(domain: string): string {
-  return domain
-    .replace(/^https?:\/\//, '')
-    .replace(/^www\./, '')
-    .replace(/\/$/, '')
-    .toLowerCase();
-}
-```
+**Shopify-appen behöver INTE implementera callback-routen.**
 
 ### 3. Webhook Tenant Lookup (`/webhooks/shopify`)
 
@@ -560,18 +456,20 @@ SYNC_SERVICE_KEY=<secret-key-for-sync-api>
 ### Huvudplattformen:
 - [x] Skapa `/api/shopify/tenants` endpoint
 - [x] Skapa `/api/shopify/oauth/init` endpoint
+- [x] Skapa `/api/oauth/shopify/callback` route
 - [x] Uppdatera `getShopifyAuthorizeUrl` för att ta emot state
 - [x] Uppdatera `handleShopifyOAuthCallback` för att normalisera shop domain
+- [x] State-validering med HMAC-signatur
+- [x] Shop domain uniqueness validation
+- [x] Redirect till integrations-sida efter callback
 
 ### Shopify-appen:
 - [ ] Skapa `/app/connect` sida med tenant-dropdown
 - [ ] Hämta tenants från huvudplattformens API
 - [ ] Visa tenants baserat på behörigheter
 - [ ] Auto-select om bara en tenant
-- [ ] Uppdatera OAuth callback med state-validering
-- [ ] Validera shop domain uniqueness
-- [ ] Implementera webhook tenant lookup
-- [ ] Implementera manual sync endpoint med validation
+- [ ] Implementera webhook tenant lookup (för Shopify-appens webhooks)
+- [ ] Implementera manual sync endpoint med validation (för Shopify-appens sync API)
 - [ ] Hantera fel-scenarier
 
 ### Säkerhet:
