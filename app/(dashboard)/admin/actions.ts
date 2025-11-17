@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { z } from 'zod'
 
-import { requirePlatformAdmin } from '@/lib/auth/current-user'
+import { requirePlatformAdmin, getCurrentUser } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
 import { getShopifyAuthorizeUrl } from '@/lib/integrations/shopify'
