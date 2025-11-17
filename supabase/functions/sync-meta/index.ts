@@ -1627,7 +1627,14 @@ async function processTenant(
       }
     }
 
-    const campaignCatalog = await fetchMetaCampaignCatalog(tenantId, accessToken, preferredAccountId)
+    let campaignCatalog: MetaCampaignRecord[] = []
+    try {
+      campaignCatalog = await fetchMetaCampaignCatalog(tenantId, accessToken, preferredAccountId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`Failed to fetch campaign catalog for tenant ${tenantId}, account ${preferredAccountId}:`, message)
+      // Continue with insights sync even if campaign catalog fails
+    }
 
     const matrixResult = await runFullMatrix(
       client,
