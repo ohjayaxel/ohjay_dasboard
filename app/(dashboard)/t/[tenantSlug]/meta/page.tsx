@@ -2,7 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { getKpiDaily } from '@/lib/data/agg'
 import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
 
-export const revalidate = 60
+export const revalidate = 30
 
 type PageProps = {
   params: Promise<{ tenantSlug: string }>
