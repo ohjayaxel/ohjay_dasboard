@@ -3,7 +3,6 @@ import { AppSidebar } from '@/components/app-sidebar'
 import { SiteHeader } from '@/components/site-header'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { getCurrentUser } from '@/lib/auth/current-user'
-import { isPlatformAdmin } from '@/lib/auth/roles'
 import { resolveTenantBySlug } from '@/lib/tenants/resolve-tenant'
 import { TenantDateRangeFilter } from '@/components/tenant/date-range-filter'
 
@@ -49,23 +48,14 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
       url: `/t/${tenantSlug}/shopify`,
       icon: 'brand-shopify',
     },
-  ]
-
-  if (isPlatformAdmin(user.role)) {
-    navMain.push({
-      title: 'Admin Console',
-      url: '/admin',
-      icon: 'settings',
-    })
-  }
-
-  const documents = [
     {
-      name: 'KPI Library',
-      url: `/t/${tenantSlug}`,
-      icon: 'chart-dots',
+      title: 'Account',
+      url: `/t/${tenantSlug}/account`,
+      icon: 'users',
     },
   ]
+
+  const documents: Array<{ name: string; url: string; icon: string }> = []
 
   return (
     <SidebarProvider
@@ -79,6 +69,7 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
         tenantName={tenant.name}
         navMain={navMain}
         documents={documents}
+        navSecondary={[]}
         user={{
           name: user.name,
           email: user.email,

@@ -1,12 +1,12 @@
 "use client"
 
 import {
-  IconCreditCard,
   IconDotsVertical,
   IconLogout,
-  IconNotification,
   IconUserCircle,
 } from "@tabler/icons-react"
+import Link from "next/link"
+import { usePathname } from "next/navigation"
 
 import {
   Avatar,
@@ -39,6 +39,12 @@ export function NavUser({
   }
 }) {
   const { isMobile } = useSidebar()
+  const pathname = usePathname()
+  
+  // Extract tenantSlug from pathname (/t/[tenantSlug]/...)
+  const tenantSlugMatch = pathname.match(/^\/t\/([^/]+)/)
+  const tenantSlug = tenantSlugMatch ? tenantSlugMatch[1] : ''
+  const accountUrl = tenantSlug ? `/t/${tenantSlug}/account` : '#'
 
   return (
     <SidebarMenu>
@@ -84,17 +90,11 @@ export function NavUser({
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
-              <DropdownMenuItem>
-                <IconUserCircle />
-                Account
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <IconCreditCard />
-                Billing
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <IconNotification />
-                Notifications
+              <DropdownMenuItem asChild>
+                <Link href={accountUrl}>
+                  <IconUserCircle />
+                  Account
+                </Link>
               </DropdownMenuItem>
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
