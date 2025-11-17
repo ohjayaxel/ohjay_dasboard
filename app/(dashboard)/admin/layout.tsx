@@ -17,6 +17,11 @@ export default async function AdminLayout({ children }: { children: ReactNode })
       url: '/admin',
       icon: 'gauge',
     },
+    {
+      title: 'Settings',
+      url: '/admin/settings',
+      icon: 'settings',
+    },
     ...tenants.map((tenant) => ({
       title: tenant.name,
       url: `/admin/tenants/${tenant.slug}`,

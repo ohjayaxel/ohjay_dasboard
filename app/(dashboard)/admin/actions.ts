@@ -128,6 +128,7 @@ const slugify = (value: string) =>
 
 async function revalidateTenantViews(tenantId: string, tenantSlug?: string) {
   revalidatePath('/admin')
+  revalidatePath('/admin/settings')
 
   let slug = tenantSlug
   if (!slug) {
@@ -144,6 +145,8 @@ async function revalidateTenantViews(tenantId: string, tenantSlug?: string) {
 
   if (slug) {
     revalidatePath(`/admin/tenants/${slug}`)
+    revalidatePath(`/admin/tenants/${slug}/integrations`)
+    revalidatePath(`/admin/tenants/${slug}/members`)
   }
 }
 
@@ -177,7 +180,7 @@ export async function addTenantMember(formData: FormData) {
 
   if (!user) {
     redirect(
-      `/admin/tenants/${result.data.tenantSlug}?error=${encodeURIComponent(
+      `/admin/tenants/${result.data.tenantSlug}/members?error=${encodeURIComponent(
         'No Supabase Auth user found for that email. Invite the user first, then grant access.',
       )}`,
     )
@@ -200,7 +203,7 @@ export async function addTenantMember(formData: FormData) {
 
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
 
-  redirect(`/admin/tenants/${result.data.tenantSlug}?status=member-added`)
+  redirect(`/admin/tenants/${result.data.tenantSlug}/members?status=member-added`)
 }
 
 export async function removeTenantMember(formData: FormData) {
@@ -239,7 +242,7 @@ export async function removeTenantMember(formData: FormData) {
 
   await revalidateTenantViews(member.tenant_id as string, result.data.tenantSlug)
 
-  redirect(`/admin/tenants/${result.data.tenantSlug}?status=member-removed`)
+  redirect(`/admin/tenants/${result.data.tenantSlug}/members?status=member-removed`)
 }
 
 export async function createTenant(formData: FormData) {
@@ -336,7 +339,7 @@ export async function startMetaConnect(payload: { tenantId: string; tenantSlug: 
       ...baseMeta,
       oauth_state: state,
       oauth_state_created_at: now,
-      oauth_redirect_path: `/admin/tenants/${tenantSlug}`,
+      oauth_redirect_path: `/admin/tenants/${tenantSlug}/integrations`,
     }
 
     if (existing) {
@@ -426,7 +429,7 @@ export async function disconnectMeta(payload: { tenantId: string; tenantSlug: st
     ...baseMeta,
     oauth_state: null,
     oauth_state_created_at: null,
-    oauth_redirect_path: `/admin/tenants/${tenantSlug}`,
+      oauth_redirect_path: `/admin/tenants/${tenantSlug}/integrations`,
     disconnected_at: now,
   }
 
@@ -583,7 +586,7 @@ export async function updateIntegrationSettings(formData: FormData) {
 
   await revalidateTenantViews(tenantId, tenantSlug)
 
-  redirect(`/admin/tenants/${tenantSlug}?status=settings-updated&source=${source}`)
+  redirect(`/admin/tenants/${tenantSlug}/integrations?status=settings-updated&source=${source}`)
 }
 
 export async function updateMetaSelectedAccount(formData: FormData) {
@@ -683,7 +686,7 @@ export async function updateMetaSelectedAccount(formData: FormData) {
 
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
 
-  redirect(`/admin/tenants/${result.data.tenantSlug}?status=meta-account-updated`)
+  redirect(`/admin/tenants/${result.data.tenantSlug}/integrations?status=meta-account-updated`)
 }
 
 export async function triggerMetaSyncNow(formData: FormData) {
@@ -720,7 +723,7 @@ export async function triggerMetaSyncNow(formData: FormData) {
       'Failed to trigger Meta sync manually',
     )
     redirect(
-      `/admin/tenants/${result.data.tenantSlug}?error=${encodeURIComponent(
+      `/admin/tenants/${result.data.tenantSlug}/integrations?error=${encodeURIComponent(
         'Failed to start Meta sync. Check logs for details.',
       )}`,
     )
@@ -737,7 +740,7 @@ export async function triggerMetaSyncNow(formData: FormData) {
 
   await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
 
-  redirect(`/admin/tenants/${result.data.tenantSlug}?status=meta-sync-triggered`)
+  redirect(`/admin/tenants/${result.data.tenantSlug}/integrations?status=meta-sync-triggered`)
 }
 
 export async function triggerMetaBackfill(formData: FormData) {
@@ -809,7 +812,7 @@ export async function triggerMetaBackfill(formData: FormData) {
     )
 
     redirect(
-      `/admin/tenants/${tenantSlug}?error=${encodeURIComponent(
+      `/admin/tenants/${tenantSlug}/integrations?error=${encodeURIComponent(
         'Kunde inte starta Meta-backfill. Kontrollera loggarna för mer information.',
       )}`,
     )
@@ -829,7 +832,7 @@ export async function triggerMetaBackfill(formData: FormData) {
 
   await revalidateTenantViews(tenantId, tenantSlug)
 
-  redirect(`/admin/tenants/${tenantSlug}?status=meta-backfill-triggered`)
+  redirect(`/admin/tenants/${tenantSlug}/integrations?status=meta-backfill-triggered`)
 }
 
 export async function queueMetaBackfillJobs(formData: FormData) {
@@ -905,7 +908,7 @@ export async function queueMetaBackfillJobs(formData: FormData) {
     )
 
     redirect(
-      `/admin/tenants/${tenantSlug}?error=${encodeURIComponent(
+      `/admin/tenants/${tenantSlug}/integrations?error=${encodeURIComponent(
         'Kunde inte skapa backfill-jobb. Kontrollera loggar för mer information.',
       )}`,
     )
@@ -925,7 +928,187 @@ export async function queueMetaBackfillJobs(formData: FormData) {
 
   await revalidateTenantViews(tenantId, tenantSlug)
 
-  redirect(`/admin/tenants/${tenantSlug}?status=meta-backfill-queued`)
+  redirect(`/admin/tenants/${tenantSlug}/integrations?status=meta-backfill-queued`)
+}
+
+const addPlatformAdminSchema = z.object({
+  email: z.string().email({ message: 'Invalid email address.' }).transform((value) => value.toLowerCase()),
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+})
+
+const removePlatformAdminSchema = z.object({
+  memberId: z.string().uuid({ message: 'Invalid member identifier.' }),
+})
+
+const updatePlatformAdminRoleSchema = z.object({
+  memberId: z.string().uuid({ message: 'Invalid member identifier.' }),
+  role: roleEnum,
+})
+
+export async function addPlatformAdmin(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const result = addPlatformAdminSchema.safeParse({
+    email: formData.get('email'),
+    tenantId: formData.get('tenantId'),
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid platform admin payload.')
+  }
+
+  const client = getSupabaseServiceClient()
+
+  // Find user by email
+  const { data: usersData, error: userLookupError } = await client.auth.admin.listUsers({
+    page: 1,
+    perPage: 1,
+    filter: { email: result.data.email },
+  })
+
+  if (userLookupError) {
+    throw new Error(`Unable to search Supabase Auth: ${userLookupError.message}`)
+  }
+
+  const user = usersData?.users?.[0]
+
+  if (!user) {
+    redirect(
+      `/admin/settings?error=${encodeURIComponent(
+        'No Supabase Auth user found for that email. Invite the user first, then grant platform admin access.',
+      )}`,
+    )
+  }
+
+  // Check if user is already a member of this tenant
+  const { data: existingMember } = await client
+    .from('members')
+    .select('id')
+    .eq('tenant_id', result.data.tenantId)
+    .eq('user_id', user.id)
+    .maybeSingle()
+
+  if (existingMember) {
+    // Update existing member to platform_admin
+    const { error: updateError } = await client
+      .from('members')
+      .update({
+        role: Roles.platformAdmin,
+        email: result.data.email,
+      })
+      .eq('id', existingMember.id)
+
+    if (updateError) {
+      throw new Error(`Failed to update member to platform admin: ${updateError.message}`)
+    }
+  } else {
+    // Insert new member with platform_admin role
+    const { error: insertError } = await client.from('members').insert({
+      tenant_id: result.data.tenantId,
+      user_id: user.id,
+      email: result.data.email,
+      role: Roles.platformAdmin,
+    })
+
+    if (insertError) {
+      if (insertError.code === '23505') {
+        throw new Error('User already has access to this tenant.')
+      }
+
+      throw new Error(`Failed to add platform admin: ${insertError.message}`)
+    }
+  }
+
+  revalidatePath('/admin/settings')
+  redirect('/admin/settings?status=platform-admin-added')
+}
+
+export async function removePlatformAdmin(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const result = removePlatformAdminSchema.safeParse({
+    memberId: formData.get('memberId'),
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid member identifier.')
+  }
+
+  const client = getSupabaseServiceClient()
+
+  // Get member to check current role
+  const { data: member, error: lookupError } = await client
+    .from('members')
+    .select('user_id, tenant_id, role')
+    .eq('id', result.data.memberId)
+    .maybeSingle()
+
+  if (lookupError) {
+    throw new Error(`Failed to load member details: ${lookupError.message}`)
+  }
+
+  if (!member) {
+    throw new Error('Member not found.')
+  }
+
+  if (member.role !== Roles.platformAdmin) {
+    throw new Error('Member is not a platform admin.')
+  }
+
+  // Remove member entirely (platform admin is only role, so removing access makes sense)
+  const { error } = await client.from('members').delete().eq('id', result.data.memberId)
+
+  if (error) {
+    throw new Error(`Failed to remove platform admin: ${error.message}`)
+  }
+
+  revalidatePath('/admin/settings')
+  redirect('/admin/settings?status=platform-admin-removed')
+}
+
+export async function updatePlatformAdminRole(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const result = updatePlatformAdminRoleSchema.safeParse({
+    memberId: formData.get('memberId'),
+    role: formData.get('role'),
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid role update payload.')
+  }
+
+  const client = getSupabaseServiceClient()
+
+  // Get member to check current role
+  const { data: member, error: lookupError } = await client
+    .from('members')
+    .select('role')
+    .eq('id', result.data.memberId)
+    .maybeSingle()
+
+  if (lookupError) {
+    throw new Error(`Failed to load member details: ${lookupError.message}`)
+  }
+
+  if (!member) {
+    throw new Error('Member not found.')
+  }
+
+  // Update role
+  const { error: updateError } = await client
+    .from('members')
+    .update({
+      role: result.data.role,
+    })
+    .eq('id', result.data.memberId)
+
+  if (updateError) {
+    throw new Error(`Failed to update member role: ${updateError.message}`)
+  }
+
+  revalidatePath('/admin/settings')
+  redirect(`/admin/settings?status=role-updated`)
 }
 
 
