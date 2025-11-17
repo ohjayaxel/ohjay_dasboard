@@ -2,24 +2,57 @@
 
 Den här guiden beskriver hur vi automatiserar insamlingen av Meta Marketing API-data varje timme och låter workern ta hand om backfills/KPI-uppdateringar.
 
-## 1. Timvis incremental sync (Supabase Scheduler)
+## 1. Timvis incremental sync (pg_cron + pg_net)
 
-Supabase har inbyggt stöd för schemalagda Edge Function-körningar. Vi skapar ett cron-jobb som ropar `sync-meta` varje timme:
+Supabase schemalägger Edge Functions via `pg_cron` + `pg_net`. Vi lagrar projekt-URL + Edge Function key i Supabase Vault och låter Postgres trigga `sync-meta` varje timme (payload `{"mode":"incremental"}`) enligt den officiella guiden (https://supabase.com/docs/guides/functions/schedule-functions).
 
-1. Säkerställ att du har Supabase CLI ≥ v1.181 installerad och att `SUPABASE_ACCESS_TOKEN` är satt.
-2. Kör skriptet i repot:
+### Snabb setup (prod)
 
+#### Alternativ 1: Automatisk setup (rekommenderat)
+
+1. **Deploya/uppdatera Edge Function:**
    ```bash
-   SUPABASE_PROJECT_REF=punicovacaktaszqcckp \
-   META_SYNC_CRON="5 * * * *" \
-   scripts/setup_meta_sync_schedule.sh
+   bash scripts/setup_meta_automation.sh
+   ```
+   Detta script deployar `sync-meta` edge function.
+
+2. **Kör automatiskt SQL-setup:**
+   ```bash
+   bash scripts/setup_meta_schedule_sql.sh
+   ```
+   Detta script:
+   - Läser projekt-URL och service role key från `env/local.prod.sh` eller `.env.local`
+   - Genererar SQL med rätt värden
+   - Kan köra SQL:en direkt i Supabase (eller spara till fil för manuell körning)
+   - Skapar/uppdaterar Vault-secrets automatiskt
+   - Skapar cron-jobbet `meta-sync-hourly`
+
+#### Alternativ 2: Manuell setup
+
+1. **Deploya/uppdatera Edge Function:**
+   ```bash
+   supabase functions deploy sync-meta --project-ref <project-ref>
    ```
 
-   - `SUPABASE_PROJECT_REF` kan sättas via env eller matas in när skriptet körs.
-   - `META_SYNC_CRON` är valfri; default är `5 * * * *` (fem över varje heltimme).
-3. Bekräfta i Supabase Dashboard → Edge Functions → Schedules att `meta-sync-hourly` finns och är aktiv.
+2. **Kör SQL-mallen** `supabase/sql/meta_sync_schedule.sql`:
+   - Öppna filen och avkommentera/uncomment rätt rader (värdena är redan ifyllda från `env/local.prod.sh`)
+   - Kör filen i Supabase SQL Editor eller via `psql` mot prod-databasen
+   - Filen:
+     - Säkerställer att `pg_cron` / `pg_net` finns
+     - Skapar/uppdaterar Vault-secrets `meta_sync_project_url` och `meta_sync_function_key`
+     - Unschedular eventuell gammal körning
+     - Schemalägger `meta-sync-hourly` → `sync-meta` fem över varje heltimme
 
-Cron-jobbet skickar payloaden `{"mode":"incremental"}`, vilket gör att `sync-meta` kör sin 30-dagars inkrementella synk med D+3 overlap varje timme.
+### Verifiera körningen
+
+- Supabase Dashboard → Database → Cron jobs ska visa `meta-sync-hourly`
+- Edge Functions → Logs ska få ett anrop ~5 min över hel timme
+
+### Tips
+
+- Vill du rotera secrets i framtiden? Kör bara `vault.update_secret(...)`-delen av SQL-filen och avsluta med `cron.schedule`.
+- Om du behöver pausa jobbet kan du köra `select cron.unschedule('meta-sync-hourly');` i SQL Editorn.
+- För dev-miljön kan du antingen använda samma SQL (med dev-ref) eller köra funktionen manuellt via `/api/jobs/sync?source=meta`.
 
 > Fallback: om Supabase Scheduler inte skulle räcka (t.ex. vid behov av second-level intervall) kan man använda GitHub Actions eller Vercel Cron. Supabase-lösningen är dock enklast att underhålla eftersom den körs i samma infrastruktur som Edge Functions.
 

@@ -1,6 +1,5 @@
 // deno-lint-ignore-file no-explicit-any
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts'
-import { createHash } from 'https://deno.land/std@0.224.0/hash/mod.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 type SupabaseClient = ReturnType<typeof createClient<any, any, any>>
@@ -219,8 +218,10 @@ const BREAKDOWN_SETS: Record<string, string> = {
   B: 'age,gender',
   C: 'country',
   D: 'device_platform',
+  country_priority: 'country',
 }
 const CANONICAL_BREAKDOWN_KEY = 'none'
+const COUNTRY_PRIORITY_CODES = new Set(['DE', 'SE', 'NO', 'FI'])
 const CANONICAL_ACTION_REPORT_TIME: ActionReportTime = 'impression'
 const CANONICAL_ATTRIBUTION_WINDOW: AttributionWindow = '7d_click'
 
@@ -452,11 +453,9 @@ function decodeEncryptedPayload(payload: unknown): Uint8Array | null {
       // not JSON
     }
 
-    if (value.startsWith('\\x')) {
-      return normalize(hexToBytes(value.replace(/^\\+x/, '')))
-    }
-    if (value.startsWith('\x')) {
-      return normalize(hexToBytes(value.slice(2)))
+    if (value.startsWith('\\x') || value.startsWith('0x')) {
+      const hexValue = value.replace(/^(\\x|0x)/, '')
+      return normalize(hexToBytes(hexValue))
     }
     if (/^[0-9a-fA-F]+$/.test(value)) {
       return normalize(hexToBytes(value))
@@ -982,12 +981,15 @@ const FIELDS = [
   'account_currency',
 ]
 
-function hashBreakdowns(breakdowns: Record<string, string | null>): string {
+async function hashBreakdowns(breakdowns: Record<string, string | null>): Promise<string> {
   const normalizedEntries = Object.entries(breakdowns)
     .map(([key, value]) => [key, value ?? null] as const)
     .sort(([a], [b]) => a.localeCompare(b))
 
-  return createHash('sha1').update(JSON.stringify(normalizedEntries)).toString()
+  const data = new TextEncoder().encode(JSON.stringify(normalizedEntries))
+  const hashBuffer = await crypto.subtle.digest('SHA-1', data)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 function normalizeRow(
@@ -995,9 +997,11 @@ function normalizeRow(
   {
     level,
     breakdownKeys,
+    breakdownKey,
   }: {
     level: InsightLevel
     breakdownKeys: string[]
+    breakdownKey?: string
   },
 ): NormalizedInsightRow | null {
   const entityId = deriveEntityId(level, row)
@@ -1009,13 +1013,23 @@ function normalizeRow(
   const actionValues = parseArray<any>(row.action_values)
 
   const breakdowns: Record<string, string | null> = {}
+  // Check if this is country_priority breakdown for country mapping
+  const isCountryPriority = breakdownKey === 'country_priority'
+  
   for (const key of breakdownKeys) {
     if (!key) continue
-    const value = row[key]
+    let value = row[key]
     if (value === null || value === undefined) {
       breakdowns[key] = null
       continue
     }
+    
+    // Map country to priority countries (DE, SE, NO, FI) or OTHER for country_priority breakdown
+    if (isCountryPriority && key === 'country' && typeof value === 'string') {
+      const upper = value.toUpperCase()
+      value = COUNTRY_PRIORITY_CODES.has(upper) ? upper : 'OTHER'
+    }
+    
     breakdowns[key] = typeof value === 'string' ? value : String(value)
   }
 
@@ -1061,13 +1075,13 @@ function normalizeRow(
   }
 }
 
-function toDailyRow(
+async function toDailyRow(
   tenantId: string,
   accountId: string,
   context: Pick<MatrixTask, 'level' | 'breakdownKey' | 'actionReportTime' | 'attributionWindow'>,
   normalized: NormalizedInsightRow,
 ) {
-  const breakdownsHash = hashBreakdowns(normalized.breakdowns)
+  const breakdownsHash = await hashBreakdowns(normalized.breakdowns)
   return {
     tenant_id: tenantId,
     date: normalized.dateStart,
@@ -1249,6 +1263,7 @@ async function runMonthlyChunk(task: MatrixTask): Promise<NormalizedInsightRow[]
         const normalized = normalizeRow(raw as JsonRecord, {
           level: task.level,
           breakdownKeys,
+          breakdownKey: task.breakdownKey,
         })
         if (normalized) {
           rows.push(normalized)
@@ -1321,12 +1336,13 @@ async function runFullMatrix(
       return
     }
 
-    const dailyRows = normalizedRows
-      .map((row) => toDailyRow(tenantId, accountId, task, row))
-      .filter((row) => typeof row.entity_id === 'string' && row.entity_id.length > 0)
+    const dailyRows = await Promise.all(
+      normalizedRows.map((row) => toDailyRow(tenantId, accountId, task, row))
+    )
+    const validDailyRows = dailyRows.filter((row) => typeof row.entity_id === 'string' && row.entity_id.length > 0)
 
-    await upsertDailyRows(client, dailyRows)
-    dailyRowCount += dailyRows.length
+    await upsertDailyRows(client, validDailyRows)
+    dailyRowCount += validDailyRows.length
 
     for (const row of normalizedRows) {
       const date = row.dateStart

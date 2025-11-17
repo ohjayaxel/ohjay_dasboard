@@ -58,11 +58,11 @@ Workern avslutar aldrig (loopar med `sleep`). När inga jobb finns väntar den 1
 
 ## Koppla ihop med Supabase-cron
 
-Se `docs/meta_automation.md` eller kör `scripts/setup_meta_sync_schedule.sh` för att skapa den timvisa `sync-meta`-körningen. Kombinationen:
+Följ `docs/meta_automation.md` (pg_cron + pg_net) för att schemalägga Edge Function `sync-meta` varje timme. Kombinationen:
 
-1. Supabase Scheduler → `sync-meta` varje timme.
+1. Supabase `cron.schedule` → `sync-meta` varje timme.
 2. Den här workern → backfill + KPI-aggregering.
 
-säkerställer att dashboardsen uppdateras automatiskt utan manuell insats.
+sörjer för att dashboardsen uppdateras automatiskt utan manuell insats.
 
 
