@@ -57,7 +57,7 @@ async function main() {
       .eq('tenant_id', args.tenant)
       .eq('ad_account_id', args.account)
       .eq('level', 'account')
-      .eq('action_report_time', 'conversion')
+      .in('action_report_time', ['impression', 'conversion'])
       .eq('attribution_window', '1d_click')
       .in('breakdowns_key', ['none', 'country_priority'])
       .gte('date', since)
