@@ -7,9 +7,12 @@ import { z } from 'zod'
 import { requirePlatformAdmin } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
+import { getShopifyAuthorizeUrl } from '@/lib/integrations/shopify'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { logger, withRequestContext } from '@/lib/logger'
 import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
+import { createHmac } from 'crypto'
+import { isPlatformAdmin } from '@/lib/auth/roles'
 
 const roleEnum = z.enum([
   Roles.platformAdmin,

@@ -4,15 +4,16 @@ import Link from 'next/link';
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
 import { getCurrentUser } from '@/lib/auth/current-user';
 import { isPlatformAdmin } from '@/lib/auth/roles';
+import { startShopifyConnect } from '@/app/(dashboard)/admin/actions';
 import { getShopifyAuthorizeUrl } from '@/lib/integrations/shopify';
 import { createHmac } from 'crypto';
+
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 type PageProps = {
   searchParams?: Promise<{
@@ -256,42 +257,7 @@ export default async function ConnectShopifyPage(props: PageProps) {
             {tenants.map((tenant) => (
               <form
                 key={tenant.id}
-                action={async () => {
-                  'use server';
-                  if (!ENCRYPTION_KEY) {
-                    throw new Error('ENCRYPTION_KEY environment variable is required');
-                  }
-
-                  // Skapa signed state
-                  const stateData = {
-                    tenantId: tenant.id,
-                    shopDomain: normalizedShop,
-                    userId: user.id,
-                    timestamp: Date.now(),
-                    nonce: crypto.randomUUID(),
-                  };
-
-                  const statePayload = JSON.stringify(stateData);
-                  const signature = createHmac('sha256', ENCRYPTION_KEY)
-                    .update(statePayload)
-                    .digest('hex');
-
-                  const state = Buffer.from(
-                    JSON.stringify({
-                      data: stateData,
-                      sig: signature,
-                    }),
-                  ).toString('base64');
-
-                  // Hämta OAuth URL och redirect
-                  const { url } = await getShopifyAuthorizeUrl({
-                    tenantId: tenant.id,
-                    shopDomain: normalizedShop,
-                    state,
-                  });
-
-                  redirect(url);
-                }}
+                action={startShopifyConnect.bind(null, tenant.id, normalizedShop)}
               >
                 <div className="rounded-lg border p-4 hover:bg-muted/50">
                   <div className="flex items-center justify-between">
