@@ -209,15 +209,11 @@ const INCREMENTAL_WINDOW_DAYS = 30
 const REINGEST_OVERLAP_DAYS = 3
 const MAX_BACKFILL_WINDOW_DAYS = 366
 
-const LEVELS = ['account', 'campaign', 'adset', 'ad'] as const
+const LEVELS = ['account'] as const
 const ACTION_REPORT_TIMES = ['impression', 'conversion'] as const
 const ATTR_WINDOWS = ['1d_click', '7d_click', '1d_view'] as const
 const BREAKDOWN_SETS: Record<string, string> = {
   none: '',
-  A: 'publisher_platform,platform_position',
-  B: 'age,gender',
-  C: 'country',
-  D: 'device_platform',
   country_priority: 'country',
 }
 const CANONICAL_BREAKDOWN_KEY = 'none'
@@ -931,7 +927,7 @@ function buildParams({
   attributionWindow,
 }: BuildParamsInput): Record<string, unknown> {
   const params: Record<string, unknown> = {
-    fields: FIELDS.join(','),
+    fields: (level === 'account' ? ACCOUNT_FIELDS : ENTITY_FIELDS).join(','),
     level,
     time_range: { since, until },
     time_increment: 1,
@@ -947,7 +943,28 @@ function buildParams({
   return params
 }
 
-const FIELDS = [
+const ACCOUNT_FIELDS: readonly string[] = [
+  'account_id',
+  'date_start',
+  'date_stop',
+  'impressions',
+  'reach',
+  'clicks',
+  'unique_clicks',
+  'inline_link_clicks',
+  'spend',
+  'cpm',
+  'cpc',
+  'ctr',
+  'actions',
+  'action_values',
+  'purchase_roas',
+  'cost_per_action_type',
+  'frequency',
+  'account_currency',
+]
+
+const ENTITY_FIELDS: readonly string[] = [
   'account_id',
   'campaign_id',
   'campaign_name',
