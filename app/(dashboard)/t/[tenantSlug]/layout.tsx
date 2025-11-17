@@ -5,6 +5,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { getCurrentUser } from '@/lib/auth/current-user'
 import { isPlatformAdmin } from '@/lib/auth/roles'
 import { resolveTenantBySlug } from '@/lib/tenants/resolve-tenant'
+import { TenantDateRangeFilter } from '@/components/tenant/date-range-filter'
 
 interface TenantLayoutProps {
   children: ReactNode
@@ -85,7 +86,7 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
         }}
       />
       <SidebarInset>
-        <SiteHeader title={tenant.name} environment={environment} />
+        <SiteHeader title={tenant.name} environment={environment} actions={<TenantDateRangeFilter />} />
         <div className="flex flex-1 flex-col">
           <div className="@container/main flex flex-1 flex-col gap-6 p-4 md:p-6">
             {children}

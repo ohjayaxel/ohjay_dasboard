@@ -1,7 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { getKpiDaily, type KpiSeriesPoint, type KpiTotals } from '@/lib/data/agg'
 import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
-import { OverviewFilters } from '@/components/tenant/overview-filters'
 
 export const revalidate = 60
 
@@ -41,21 +40,6 @@ export default async function TenantOverviewPage(props: PageProps) {
 
   const from = typeof fromParam === 'string' && fromParam.length > 0 ? fromParam : defaultFrom
   const to = typeof toParam === 'string' && toParam.length > 0 ? toParam : defaultTo
-
-  const defaultMetrics: MetricKey[] = ['spend', 'revenue', 'roas', 'cpa', 'conversions', 'clicks']
-
-  const metricsParam = rawSearchParams?.metric
-  const metricsFromQuery = Array.isArray(metricsParam)
-    ? metricsParam
-    : typeof metricsParam === 'string'
-      ? [metricsParam]
-      : []
-
-  const metricsSelection = metricsFromQuery
-    .map((value) => value as MetricKey)
-    .filter((value): value is MetricKey => defaultMetrics.includes(value))
-
-  const selectedMetricKeys = metricsSelection.length > 0 ? metricsSelection : defaultMetrics
 
   const { totals, series, currency } = await getKpiDaily({ tenantId, from, to })
   const latest = series.at(-1)
@@ -131,9 +115,7 @@ export default async function TenantOverviewPage(props: PageProps) {
     },
   ]
 
-  const visibleMetrics = metricDefinitions.filter((metric) =>
-    selectedMetricKeys.includes(metric.key),
-  )
+  const visibleMetrics = metricDefinitions
 
   const cards = visibleMetrics.map((metric) => ({
     key: metric.key,
@@ -143,25 +125,6 @@ export default async function TenantOverviewPage(props: PageProps) {
 
   return (
     <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-semibold text-muted-foreground">Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <OverviewFilters
-            tenantSlug={tenantSlug}
-            from={from}
-            to={to}
-            metricOptions={metricDefinitions.map((metric) => ({
-              value: metric.key,
-              label: metric.label,
-              description: metric.description,
-            }))}
-            selectedMetrics={selectedMetricKeys}
-          />
-        </CardContent>
-      </Card>
-
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {cards.map((item) => (
           <Card key={item.key}>

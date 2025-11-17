@@ -1,3 +1,5 @@
+import { type ReactNode } from 'react'
+
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
@@ -7,12 +9,14 @@ type SiteHeaderProps = {
   title?: string
   description?: string
   environment?: string
+  actions?: ReactNode
 }
 
 export function SiteHeader({
   title = 'Dashboard',
   description,
   environment,
+  actions,
 }: SiteHeaderProps) {
   return (
     <header className="flex h-(--header-height) shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-(--header-height)">
@@ -30,7 +34,8 @@ export function SiteHeader({
             <p className="text-sm text-muted-foreground">{description}</p>
           ) : null}
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {actions}
           {environment ? (
             <Badge variant="outline" className="uppercase tracking-wide">
               {environment}
