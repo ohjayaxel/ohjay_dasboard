@@ -39,264 +39,72 @@ SHOPIFY_API_SECRET=<app_client_secret>
 ENCRYPTION_KEY=<encryption_key>
 ```
 
-## Steg 1: Skapa Tenant-val UI (`/app/connect`)
+## Steg 1: Skapa Connect-knapp i Shopify-appen
 
-När användaren installerar Shopify-appen behöver de välja vilket tenant-konto butiken ska kopplas till.
+**VIKTIGT:** Tenant-val och OAuth-koppling hanteras nu på huvudplattformen. Shopify-appen behöver bara ha en enkel knapp som redirectar till huvudplattformen.
 
-### 1.1 Skapa Connect Page
+### 1.1 Skapa Connect-knapp
 
-Skapa filen `app/routes/app.connect.tsx` (eller motsvarande beroende på ditt routing-system):
+Skapa en enkel sida i Shopify-appen som redirectar till huvudplattformens connect-sida. Exempel för Remix (`app/routes/app.connect.tsx`):
 
 ```typescript
-import { json, redirect } from '@remix-run/node'; // eller Next.js App Router
-import { useLoaderData, useSearchParams, useSubmit } from '@remix-run/react';
-import { useEffect, useState } from 'react';
+import { redirect } from '@remix-run/node';
 
-type Tenant = {
-  id: string;
-  name: string;
-  slug: string;
-  isConnected: boolean;
-  connectedShopDomain: string | null;
-};
-
-type TenantsResponse = {
-  tenants: Tenant[];
-  user: {
-    id: string;
-    email: string;
-    role: string;
-    isPlatformAdmin: boolean;
-  };
-};
-
-// Loader för att hämta tenants
 export async function loader({ request }: { request: Request }) {
   const url = new URL(request.url);
   const shop = url.searchParams.get('shop');
 
   if (!shop) {
-    return json({ error: 'Missing shop parameter' }, { status: 400 });
+    return redirect('/app?error=missing_shop');
   }
 
-  try {
-    // Hämta tenants från huvudplattformen
-    // VIKTIGT: Du behöver skicka med session cookies för autentisering
-    // Detta kräver att användaren är inloggad i huvudplattformen
-    const response = await fetch(
-      `${process.env.NEXT_PUBLIC_ANALYTICS_URL || 'https://ohjay-dashboard.vercel.app'}/api/shopify/tenants`,
-      {
-        headers: {
-          // Skicka med cookies från användarens request
-          Cookie: request.headers.get('Cookie') || '',
-        },
-        credentials: 'include',
-      }
-    );
-
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        // Användaren är inte inloggad eller har inte access
-        return json(
-          { 
-            error: 'Authentication required',
-            redirectTo: `${process.env.NEXT_PUBLIC_ANALYTICS_URL}/signin?redirect=${encodeURIComponent(request.url)}`
-          },
-          { status: 401 }
-        );
-      }
-      throw new Error(`Failed to load tenants: ${response.status}`);
-    }
-
-    const data: TenantsResponse = await response.json();
-    return json({ tenants: data.tenants, user: data.user, shop });
-  } catch (error) {
-    console.error('Failed to load tenants:', error);
-    return json(
-      { error: 'Failed to load tenants. Please try again later.' },
-      { status: 500 }
-    );
-  }
+  // Redirect till huvudplattformens connect-sida
+  const analyticsUrl = process.env.NEXT_PUBLIC_ANALYTICS_URL || 'https://ohjay-dashboard.vercel.app';
+  const connectUrl = `${analyticsUrl}/connect/shopify?shop=${encodeURIComponent(shop)}`;
+  
+  return redirect(connectUrl);
 }
+```
+
+Eller för Next.js App Router (`app/app/connect/page.tsx`):
+
+```typescript
+'use client';
+
+import { useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 export default function ConnectPage() {
-  const { tenants, user, shop, error: loaderError } = useLoaderData<typeof loader>();
-  const [searchParams] = useSearchParams();
-  const submit = useSubmit();
-  
-  const [selectedTenantId, setSelectedTenantId] = useState<string>('');
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [error, setError] = useState<string | null>(loaderError || null);
+  const searchParams = useSearchParams();
+  const shop = searchParams.get('shop');
 
-  // Auto-select om bara en tenant
   useEffect(() => {
-    if (tenants && tenants.length === 1 && !selectedTenantId) {
-      setSelectedTenantId(tenants[0].id);
-    }
-  }, [tenants, selectedTenantId]);
-
-  // Redirect till signin om authentication krävs
-  useEffect(() => {
-    if (loaderError === 'Authentication required') {
-      // Redirect till signin-sidan i huvudplattformen
-      window.location.href = `${process.env.NEXT_PUBLIC_ANALYTICS_URL}/signin?redirect=${encodeURIComponent(window.location.href)}`;
-    }
-  }, [loaderError]);
-
-  async function handleConnect() {
-    if (!selectedTenantId || !shop) {
-      setError('Please select a tenant and ensure shop domain is available');
+    if (!shop) {
+      window.location.href = '/app?error=missing_shop';
       return;
     }
 
-    setIsConnecting(true);
-    setError(null);
-
-    try {
-      // Hämta OAuth URL från huvudplattformen med valt tenant
-      const oauthResponse = await fetch(
-        `${process.env.NEXT_PUBLIC_ANALYTICS_URL || 'https://ohjay-dashboard.vercel.app'}/api/shopify/oauth/init`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Cookie: document.cookie, // Skicka med cookies för autentisering
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            tenantId: selectedTenantId,
-            shopDomain: shop,
-          }),
-        }
-      );
-
-      if (!oauthResponse.ok) {
-        const errorData = await oauthResponse.json();
-        throw new Error(errorData.error || 'Failed to initialize OAuth');
-      }
-
-      const { url } = await oauthResponse.json();
-
-      // Redirecta till OAuth URL (Shopify hanterar resten)
-      // Huvudplattformen redirectar tillbaka efter OAuth
-      window.location.href = url;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to connect');
-      setIsConnecting(false);
-    }
-  }
-
-  if (loaderError === 'Authentication required') {
-    return (
-      <div className="p-8 text-center">
-        <p>Redirecting to sign in...</p>
-      </div>
-    );
-  }
-
-  if (!tenants || tenants.length === 0) {
-    return (
-      <div className="p-8">
-        <h1 className="text-2xl font-bold mb-4">Connect Shopify Store</h1>
-        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-          <p className="text-yellow-800">
-            No tenant accounts available. Please contact your administrator to grant you access to a tenant.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  const selectedTenant = tenants.find((t) => t.id === selectedTenantId);
-  const isAlreadyConnected = selectedTenant?.isConnected && selectedTenant?.connectedShopDomain === shop;
+    // Redirect till huvudplattformens connect-sida
+    const analyticsUrl = process.env.NEXT_PUBLIC_ANALYTICS_URL || 'https://ohjay-dashboard.vercel.app';
+    const connectUrl = `${analyticsUrl}/connect/shopify?shop=${encodeURIComponent(shop)}`;
+    
+    window.location.href = connectUrl;
+  }, [shop]);
 
   return (
-    <div className="p-8 max-w-2xl mx-auto">
-      <h1 className="text-2xl font-bold mb-4">Connect Shopify Store</h1>
-      <p className="text-muted-foreground mb-6">
-        Select which account this Shopify store should be connected to.
-      </p>
-
-      {user && (
-        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-          <p className="text-sm text-blue-800">
-            Logged in as: <strong>{user.email}</strong>
-            {user.isPlatformAdmin && (
-              <span className="ml-2 px-2 py-1 bg-blue-200 rounded text-xs">
-                Platform Admin
-              </span>
-            )}
-          </p>
-        </div>
-      )}
-
-      {error && (
-        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
-          <p className="text-red-800">{error}</p>
-        </div>
-      )}
-
-      <div className="space-y-4">
-        <div>
-          <label htmlFor="tenant" className="block text-sm font-medium mb-2">
-            Select Account
-          </label>
-          <select
-            id="tenant"
-            value={selectedTenantId}
-            onChange={(e) => setSelectedTenantId(e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-md"
-            disabled={isConnecting}
-          >
-            <option value="">-- Select an account --</option>
-            {tenants.map((tenant) => (
-              <option key={tenant.id} value={tenant.id}>
-                {tenant.name} {tenant.isConnected ? '(already connected)' : ''}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {selectedTenant && (
-          <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-            <h3 className="font-semibold mb-2">{selectedTenant.name}</h3>
-            <p className="text-sm text-muted-foreground">
-              Slug: <code>{selectedTenant.slug}</code>
-            </p>
-            {isAlreadyConnected && (
-              <p className="text-sm text-yellow-600 mt-2">
-                ⚠️ This store is already connected to this account.
-              </p>
-            )}
-          </div>
-        )}
-
-        <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-          <p className="text-sm font-medium mb-1">Shopify Store</p>
-          <p className="text-sm text-muted-foreground">
-            <code>{shop}</code>
-          </p>
-        </div>
-
-        <button
-          onClick={handleConnect}
-          disabled={!selectedTenantId || isConnecting || isAlreadyConnected}
-          className="w-full py-2 px-4 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isConnecting ? 'Connecting...' : isAlreadyConnected ? 'Already Connected' : 'Connect'}
-        </button>
-      </div>
-
-      <div className="mt-8 p-4 bg-gray-50 border border-gray-200 rounded-lg">
-        <p className="text-xs text-muted-foreground">
-          After clicking "Connect", you will be redirected to Shopify to authorize the connection.
-          Once authorized, the store will be linked to your selected account.
-        </p>
-      </div>
+    <div className="p-8 text-center">
+      <p>Redirecting to analytics platform...</p>
     </div>
   );
 }
 ```
+
+**Flöde:**
+1. Användare öppnar Shopify-appen
+2. Shopify-appen redirectar direkt till `https://ohjay-dashboard.vercel.app/connect/shopify?shop=store.myshopify.com`
+3. Huvudplattformen visar tenant-val UI för inloggad användare
+4. Användare väljer tenant → OAuth initieras direkt
+5. Shopify OAuth → Callback i huvudplattformen → Redirect till integrations-sidan
 
 ### 1.2 Alternativ: Next.js App Router
 
