@@ -5,7 +5,6 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { cn } from '@/lib/utils'
 
 function getLast30DayRange() {
   const today = new Date()
@@ -45,54 +44,35 @@ export function TenantDateRangeFilter() {
     })
   }
 
-  const resetFilters = () => {
-    startTransition(() => {
-      const params = new URLSearchParams(searchParams?.toString() ?? '')
-      params.delete('from')
-      params.delete('to')
-      router.replace(params.size > 0 ? `${pathname}?${params.toString()}` : pathname, { scroll: false })
-      const defaults = getLast30DayRange()
-      setFrom(defaults.from)
-      setTo(defaults.to)
-    })
-  }
-
   return (
     <form
-      className={cn(
-        'flex flex-col gap-2 rounded-md border bg-background/80 p-2 text-xs shadow-sm md:flex-row md:items-center md:text-sm',
-      )}
+      className="flex items-center gap-2"
       onSubmit={(event) => {
         event.preventDefault()
         applyFilters()
       }}
     >
-      <label className="flex flex-col gap-1">
-        <span className="text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground">From</span>
+      <label className="flex items-center gap-2 text-sm">
+        <span className="text-muted-foreground">From</span>
         <Input
           type="date"
           value={from}
           onChange={(event) => setFrom(event.target.value)}
-          className="h-8 text-sm md:h-9"
+          className="h-8 w-[140px] text-sm"
         />
       </label>
-      <label className="flex flex-col gap-1">
-        <span className="text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground">To</span>
+      <label className="flex items-center gap-2 text-sm">
+        <span className="text-muted-foreground">To</span>
         <Input
           type="date"
           value={to}
           onChange={(event) => setTo(event.target.value)}
-          className="h-8 text-sm md:h-9"
+          className="h-8 w-[140px] text-sm"
         />
       </label>
-      <div className="flex items-center gap-1 self-end md:self-auto">
-        <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={resetFilters}>
-          Reset
-        </Button>
-        <Button type="submit" size="sm" disabled={disabled}>
-          Apply
-        </Button>
-      </div>
+      <Button type="submit" size="sm" disabled={disabled}>
+        Apply
+      </Button>
     </form>
   )
 }
