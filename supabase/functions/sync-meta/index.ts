@@ -1722,6 +1722,22 @@ async function processTenant(
       }
     }
 
+    // Aggregate kpi_daily from accountRows (canonical combo: impression + 7d_click + none breakdown)
+    // If no accountRows, aggregate directly from meta_insights_daily with 1d_click for incremental sync
+    let kpiRows: Array<{
+      tenant_id: string
+      date: string
+      source: string
+      spend: number | null
+      clicks: number | null
+      conversions: number | null
+      revenue: number | null
+      aov: number | null
+      cos: number | null
+      roas: number | null
+      currency: string | null
+    }> = []
+
     if (matrixResult.accountRows.length > 0) {
       const aggregates = aggregateKpis(matrixResult.accountRows)
       const normalizedAggregates = fillMissingAggregateDates(
@@ -1730,7 +1746,7 @@ async function processTenant(
         matrixResult.windowUntil,
       )
 
-      const kpiRows = normalizedAggregates.map((row) => ({
+      kpiRows = normalizedAggregates.map((row) => ({
         tenant_id: tenantId,
         date: row.date,
         source: SOURCE,
@@ -1741,9 +1757,88 @@ async function processTenant(
         aov: row.aov,
         cos: row.cos,
         roas: row.roas,
-      currency: row.currency ?? null,
+        currency: row.currency ?? null,
       }))
+    } else if (mode === 'incremental') {
+      // Fallback: aggregate directly from meta_insights_daily for incremental sync
+      // when canonical combo (7d_click) is not available
+      const { data: insightsData, error: insightsError } = await client
+        .from('meta_insights_daily')
+        .select('date, spend, inline_link_clicks, purchases, conversions, revenue, currency')
+        .eq('tenant_id', tenantId)
+        .eq('ad_account_id', preferredAccountId)
+        .eq('level', 'account')
+        .eq('action_report_time', 'impression')
+        .eq('attribution_window', '1d_click')
+        .eq('breakdowns_key', 'none')
+        .gte('date', matrixResult.windowSince)
+        .lte('date', matrixResult.windowUntil)
 
+      if (insightsError) {
+        console.warn(`Failed to fetch insights for kpi_daily fallback: ${insightsError.message}`)
+      } else if (insightsData && insightsData.length > 0) {
+        const byDate = new Map<string, {
+          spend: number
+          clicks: number
+          conversions: number
+          revenue: number
+          currency: string | null
+        }>()
+
+        for (const row of insightsData) {
+          const date = row.date
+          const existing = byDate.get(date) ?? {
+            spend: 0,
+            clicks: 0,
+            conversions: 0,
+            revenue: 0,
+            currency: row.currency ?? null,
+          }
+
+          existing.spend += row.spend ?? 0
+          existing.clicks += row.inline_link_clicks ?? 0
+          existing.conversions += (row.purchases ?? 0) + (row.conversions ?? 0)
+          existing.revenue += row.revenue ?? 0
+          if (!existing.currency && row.currency) {
+            existing.currency = row.currency
+          }
+
+          byDate.set(date, existing)
+        }
+
+        const normalizedAggregates = fillMissingAggregateDates(
+          Array.from(byDate.entries()).map(([date, values]) => ({
+            date,
+            spend: values.spend || null,
+            clicks: values.clicks || null,
+            conversions: values.conversions || null,
+            revenue: values.revenue || null,
+            aov: values.conversions > 0 ? values.revenue / values.conversions : null,
+            cos: values.revenue > 0 ? values.spend / values.revenue : null,
+            roas: values.spend > 0 ? values.revenue / values.spend : null,
+            currency: values.currency ?? null,
+          })),
+          matrixResult.windowSince,
+          matrixResult.windowUntil,
+        )
+
+        kpiRows = normalizedAggregates.map((row) => ({
+          tenant_id: tenantId,
+          date: row.date,
+          source: SOURCE,
+          spend: row.spend,
+          clicks: row.clicks,
+          conversions: row.conversions,
+          revenue: row.revenue,
+          aov: row.aov,
+          cos: row.cos,
+          roas: row.roas,
+          currency: row.currency ?? null,
+        }))
+      }
+    }
+
+    if (kpiRows.length > 0) {
       const { error: kpiError } = await client.from('kpi_daily').upsert(kpiRows, {
         onConflict: 'tenant_id,date,source',
       })
