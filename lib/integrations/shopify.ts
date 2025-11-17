@@ -88,10 +88,23 @@ async function upsertConnection(
   }
 }
 
-export async function getShopifyAuthorizeUrl(options: { tenantId: string; shopDomain: string }) {
+export async function getShopifyAuthorizeUrl(options: { 
+  tenantId: string; 
+  shopDomain: string;
+  state?: string; // Optional pre-signed state from API
+}) {
   requireAppCredentials();
 
-  const state = randomBytes(16).toString('hex');
+  // Normalisera shop domain
+  const normalizedShop = options.shopDomain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase();
+
+  // Använd antingen den skickade state (från API) eller skapa en enkel state
+  const state = options.state || randomBytes(16).toString('hex');
+  
   const params = new URLSearchParams({
     client_id: SHOPIFY_API_KEY!,
     scope: SHOPIFY_SCOPES.join(','),
@@ -99,13 +112,20 @@ export async function getShopifyAuthorizeUrl(options: { tenantId: string; shopDo
     state,
   });
 
-  const authorizeUrl = `https://${options.shopDomain}/admin/oauth/authorize?${params.toString()}`;
+  const authorizeUrl = `https://${normalizedShop}/admin/oauth/authorize?${params.toString()}`;
 
-  // TODO: Persist state + tenant + shopDomain for callback verification.
   return {
     url: authorizeUrl,
     state,
   };
+}
+
+function normalizeShopDomain(domain: string): string {
+  return domain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase();
 }
 
 export async function handleShopifyOAuthCallback(options: {
@@ -116,7 +136,9 @@ export async function handleShopifyOAuthCallback(options: {
 }) {
   requireAppCredentials();
 
-  const tokenEndpoint = `https://${options.shop}/admin/oauth/access_token`;
+  // Normalisera shop domain
+  const normalizedShop = normalizeShopDomain(options.shop);
+  const tokenEndpoint = `https://${normalizedShop}/admin/oauth/access_token`;
 
   let tokenResponse: any = null;
 
@@ -157,7 +179,8 @@ export async function handleShopifyOAuthCallback(options: {
     accessToken: tokenResponse.access_token,
     meta: {
       scope: tokenResponse.scope,
-      shop: options.shop,
+      shop: normalizedShop,
+      store_domain: normalizedShop, // Normaliserad för webhook lookup
     },
   });
 
