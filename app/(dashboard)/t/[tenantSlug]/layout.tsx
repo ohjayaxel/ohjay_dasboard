@@ -27,6 +27,12 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
       title: 'Meta Ads',
       url: `/t/${tenantSlug}/meta`,
       icon: 'brand-meta',
+      items: [
+        {
+          title: 'Markets',
+          url: `/t/${tenantSlug}/meta/markets`,
+        },
+      ],
     },
     {
       title: 'Google Ads',

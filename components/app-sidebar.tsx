@@ -61,6 +61,7 @@ type NavItem = {
   title: string
   url: string
   icon?: IconSource
+  items?: NavItem[]
 }
 
 type DocumentItem = {
