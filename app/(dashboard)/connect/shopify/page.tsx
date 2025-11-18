@@ -114,14 +114,16 @@ export default async function ConnectShopifyPage(props: PageProps) {
   const tenants = uniqueTenants.map((tenant: any) => {
     const shopifyConnection = tenant.connections?.find((c: any) => c.source === 'shopify');
     const connectedShopDomain = shopifyConnection?.meta?.store_domain || null;
+    const isConnected = shopifyConnection?.status === 'connected';
+    const isThisShop = isConnected && connectedShopDomain === normalizedShop;
 
     return {
       id: tenant.id,
       name: tenant.name,
       slug: tenant.slug,
-      isConnected: shopifyConnection?.status === 'connected',
+      isConnected,
       connectedShopDomain,
-      isThisShop: connectedShopDomain === normalizedShop,
+      isThisShop,
     };
   });
 
