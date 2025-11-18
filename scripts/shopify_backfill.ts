@@ -155,9 +155,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   const isCancelled = order.cancelled_at !== null && order.cancelled_at !== '';
   const isTestOrder = order.test === true || (order.tags?.toLowerCase().includes('test') ?? false);
   const isDraftNotCompleted = order.source_name === 'shopify_draft_order' && processedAt === null;
-  const hasZeroSubtotal = subtotalPrice === 0;
+  // Only exclude zero subtotal if there are no line_items
+  // If there are line_items, even with discounts that make subtotal = 0, it should still count in Gross Sales
+  const hasLineItems = order.line_items && order.line_items.length > 0;
+  const hasZeroSubtotalNoItems = subtotalPrice === 0 && !hasLineItems;
 
-  const shouldExclude = isCancelled || isTestOrder || isDraftNotCompleted || hasZeroSubtotal;
+  const shouldExclude = isCancelled || isTestOrder || isDraftNotCompleted || hasZeroSubtotalNoItems;
 
   // Calculate Gross Sales: SUM(line_item.price × line_item.quantity)
   // This is the product price × quantity, BEFORE discounts, tax, shipping
@@ -168,16 +171,23 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     const roundTo2Decimals = (num: number) => Math.round(num * 100) / 100;
     
     // Gross Sales = sum of (line_item.price × line_item.quantity)
+    // Always calculate if there are line_items, even if the sum is 0
+    // (discounts will be subtracted in Net Sales, not excluded from Gross Sales)
     let calculatedGrossSales = 0;
-    for (const lineItem of order.line_items || []) {
-      const price = parseFloat(lineItem.price || '0');
-      const quantity = lineItem.quantity || 0;
-      calculatedGrossSales += price * quantity;
-    }
-    grossSales = calculatedGrossSales > 0 ? roundTo2Decimals(calculatedGrossSales) : null;
+    const hasLineItems = order.line_items && order.line_items.length > 0;
+    
+    if (hasLineItems) {
+      for (const lineItem of order.line_items) {
+        const price = parseFloat(lineItem.price || '0');
+        const quantity = lineItem.quantity || 0;
+        calculatedGrossSales += price * quantity;
+      }
+      // Set grossSales even if calculatedGrossSales is 0 or negative
+      // (as long as there are line_items, it's a valid sale)
+      grossSales = roundTo2Decimals(calculatedGrossSales);
 
-    // Net Sales = Gross Sales - (discounts + returns)
-    if (grossSales !== null) {
+      // Net Sales = Gross Sales - (discounts + returns)
+      // Net Sales can be negative if discounts exceed gross sales
       netSales = roundTo2Decimals(grossSales - totalDiscounts - totalRefunds);
     }
   }

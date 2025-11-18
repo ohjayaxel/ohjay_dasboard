@@ -395,9 +395,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   const isCancelled = order.cancelled_at !== null && order.cancelled_at !== '';
   const isTestOrder = order.test === true || (order.tags?.toLowerCase().includes('test') ?? false);
   const isDraftNotCompleted = order.source_name === 'shopify_draft_order' && processedAt === null;
-  const hasZeroSubtotal = subtotalPrice === 0;
+  // Only exclude zero subtotal if there are no line_items
+  // If there are line_items, even with discounts that make subtotal = 0, it should still count in Gross Sales
+  const hasLineItems = order.line_items && order.line_items.length > 0;
+  const hasZeroSubtotalNoItems = subtotalPrice === 0 && !hasLineItems;
 
-  const shouldExclude = isCancelled || isTestOrder || isDraftNotCompleted || hasZeroSubtotal;
+  const shouldExclude = isCancelled || isTestOrder || isDraftNotCompleted || hasZeroSubtotalNoItems;
   
   // Calculate Gross Sales: SUM(line_item.price × line_item.quantity)
   // This is the product price × quantity, BEFORE discounts, tax, shipping
@@ -405,8 +408,13 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   let netSales: number | null = null;
 
   if (!shouldExclude) {
-    grossSales = sales.grossSales > 0 ? sales.grossSales : null;
-    netSales = grossSales !== null ? sales.netSales : null;
+    // Always set grossSales if there are line_items, even if the sum is 0
+    // (discounts will be subtracted in Net Sales, not excluded from Gross Sales)
+    const hasLineItems = order.line_items && order.line_items.length > 0;
+    if (hasLineItems) {
+      grossSales = sales.grossSales; // Can be 0 or negative if discounts exceed gross
+      netSales = sales.netSales; // Can be negative if discounts exceed gross sales
+    }
   }
 
   return {
