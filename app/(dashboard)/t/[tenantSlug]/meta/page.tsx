@@ -1,25 +1,48 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { getKpiDaily } from '@/lib/data/agg'
+import { getKpiDaily, type KpiSeriesPoint, type KpiTotals } from '@/lib/data/agg'
 import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
 
-export const revalidate = 30
+export const revalidate = 60
 
 type PageProps = {
   params: Promise<{ tenantSlug: string }>
+  searchParams?: Promise<Record<string, string | string[] | undefined>>
+}
+
+type MetricKey = 'spend' | 'revenue' | 'conversions' | 'clicks' | 'roas' | 'cpa'
+
+type MetricDefinition = {
+  key: MetricKey
+  label: string
+  description?: string
+  format: (value: number | null) => string
+  extractTotal: (totals: KpiTotals) => number | null
+  extractPoint: (point: KpiSeriesPoint) => number | null
 }
 
 export default async function MetaDashboardPage(props: PageProps) {
-  const { tenantSlug } = await props.params
+  const [{ tenantSlug }, rawSearchParams] = await Promise.all([
+    props.params,
+    props.searchParams ?? Promise.resolve({}),
+  ])
+
   const tenantId = await resolveTenantId(tenantSlug)
 
   const today = new Date()
   const startWindow = new Date(today)
   startWindow.setDate(startWindow.getDate() - 29)
 
-  const from = startWindow.toISOString().slice(0, 10)
-  const to = today.toISOString().slice(0, 10)
+  const defaultFrom = startWindow.toISOString().slice(0, 10)
+  const defaultTo = today.toISOString().slice(0, 10)
+
+  const fromParam = rawSearchParams?.from
+  const toParam = rawSearchParams?.to
+
+  const from = typeof fromParam === 'string' && fromParam.length > 0 ? fromParam : defaultFrom
+  const to = typeof toParam === 'string' && toParam.length > 0 ? toParam : defaultTo
 
   const { totals, series, currency } = await getKpiDaily({ tenantId, from, to, source: 'meta' })
+  const latest = series.at(-1)
 
   const numberLocale = 'en-US'
   const currencyCode = currency ?? 'USD'
@@ -33,92 +56,125 @@ export default async function MetaDashboardPage(props: PageProps) {
         }).format(value)
       : '—'
 
+  const formatNumber = (value: number | null) =>
+    value !== null && Number.isFinite(value)
+      ? new Intl.NumberFormat(numberLocale).format(value)
+      : '0'
+
   const formatRatio = (value: number | null) =>
     value === null || Number.isNaN(value) ? '—' : value.toFixed(2)
 
-  const formatNumber = (value: number) =>
-    Number.isFinite(value) ? new Intl.NumberFormat(numberLocale).format(value) : '0'
+  const metricDefinitions: MetricDefinition[] = [
+    {
+      key: 'spend',
+      label: 'Spend',
+      description: 'Total advertising spend',
+      format: formatCurrency,
+      extractTotal: (value) => value.spend,
+      extractPoint: (point) => point.spend,
+    },
+    {
+      key: 'revenue',
+      label: 'Revenue',
+      description: 'Attributed revenue',
+      format: formatCurrency,
+      extractTotal: (value) => value.revenue,
+      extractPoint: (point) => point.revenue,
+    },
+    {
+      key: 'conversions',
+      label: 'Results',
+      description: 'Key conversion events or purchases',
+      format: (value) => formatNumber(value),
+      extractTotal: (value) => value.conversions,
+      extractPoint: (point) => point.conversions,
+    },
+    {
+      key: 'clicks',
+      label: 'Link clicks',
+      description: 'Traffic-driving link clicks',
+      format: (value) => formatNumber(value),
+      extractTotal: (value) => value.clicks,
+      extractPoint: (point) => point.clicks,
+    },
+    {
+      key: 'roas',
+      label: 'ROAS',
+      description: 'Return on ad spend',
+      format: formatRatio,
+      extractTotal: (value) => value.roas,
+      extractPoint: (point) => point.roas,
+    },
+    {
+      key: 'cpa',
+      label: 'CPA',
+      description: 'Cost per result (spend / results)',
+      format: formatRatio,
+      extractTotal: (value) => value.cpa,
+      extractPoint: (point) => point.cpa,
+    },
+  ]
+
+  const visibleMetrics = metricDefinitions
+
+  const cards = visibleMetrics.map((metric) => ({
+    key: metric.key,
+    label: metric.label,
+    value: metric.format(metric.extractTotal(totals)),
+  }))
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Spend</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-semibold tracking-tight">{formatCurrency(totals.spend)}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Revenue</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-semibold tracking-tight">{formatCurrency(totals.revenue)}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">ROAS</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-semibold tracking-tight">{formatRatio(totals.roas)}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">CPA</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-semibold tracking-tight">{formatCurrency(totals.cpa)}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Results</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-semibold tracking-tight">{formatNumber(totals.conversions)}</p>
-          </CardContent>
-        </Card>
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {cards.map((item) => (
+          <Card key={item.key}>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                {item.label}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold tracking-tight">{item.value}</p>
+            </CardContent>
+          </Card>
+        ))}
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            Daily Breakdown
+            Daily Performance ({from} → {to})
           </CardTitle>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[600px] text-sm">
+            <table className="w-full min-w-[500px] text-sm">
               <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
                   <th className="px-4 py-2 text-left font-medium">Date</th>
-                  <th className="px-4 py-2 text-left font-medium">Spend</th>
-                  <th className="px-4 py-2 text-left font-medium">Revenue</th>
-                  <th className="px-4 py-2 text-left font-medium">Results</th>
-                  <th className="px-4 py-2 text-left font-medium">ROAS</th>
-                  <th className="px-4 py-2 text-left font-medium">CPA</th>
+                  {visibleMetrics.map((metric) => (
+                    <th key={metric.key} className="px-4 py-2 text-left font-medium">
+                      {metric.label}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {series.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-4 py-6 text-center text-muted-foreground">
-                      No Meta KPI data available.
+                    <td colSpan={visibleMetrics.length + 1} className="px-4 py-6 text-center text-muted-foreground">
+                      No Meta KPI data available in the selected window.
                     </td>
                   </tr>
                 ) : (
                   series.map((point) => (
                     <tr key={point.date} className="border-t">
                       <td className="px-4 py-2 font-medium">{point.date}</td>
-                      <td className="px-4 py-2">{formatCurrency(point.spend)}</td>
-                      <td className="px-4 py-2">{formatCurrency(point.revenue)}</td>
-                      <td className="px-4 py-2">{formatNumber(point.conversions)}</td>
-                      <td className="px-4 py-2">{formatRatio(point.roas)}</td>
-                      <td className="px-4 py-2">{formatCurrency(point.cpa)}</td>
+                      {visibleMetrics.map((metric) => (
+                        <td key={metric.key} className="px-4 py-2">
+                          {metric.format(metric.extractPoint(point))}
+                        </td>
+                      ))}
                     </tr>
                   ))
                 )}
@@ -127,6 +183,22 @@ export default async function MetaDashboardPage(props: PageProps) {
           </div>
         </CardContent>
       </Card>
+
+      {latest ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-semibold text-muted-foreground">
+              Latest Data Point
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            {latest.date}:{' '}
+            {visibleMetrics
+              .map((metric) => `${metric.label} ${metric.format(metric.extractPoint(latest) ?? null)}`)
+              .join(', ')}
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   )
 }

@@ -63,10 +63,20 @@ type JobResult = {
   inserted?: number;
 };
 
+// Note: calculateShopifyLikeSales is not available in Edge Functions due to import restrictions
+// We'll implement the calculation inline here
+
 type ShopifyRefund = {
   id: number;
   created_at: string;
-  refund_line_items?: Array<{ subtotal: string }>;
+  refund_line_items?: Array<{
+    line_item_id: number | string;
+    quantity: number;
+    subtotal?: string;
+    line_item?: {
+      price: string;
+    };
+  }>;
   transactions?: Array<{ amount: string }>;
 };
 
@@ -82,10 +92,17 @@ type ShopifyOrder = {
   total_tax: string;
   currency: string;
   customer: { id: number } | null;
+  line_items: Array<{
+    id: number | string;
+    price: string; // Price per unit, as string
+    quantity: number;
+    total_discount: string; // Discount on this line item, as string
+  }>;
   email: string | null;
   financial_status: string;
   fulfillment_status: string | null;
   refunds?: Array<ShopifyRefund>;
+  cancelled_at?: string | null;
 };
 
 const KEY_LENGTH = 32;
@@ -258,6 +275,81 @@ function normalizeShopDomain(domain: string): string {
     .toLowerCase();
 }
 
+/**
+ * Shopify-like sales calculation (mirrors lib/shopify/sales.ts logic)
+ * Edge Functions can't import from lib/, so we duplicate the logic here
+ */
+function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
+  grossSales: number;
+  discounts: number;
+  returns: number;
+  netSales: number;
+} {
+  // Valid financial statuses (same as lib/shopify/sales.ts)
+  const VALID_FINANCIAL_STATUSES = new Set([
+    'paid',
+    'partially_paid',
+    'partially_refunded',
+    'refunded',
+  ]);
+
+  // Filter by financial status
+  if (!VALID_FINANCIAL_STATUSES.has(order.financial_status)) {
+    // Return zeros for invalid status
+    return { grossSales: 0, discounts: 0, returns: 0, netSales: 0 };
+  }
+
+  // Calculate Gross Sales: sum of (price × quantity) for all line items
+  let grossSales = 0;
+  for (const lineItem of order.line_items || []) {
+    const price = parseFloat(lineItem.price || '0');
+    const quantity = lineItem.quantity;
+    grossSales += price * quantity;
+  }
+  grossSales = Math.round(grossSales * 100) / 100; // Round to 2 decimals
+
+  // Calculate Discounts: sum of total_discount for all line items
+  let discounts = 0;
+  for (const lineItem of order.line_items || []) {
+    discounts += parseFloat(lineItem.total_discount || '0');
+  }
+  discounts = Math.round(discounts * 100) / 100;
+
+  // Calculate Returns: sum of refund_line_items values
+  let returns = 0;
+  if (order.refunds && order.refunds.length > 0) {
+    for (const refund of order.refunds) {
+      for (const refundLineItem of refund.refund_line_items || []) {
+        let subtotal = 0;
+        
+        // If subtotal is provided, use it
+        if (refundLineItem.subtotal) {
+          subtotal = parseFloat(refundLineItem.subtotal);
+        } else if (refundLineItem.line_item?.price) {
+          // Use line_item.price × quantity
+          subtotal = parseFloat(refundLineItem.line_item.price) * refundLineItem.quantity;
+        } else {
+          // Fallback: find original line item
+          const originalLineItem = (order.line_items || []).find(
+            (item) => item.id.toString() === refundLineItem.line_item_id.toString(),
+          );
+          if (originalLineItem) {
+            subtotal = parseFloat(originalLineItem.price) * refundLineItem.quantity;
+          }
+        }
+        
+        returns += subtotal;
+      }
+    }
+  }
+  returns = Math.round(returns * 100) / 100;
+
+  // Calculate Net Sales
+  const netSales = Math.round((grossSales - discounts - returns) * 100) / 100;
+
+  return { grossSales, discounts, returns, netSales };
+}
+
 function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrderRow {
   // Extract date from processed_at (format: "2024-01-15T10:30:00-05:00")
   const processedAt = order.processed_at
@@ -269,45 +361,22 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
 
   // Calculate prices
   const totalPrice = parseFloat(order.total_price || '0');
-  const subtotalPrice = parseFloat(order.subtotal_price || '0');
   const totalDiscounts = parseFloat(order.total_discounts || '0');
   
-  // Calculate total refunds amount
-  // Note: subtotal_price from Shopify already reflects value AFTER refunds
-  let totalRefunds = 0;
-  if (Array.isArray(order.refunds) && order.refunds.length > 0) {
-    for (const refund of order.refunds) {
-      // Try to get refund amount from transactions first (most accurate)
-      if (refund.transactions && Array.isArray(refund.transactions)) {
-        for (const transaction of refund.transactions) {
-          totalRefunds += parseFloat(transaction.amount || '0');
-        }
-      } else if (refund.refund_line_items && Array.isArray(refund.refund_line_items)) {
-        // Fallback to refund_line_items subtotal
-        for (const item of refund.refund_line_items) {
-          totalRefunds += parseFloat(item.subtotal || '0');
-        }
-      }
-    }
-  }
+  // Use Shopify-like sales calculation for accurate gross/net sales
+  const sales = calculateShopifyLikeSalesInline(order);
   
-  // gross_sales = (subtotal_price after refunds) + total_discounts + total_refunds
-  // This gives us the original gross sales before discounts and refunds
-  // net_sales = subtotal_price (already includes refunds, after discounts, excluding shipping/tax)
-  const grossSales = (subtotalPrice + totalDiscounts + totalRefunds) > 0 
-    ? subtotalPrice + totalDiscounts + totalRefunds 
-    : null;
-  const netSales = subtotalPrice > 0 ? subtotalPrice : null;
-  
-  // Calculate discount_total for backward compatibility
-  const discountTotal = totalDiscounts || 0;
+  // Use calculated values (or fallback if order was filtered out)
+  const grossSales = sales.grossSales > 0 ? sales.grossSales : null;
+  const netSales = sales.netSales > 0 ? sales.netSales : null;
+  const totalRefunds = sales.returns;
 
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
     total_price: totalPrice || null,
-    discount_total: discountTotal || null,
+    discount_total: sales.discounts || null,
     total_refunds: totalRefunds || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,

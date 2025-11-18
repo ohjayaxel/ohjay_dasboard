@@ -20,6 +20,10 @@ import { ArgumentParser } from 'argparse';
 import { createClient } from '@supabase/supabase-js';
 
 import { decryptSecret } from '@/lib/integrations/crypto';
+import {
+  calculateShopifyLikeSales,
+  type ShopifyOrder as SalesShopifyOrder,
+} from '@/lib/shopify/sales';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -38,7 +42,14 @@ const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 type ShopifyRefund = {
   id: number;
   created_at: string;
-  refund_line_items?: Array<{ subtotal: string }>;
+  refund_line_items?: Array<{
+    line_item_id: number | string;
+    quantity: number;
+    subtotal?: string;
+    line_item?: {
+      price: string;
+    };
+  }>;
   transactions?: Array<{ amount: string }>;
 };
 
@@ -53,10 +64,17 @@ type ShopifyOrder = {
   total_discounts: string;
   currency: string;
   customer?: { id: string };
+  line_items: Array<{
+    id: number | string;
+    price: string; // Price per unit, as string
+    quantity: number;
+    total_discount: string; // Discount on this line item, as string
+  }>;
   refunds?: Array<ShopifyRefund>;
   email?: string;
   financial_status?: string;
   fulfillment_status?: string;
+  cancelled_at?: string | null;
 };
 
 type ShopifyOrderRow = {
@@ -90,45 +108,78 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   const isRefund = Array.isArray(order.refunds) && order.refunds.length > 0;
 
   const totalPrice = parseFloat(order.total_price || '0');
-  const subtotalPrice = parseFloat(order.subtotal_price || '0');
   const totalDiscounts = parseFloat(order.total_discounts || '0');
   
-  // Calculate total refunds amount
-  // Note: subtotal_price from Shopify already reflects value AFTER refunds
-  let totalRefunds = 0;
-  if (Array.isArray(order.refunds) && order.refunds.length > 0) {
-    for (const refund of order.refunds) {
-      // Try to get refund amount from transactions first (most accurate)
-      if (refund.transactions && Array.isArray(refund.transactions)) {
-        for (const transaction of refund.transactions) {
-          totalRefunds += parseFloat(transaction.amount || '0');
-        }
-      } else if (refund.refund_line_items && Array.isArray(refund.refund_line_items)) {
-        // Fallback to refund_line_items subtotal
-        for (const item of refund.refund_line_items) {
-          totalRefunds += parseFloat(item.subtotal || '0');
+  // Use Shopify-like sales calculation for accurate gross/net sales
+  // Convert our ShopifyOrder to SalesShopifyOrder format
+  const salesOrder: SalesShopifyOrder = {
+    id: order.id,
+    created_at: order.created_at,
+    currency: order.currency,
+    financial_status: order.financial_status || 'unknown',
+    cancelled_at: order.cancelled_at || null,
+    line_items: order.line_items || [],
+    refunds: order.refunds?.map((refund) => ({
+      id: refund.id,
+      created_at: refund.created_at,
+      refund_line_items: refund.refund_line_items || [],
+    })) || [],
+  };
+
+  // Calculate sales metrics using Shopify-like calculation
+  const salesResult = calculateShopifyLikeSales([salesOrder]);
+  const orderSales = salesResult.perOrder[0];
+
+  // If order was filtered out (invalid financial_status), use fallback calculation
+  if (!orderSales) {
+    // Fallback: use old calculation for orders that don't pass financial_status filter
+    const subtotalPrice = parseFloat(order.subtotal_price || '0');
+    
+    let totalRefunds = 0;
+    if (Array.isArray(order.refunds) && order.refunds.length > 0) {
+      for (const refund of order.refunds) {
+        if (refund.refund_line_items && Array.isArray(refund.refund_line_items)) {
+          for (const item of refund.refund_line_items) {
+            if (item.subtotal) {
+              totalRefunds += parseFloat(item.subtotal);
+            }
+          }
         }
       }
     }
+    
+    const grossSales = (subtotalPrice + totalDiscounts + totalRefunds) > 0 
+      ? subtotalPrice + totalDiscounts + totalRefunds 
+      : null;
+    const netSales = subtotalPrice > 0 ? subtotalPrice : null;
+
+    return {
+      tenant_id: tenantId,
+      order_id: order.id.toString(),
+      processed_at: processedAt,
+      total_price: totalPrice || null,
+      discount_total: totalDiscounts || null,
+      total_refunds: totalRefunds || null,
+      currency: order.currency || null,
+      customer_id: order.customer?.id?.toString() || null,
+      is_refund: isRefund,
+      gross_sales: grossSales,
+      net_sales: netSales,
+      is_new_customer: false,
+    };
   }
-  
-  // gross_sales = (subtotal_price after refunds) + total_discounts + total_refunds
-  // This gives us the original gross sales before discounts and refunds
-  // net_sales = subtotal_price (already includes refunds, after discounts, excluding shipping/tax)
-  const grossSales = (subtotalPrice + totalDiscounts + totalRefunds) > 0 
-    ? subtotalPrice + totalDiscounts + totalRefunds 
-    : null;
-  const netSales = subtotalPrice > 0 ? subtotalPrice : null;
-  
-  // Calculate discount_total for backward compatibility
-  const discountTotal = totalDiscounts || 0;
+
+  // Use calculated values from Shopify-like function
+  const grossSales = orderSales.grossSales > 0 ? orderSales.grossSales : null;
+  const netSales = orderSales.netSales > 0 ? orderSales.netSales : null;
+  const totalRefunds = orderSales.returns;
 
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
     total_price: totalPrice || null,
-    discount_total: discountTotal || null,
+    discount_total: orderSales.discounts || null,
     total_refunds: totalRefunds || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
@@ -542,90 +593,6 @@ async function main() {
       if (i < dateChunks.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
-    }
-    
-    console.log(`[shopify_backfill] Fetched ${allOrdersWithDateFilter.length} total orders in date range ${since} to ${until}\n`);
-  } else if (allOrdersWithoutFilter.length > 0) {
-    console.log(`[shopify_backfill] ⚠️  Possible API limit reached (${allOrdersWithoutFilter.length} orders). Continuing with since_id (no date filter)...`);
-    
-    // Get last order ID and continue fetching WITHOUT date filters (since_id doesn't work well with date filters)
-    // We'll filter locally after fetching
-    const lastOrder = allOrdersWithoutFilter[allOrdersWithoutFilter.length - 1];
-    let lastOrderId = parseInt(lastOrder.id.toString());
-    
-    // Filter initial batch
-    const filterSinceDate = new Date(`${since}T00:00:00`);
-    const filterUntilDate = new Date(`${until}T23:59:59`);
-    
-    const initialFiltered = allOrdersWithoutFilter.filter((order) => {
-      const created = order.created_at ? new Date(order.created_at) : null;
-      const processed = order.processed_at ? new Date(order.processed_at) : null;
-      const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
-      const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
-      return matchesSince && matchesUntil;
-    });
-    
-    allOrdersWithDateFilter.push(...initialFiltered);
-    console.log(`[shopify_backfill] Initial batch filtered: ${initialFiltered.length} orders in date range`);
-    
-    // Continue fetching with since_id (NO date filters) until we get no more orders
-    let moreOrders = true;
-    let consecutiveEmptyBatches = 0;
-    while (moreOrders && consecutiveEmptyBatches < 3) {
-      console.log(`[shopify_backfill] Continuing fetch with since_id: ${lastOrderId} (no date filter)...`);
-      
-      const nextBatch = await fetchShopifyOrdersWithPagination({
-        shopDomain,
-        accessToken,
-        // No date filters - fetch all orders after since_id
-        sinceId: lastOrderId,
-      });
-      
-      if (nextBatch.length === 0) {
-        consecutiveEmptyBatches++;
-        if (consecutiveEmptyBatches >= 3) {
-          console.log(`[shopify_backfill] No more orders found after ${consecutiveEmptyBatches} empty batches`);
-          moreOrders = false;
-          break;
-        }
-      } else {
-        consecutiveEmptyBatches = 0;
-        
-        // Filter locally by date
-        const filteredBatch = nextBatch.filter((order) => {
-          const created = order.created_at ? new Date(order.created_at) : null;
-          const processed = order.processed_at ? new Date(order.processed_at) : null;
-          const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
-          const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
-          return matchesSince && matchesUntil;
-        });
-        
-        console.log(`[shopify_backfill] Fetched ${nextBatch.length} orders, ${filteredBatch.length} in date range`);
-        allOrdersWithDateFilter.push(...filteredBatch);
-        
-        const newLastOrder = nextBatch[nextBatch.length - 1];
-        const newLastOrderId = parseInt(newLastOrder.id.toString());
-        
-        if (Number.isNaN(newLastOrderId) || newLastOrderId <= lastOrderId) {
-          console.log(`[shopify_backfill] Order ID didn't increase (${newLastOrderId} <= ${lastOrderId}), stopping`);
-          moreOrders = false;
-        } else {
-          lastOrderId = newLastOrderId;
-          
-          // If all orders in this batch are before our date range, we might be done
-          // But continue a bit more to be safe
-          if (filteredBatch.length === 0 && nextBatch.length > 0) {
-            const lastOrderDate = new Date(nextBatch[nextBatch.length - 1].created_at);
-            if (lastOrderDate < filterSinceDate) {
-              console.log(`[shopify_backfill] All orders are before date range, stopping`);
-              moreOrders = false;
-            }
-          }
-        }
-      }
-      
-      // Small delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 1500));
     }
     
     console.log(`[shopify_backfill] Fetched ${allOrdersWithDateFilter.length} total orders in date range ${since} to ${until}\n`);

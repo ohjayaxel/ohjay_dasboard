@@ -7,10 +7,22 @@ import { decryptSecret } from '@/lib/integrations/crypto';
 
 const WEBHOOK_ENDPOINT = '/api/webhooks/shopify';
 
+import {
+  calculateShopifyLikeSales,
+  type ShopifyOrder as SalesShopifyOrder,
+} from '@/lib/shopify/sales';
+
 type ShopifyRefund = {
   id: number;
   created_at: string;
-  refund_line_items?: Array<{ subtotal: string }>;
+  refund_line_items?: Array<{
+    line_item_id: number | string;
+    quantity: number;
+    subtotal?: string;
+    line_item?: {
+      price: string;
+    };
+  }>;
   transactions?: Array<{ amount: string }>;
 };
 
@@ -25,10 +37,17 @@ type ShopifyOrder = {
   total_discounts: string;
   currency: string;
   customer?: { id: string };
+  line_items: Array<{
+    id: number | string;
+    price: string; // Price per unit, as string
+    quantity: number;
+    total_discount: string; // Discount on this line item, as string
+  }>;
   refunds?: Array<ShopifyRefund>;
   email?: string;
   financial_status?: string;
   fulfillment_status?: string;
+  cancelled_at?: string | null;
 };
 
 function normalizeShopDomain(domain: string): string {
@@ -47,45 +66,78 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
   const isRefund = Array.isArray(order.refunds) && order.refunds.length > 0;
 
   const totalPrice = parseFloat(order.total_price || '0');
-  const subtotalPrice = parseFloat(order.subtotal_price || '0');
   const totalDiscounts = parseFloat(order.total_discounts || '0');
   
-  // Calculate total refunds amount
-  // Note: subtotal_price from Shopify already reflects value AFTER refunds
-  let totalRefunds = 0;
-  if (Array.isArray(order.refunds) && order.refunds.length > 0) {
-    for (const refund of order.refunds) {
-      // Try to get refund amount from transactions first (most accurate)
-      if (refund.transactions && Array.isArray(refund.transactions)) {
-        for (const transaction of refund.transactions) {
-          totalRefunds += parseFloat(transaction.amount || '0');
-        }
-      } else if (refund.refund_line_items && Array.isArray(refund.refund_line_items)) {
-        // Fallback to refund_line_items subtotal
-        for (const item of refund.refund_line_items) {
-          totalRefunds += parseFloat(item.subtotal || '0');
+  // Use Shopify-like sales calculation for accurate gross/net sales
+  // Convert our ShopifyOrder to SalesShopifyOrder format
+  const salesOrder: SalesShopifyOrder = {
+    id: order.id,
+    created_at: order.created_at,
+    currency: order.currency,
+    financial_status: order.financial_status || 'unknown',
+    cancelled_at: order.cancelled_at || null,
+    line_items: order.line_items || [],
+    refunds: order.refunds?.map((refund) => ({
+      id: refund.id,
+      created_at: refund.created_at,
+      refund_line_items: refund.refund_line_items || [],
+    })) || [],
+  };
+
+  // Calculate sales metrics using Shopify-like calculation
+  const salesResult = calculateShopifyLikeSales([salesOrder]);
+  const orderSales = salesResult.perOrder[0];
+
+  // If order was filtered out (invalid financial_status), use fallback calculation
+  if (!orderSales) {
+    // Fallback: use old calculation for orders that don't pass financial_status filter
+    const subtotalPrice = parseFloat(order.subtotal_price || '0');
+    
+    let totalRefunds = 0;
+    if (Array.isArray(order.refunds) && order.refunds.length > 0) {
+      for (const refund of order.refunds) {
+        if (refund.refund_line_items && Array.isArray(refund.refund_line_items)) {
+          for (const item of refund.refund_line_items) {
+            if (item.subtotal) {
+              totalRefunds += parseFloat(item.subtotal);
+            }
+          }
         }
       }
     }
+    
+    const grossSales = (subtotalPrice + totalDiscounts + totalRefunds) > 0 
+      ? subtotalPrice + totalDiscounts + totalRefunds 
+      : null;
+    const netSales = subtotalPrice > 0 ? subtotalPrice : null;
+
+    return {
+      tenant_id: tenantId,
+      order_id: order.id.toString(),
+      processed_at: processedAt,
+      total_price: totalPrice || null,
+      discount_total: totalDiscounts || null,
+      total_refunds: totalRefunds || null,
+      currency: order.currency || null,
+      customer_id: order.customer?.id?.toString() || null,
+      is_refund: isRefund,
+      gross_sales: grossSales,
+      net_sales: netSales,
+      is_new_customer: false, // Will be determined below
+    };
   }
-  
-  // gross_sales = (subtotal_price after refunds) + total_discounts + total_refunds
-  // This gives us the original gross sales before discounts and refunds
-  // net_sales = subtotal_price (already includes refunds, after discounts, excluding shipping/tax)
-  const grossSales = (subtotalPrice + totalDiscounts + totalRefunds) > 0 
-    ? subtotalPrice + totalDiscounts + totalRefunds 
-    : null;
-  const netSales = subtotalPrice > 0 ? subtotalPrice : null;
-  
-  // Calculate discount_total for backward compatibility
-  const discountTotal = totalDiscounts || 0;
+
+  // Use calculated values from Shopify-like function
+  const grossSales = orderSales.grossSales > 0 ? orderSales.grossSales : null;
+  const netSales = orderSales.netSales > 0 ? orderSales.netSales : null;
+  const totalRefunds = orderSales.returns;
 
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
     total_price: totalPrice || null,
-    discount_total: discountTotal || null,
+    discount_total: orderSales.discounts || null,
     total_refunds: totalRefunds || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
