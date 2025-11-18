@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -30,7 +30,12 @@ export function ShopifyConnect({
 }: ShopifyConnectProps) {
   const { toast } = useToast();
   const router = useRouter();
+  const pathname = usePathname();
   const [isPending, startTransition] = useTransition();
+  
+  // Extract tenantSlug from pathname (/admin/tenants/[tenantSlug]/integrations)
+  const tenantSlugMatch = pathname.match(/\/admin\/tenants\/([^/]+)/);
+  const tenantSlug = tenantSlugMatch ? tenantSlugMatch[1] : null;
 
   const statusLabel = useMemo(() => {
     switch (status) {
@@ -99,8 +104,23 @@ export function ShopifyConnect({
           title: 'Shopify disconnected',
           description: 'The Shopify connection has been disconnected.',
         });
-        router.refresh();
-      } catch (error) {
+        // Navigate with status query parameter if we have tenantSlug
+        if (tenantSlug) {
+          router.push(`/admin/tenants/${tenantSlug}/integrations?status=shopify-disconnected`);
+        } else {
+          router.refresh();
+        }
+      } catch (error: any) {
+        // NEXT_REDIRECT is expected and should be handled gracefully
+        if (error?.digest === 'NEXT_REDIRECT' || error?.message === 'NEXT_REDIRECT') {
+          // This is expected - the server action redirected, navigate manually
+          if (tenantSlug) {
+            router.push(`/admin/tenants/${tenantSlug}/integrations?status=shopify-disconnected`);
+          } else {
+            router.refresh();
+          }
+          return;
+        }
         console.error('Failed to disconnect Shopify connection', error);
         toast({
           title: 'Unable to disconnect',

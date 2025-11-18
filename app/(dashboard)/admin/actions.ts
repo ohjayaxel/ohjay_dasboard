@@ -1483,7 +1483,6 @@ export async function disconnectShopify(payload: { tenantId: string; tenantSlug:
   }
 
   await revalidateTenantViews(tenantId, tenantSlug)
-  redirect(`/admin/tenants/${tenantSlug}/integrations?status=shopify-disconnected`)
 }
 
 
