@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { Area, AreaChart, CartesianGrid, XAxis } from "recharts"
+import { ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 
 import {
   Card,
@@ -16,12 +17,19 @@ import {
   ChartTooltipContent,
 } from '@/components/ui/chart'
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import type { OverviewDataPoint } from "@/lib/data/agg"
 
 type MetricOption = {
@@ -51,6 +59,7 @@ export function OverviewChart({
   numberLocale,
 }: OverviewChartProps) {
   const [selectedMetric, setSelectedMetric] = React.useState<keyof OverviewDataPoint>("net_sales")
+  const [isOpen, setIsOpen] = React.useState(true)
 
   const selectedOption = metricOptions.find((opt) => opt.key === selectedMetric) ?? metricOptions[0]
 
@@ -79,10 +88,13 @@ export function OverviewChart({
     value: point[selectedMetric] ?? 0,
   }))
 
+  // Use orange color that works in both light and dark themes
+  const orangeColor = "#f97316" // Tailwind orange-500 - vibrant orange
+  
   const chartConfig = {
     value: {
       label: selectedOption.label,
-      color: "hsl(var(--chart-1))",
+      color: orangeColor,
     },
   } satisfies ChartConfig
 
@@ -99,88 +111,114 @@ export function OverviewChart({
   }, [selectedMetric, formatCurrency, formatNumber, formatRatio])
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-            Performance Trend
-          </CardTitle>
-          <Select
-            value={selectedMetric}
-            onValueChange={(value) => setSelectedMetric(value as keyof OverviewDataPoint)}
-          >
-            <SelectTrigger className="w-[200px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {metricOptions.map((option) => (
-                <SelectItem key={option.key} value={option.key}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <ChartContainer config={chartConfig} className="h-[300px] w-full">
-          <AreaChart data={chartData}>
-            <defs>
-              <linearGradient id="fillValue" x1="0" y1="0" x2="0" y2="1">
-                <stop
-                  offset="5%"
-                  stopColor="var(--color-value)"
-                  stopOpacity={0.8}
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CollapsibleTrigger asChild>
+              <Button
+                variant="ghost"
+                className="flex items-center gap-2 p-0 h-auto font-semibold text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <CardTitle className="text-sm font-semibold uppercase tracking-wide">
+                  Performance Trend
+                </CardTitle>
+                {isOpen ? (
+                  <ChevronUpIcon className="h-4 w-4 transition-transform" />
+                ) : (
+                  <ChevronDownIcon className="h-4 w-4 transition-transform" />
+                )}
+              </Button>
+            </CollapsibleTrigger>
+            {isOpen && (
+              <Select
+                value={selectedMetric}
+                onValueChange={(value) => setSelectedMetric(value as keyof OverviewDataPoint)}
+              >
+                <SelectTrigger className="w-[200px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {metricOptions.map((option) => (
+                    <SelectItem key={option.key} value={option.key}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+          </div>
+        </CardHeader>
+        <CollapsibleContent>
+          <CardContent className="pt-0">
+            <ChartContainer config={chartConfig} className="h-[300px] w-full">
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="fillValue" x1="0" y1="0" x2="0" y2="1">
+                    <stop
+                      offset="5%"
+                      stopColor={orangeColor}
+                      stopOpacity={0.8}
+                    />
+                    <stop
+                      offset="95%"
+                      stopColor={orangeColor}
+                      stopOpacity={0.1}
+                    />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid 
+                  vertical={false} 
+                  strokeDasharray="3 3"
+                  stroke="hsl(var(--muted))"
+                  opacity={0.5}
                 />
-                <stop
-                  offset="95%"
-                  stopColor="var(--color-value)"
-                  stopOpacity={0.1}
-                />
-              </linearGradient>
-            </defs>
-            <CartesianGrid vertical={false} />
-            <XAxis
-              dataKey="date"
-              tickLine={false}
-              axisLine={false}
-              tickMargin={8}
-              minTickGap={32}
-              tickFormatter={(value) => {
-                const date = new Date(value)
-                return date.toLocaleDateString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                })
-              }}
-            />
-            <ChartTooltip
-              cursor={false}
-              content={
-                <ChartTooltipContent
-                  labelFormatter={(value) => {
-                    return new Date(value).toLocaleDateString("en-US", {
+                <XAxis
+                  dataKey="date"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  minTickGap={32}
+                  tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 12 }}
+                  tickFormatter={(value) => {
+                    const date = new Date(value)
+                    return date.toLocaleDateString("en-US", {
                       month: "short",
                       day: "numeric",
-                      year: "numeric",
                     })
                   }}
-                  indicator="dot"
-                  formatter={(value) => [formatValue(Number(value)), selectedOption.label]}
                 />
-              }
-            />
-            <Area
-              dataKey="value"
-              type="natural"
-              fill="url(#fillValue)"
-              stroke="var(--color-value)"
-              strokeWidth={2}
-            />
-          </AreaChart>
-        </ChartContainer>
-      </CardContent>
-    </Card>
+                <ChartTooltip
+                  cursor={false}
+                  content={
+                    <ChartTooltipContent
+                      labelFormatter={(value) => {
+                        return new Date(value).toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                        })
+                      }}
+                      indicator="dot"
+                      formatter={(value) => [formatValue(Number(value)), selectedOption.label]}
+                    />
+                  }
+                />
+                <Area
+                  dataKey="value"
+                  type="natural"
+                  fill="url(#fillValue)"
+                  stroke={orangeColor}
+                  strokeWidth={2.5}
+                  dot={false}
+                  activeDot={{ r: 4, fill: orangeColor }}
+                />
+              </AreaChart>
+            </ChartContainer>
+          </CardContent>
+        </CollapsibleContent>
+      </Card>
+    </Collapsible>
   )
 }
 
