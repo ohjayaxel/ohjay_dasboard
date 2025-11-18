@@ -47,6 +47,7 @@ type ShopifyOrderRow = {
   processed_at: string | null;
   total_price: number | null;
   discount_total: number | null;
+  total_refunds: number | null;
   currency: string | null;
   customer_id: string | null;
   is_refund: boolean;
@@ -307,6 +308,7 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     processed_at: processedAt,
     total_price: totalPrice || null,
     discount_total: discountTotal || null,
+    total_refunds: totalRefunds || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
     is_refund: isRefund,

@@ -86,6 +86,7 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     processed_at: processedAt,
     total_price: totalPrice || null,
     discount_total: discountTotal || null,
+    total_refunds: totalRefunds || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
     is_refund: isRefund,
@@ -253,15 +254,21 @@ async function processWebhookOrder(
     }
 
     // Aggregate all orders for this date
-    const allOrderRows = (allOrdersForDate || []).map((o) => ({
-      processed_at: o.processed_at,
-      total_price: o.total_price,
-      gross_sales: o.gross_sales,
-      net_sales: o.net_sales,
-      currency: o.currency,
-      is_refund: o.is_refund,
-      is_new_customer: o.is_new_customer ?? false,
-    }));
+    // Use stored values if available, otherwise calculate from refunds data
+    const allOrderRows = (allOrdersForDate || []).map((o) => {
+      // If we have stored gross_sales and net_sales, use them (already includes refunds calculation)
+      // Otherwise, we'll need to recalculate - but for webhook updates, we should have the values
+      return {
+        processed_at: o.processed_at,
+        total_price: o.total_price,
+        gross_sales: o.gross_sales,
+        net_sales: o.net_sales,
+        total_refunds: o.total_refunds ?? 0,
+        currency: o.currency,
+        is_refund: o.is_refund,
+        is_new_customer: o.is_new_customer ?? false,
+      };
+    });
 
     const aggregates = aggregateKpis(allOrderRows);
     if (aggregates.length > 0) {
