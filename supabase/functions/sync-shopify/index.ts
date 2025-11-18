@@ -62,6 +62,13 @@ type JobResult = {
   inserted?: number;
 };
 
+type ShopifyRefund = {
+  id: number;
+  created_at: string;
+  refund_line_items?: Array<{ subtotal: string }>;
+  transactions?: Array<{ amount: string }>;
+};
+
 type ShopifyOrder = {
   id: number;
   order_number: number;
@@ -77,7 +84,7 @@ type ShopifyOrder = {
   email: string | null;
   financial_status: string;
   fulfillment_status: string | null;
-  refunds?: Array<{ id: number; created_at: string; refund_line_items: Array<{ subtotal: string }> }>;
+  refunds?: Array<ShopifyRefund>;
 };
 
 const KEY_LENGTH = 32;
@@ -264,10 +271,31 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   const subtotalPrice = parseFloat(order.subtotal_price || '0');
   const totalDiscounts = parseFloat(order.total_discounts || '0');
   
-  // gross_sales = subtotal_price + total_discounts (before discounts)
-  // net_sales = subtotal_price (after discounts, excluding shipping/tax)
-  // Note: Using subtotal_price for net_sales to exclude shipping and tax
-  const grossSales = (subtotalPrice + totalDiscounts) > 0 ? subtotalPrice + totalDiscounts : null;
+  // Calculate total refunds amount
+  // Note: subtotal_price from Shopify already reflects value AFTER refunds
+  let totalRefunds = 0;
+  if (Array.isArray(order.refunds) && order.refunds.length > 0) {
+    for (const refund of order.refunds) {
+      // Try to get refund amount from transactions first (most accurate)
+      if (refund.transactions && Array.isArray(refund.transactions)) {
+        for (const transaction of refund.transactions) {
+          totalRefunds += parseFloat(transaction.amount || '0');
+        }
+      } else if (refund.refund_line_items && Array.isArray(refund.refund_line_items)) {
+        // Fallback to refund_line_items subtotal
+        for (const item of refund.refund_line_items) {
+          totalRefunds += parseFloat(item.subtotal || '0');
+        }
+      }
+    }
+  }
+  
+  // gross_sales = (subtotal_price after refunds) + total_discounts + total_refunds
+  // This gives us the original gross sales before discounts and refunds
+  // net_sales = subtotal_price (already includes refunds, after discounts, excluding shipping/tax)
+  const grossSales = (subtotalPrice + totalDiscounts + totalRefunds) > 0 
+    ? subtotalPrice + totalDiscounts + totalRefunds 
+    : null;
   const netSales = subtotalPrice > 0 ? subtotalPrice : null;
   
   // Calculate discount_total for backward compatibility
