@@ -43,6 +43,7 @@ type ShopifyOrder = {
   order_id: string
   processed_at: string | null
   total_price: number | null
+  total_tax: number | null
   gross_sales: number | null
   net_sales: number | null
   discount_total: number | null
@@ -106,13 +107,46 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
       },
       {
         accessorKey: 'gross_sales',
-        header: 'Gross Sales',
+        header: 'Total Sales',
         cell: ({ row }) => {
-          const gross = row.getValue('gross_sales') as number | null
+          const totalSales = row.getValue('gross_sales') as number | null
           const currency = row.original.currency || 'SEK'
           return (
-            <div className={gross && gross > 0 ? 'font-medium' : 'text-muted-foreground'}>
-              {formatCurrency(gross, currency)}
+            <div className={totalSales && totalSales > 0 ? 'font-medium' : 'text-muted-foreground'}>
+              {formatCurrency(totalSales, currency)}
+            </div>
+          )
+        },
+      },
+      {
+        accessorKey: 'total_tax',
+        header: 'Tax',
+        cell: ({ row }) => {
+          const tax = row.original.total_tax as number | null
+          const currency = row.original.currency || 'SEK'
+          return (
+            <div className="text-muted-foreground">
+              {formatCurrency(tax, currency)}
+            </div>
+          )
+        },
+      },
+      {
+        id: 'gross_sales_calculated',
+        header: 'Gross Sales',
+        accessorFn: (row) => {
+          const totalSales = row.gross_sales
+          const tax = row.total_tax
+          return (totalSales && tax !== null) ? totalSales - tax : null
+        },
+        cell: ({ row }) => {
+          const totalSales = row.original.gross_sales as number | null
+          const tax = row.original.total_tax as number | null
+          const currency = row.original.currency || 'SEK'
+          const grossSales = (totalSales && tax !== null) ? totalSales - tax : null
+          return (
+            <div className={grossSales && grossSales > 0 ? 'font-medium' : 'text-muted-foreground'}>
+              {formatCurrency(grossSales, currency)}
             </div>
           )
         },
