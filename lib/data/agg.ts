@@ -154,6 +154,147 @@ export const getLatestKpiSummary = cache(async (params: {
   };
 });
 
+export type OverviewDataPoint = {
+  date: string;
+  gross_sales: number;
+  net_sales: number;
+  new_customer_net_sales: number;
+  marketing_spend: number;
+  amer: number | null;
+  orders: number;
+  aov: number | null;
+};
+
+export type OverviewTotals = {
+  gross_sales: number;
+  net_sales: number;
+  new_customer_net_sales: number;
+  marketing_spend: number;
+  amer: number | null;
+  orders: number;
+  aov: number | null;
+};
+
+export type OverviewResult = {
+  series: OverviewDataPoint[];
+  totals: OverviewTotals;
+  currency: string | null;
+};
+
+export async function getOverviewData(params: {
+  tenantId: string;
+  from?: string;
+  to?: string;
+}): Promise<OverviewResult> {
+  // Fetch data from all sources
+  const [shopifyRows, metaRows, googleRows] = await Promise.all([
+    fetchKpiDaily({
+      tenantId: params.tenantId,
+      from: params.from,
+      to: params.to,
+      source: 'shopify',
+    }),
+    fetchKpiDaily({
+      tenantId: params.tenantId,
+      from: params.from,
+      to: params.to,
+      source: 'meta',
+    }),
+    fetchKpiDaily({
+      tenantId: params.tenantId,
+      from: params.from,
+      to: params.to,
+      source: 'google_ads',
+    }),
+  ]);
+
+  // Aggregate by date
+  const byDate = new Map<string, OverviewDataPoint>();
+
+  // Process Shopify data
+  for (const row of shopifyRows) {
+    const existing = byDate.get(row.date) ?? {
+      date: row.date,
+      gross_sales: 0,
+      net_sales: 0,
+      new_customer_net_sales: 0,
+      marketing_spend: 0,
+      amer: null,
+      orders: 0,
+      aov: null,
+    };
+
+    existing.gross_sales += row.gross_sales ?? 0;
+    existing.net_sales += row.net_sales ?? 0;
+    existing.orders += row.conversions ?? 0;
+    
+    // Calculate new customer net sales
+    // We need to estimate this from new_customer_conversions and net_sales
+    // If we have new_customer_conversions, we can estimate: (new_customer_conversions / conversions) * net_sales
+    if (row.new_customer_conversions && row.conversions && row.conversions > 0 && row.net_sales) {
+      const newCustomerRatio = row.new_customer_conversions / row.conversions;
+      existing.new_customer_net_sales += row.net_sales * newCustomerRatio;
+    }
+
+    byDate.set(row.date, existing);
+  }
+
+  // Process Meta and Google Ads for marketing spend
+  for (const row of [...metaRows, ...googleRows]) {
+    const existing = byDate.get(row.date) ?? {
+      date: row.date,
+      gross_sales: 0,
+      net_sales: 0,
+      new_customer_net_sales: 0,
+      marketing_spend: 0,
+      amer: null,
+      orders: 0,
+      aov: null,
+    };
+
+    existing.marketing_spend += row.spend ?? 0;
+    byDate.set(row.date, existing);
+  }
+
+  // Calculate aMER and AOV for each date
+  const series = Array.from(byDate.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((point) => {
+      const amer = point.marketing_spend > 0 
+        ? point.new_customer_net_sales / point.marketing_spend 
+        : null;
+      const aov = point.orders > 0 
+        ? point.net_sales / point.orders 
+        : null;
+      return {
+        ...point,
+        amer,
+        aov,
+      };
+    });
+
+  // Calculate totals
+  const totalGrossSales = sum(series.map((p) => p.gross_sales));
+  const totalNetSales = sum(series.map((p) => p.net_sales));
+  const totalNewCustomerNetSales = sum(series.map((p) => p.new_customer_net_sales));
+  const totalMarketingSpend = sum(series.map((p) => p.marketing_spend));
+  const totalOrders = sum(series.map((p) => p.orders));
+
+  const totals: OverviewTotals = {
+    gross_sales: totalGrossSales,
+    net_sales: totalNetSales,
+    new_customer_net_sales: totalNewCustomerNetSales,
+    marketing_spend: totalMarketingSpend,
+    amer: totalMarketingSpend > 0 ? totalNewCustomerNetSales / totalMarketingSpend : null,
+    orders: totalOrders,
+    aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
+  };
+
+  const currency = shopifyRows.find((row) => row.currency)?.currency ?? null;
+
+  return { series, totals, currency };
+}
+
 export async function revalidateKpiForTenant(tenantSlug: string) {
   const routes = [
     `/t/${tenantSlug}`,

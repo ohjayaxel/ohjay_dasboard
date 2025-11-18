@@ -14,6 +14,10 @@ export type KpiDailyRow = {
   cos: number | null;
   roas: number | null;
   currency: string | null;
+  gross_sales: number | null;
+  net_sales: number | null;
+  new_customer_conversions: number | null;
+  returning_customer_conversions: number | null;
 };
 
 type FetchKpiDailyParams = {
@@ -30,7 +34,7 @@ export async function fetchKpiDaily(params: FetchKpiDailyParams): Promise<KpiDai
 
   let query = client
     .from('kpi_daily')
-    .select('tenant_id, date, source, spend, clicks, conversions, revenue, aov, cos, roas, currency')
+    .select('tenant_id, date, source, spend, clicks, conversions, revenue, aov, cos, roas, currency, gross_sales, net_sales, new_customer_conversions, returning_customer_conversions')
     .eq('tenant_id', params.tenantId)
     .order('date', { ascending: params.order !== 'desc' });
 
