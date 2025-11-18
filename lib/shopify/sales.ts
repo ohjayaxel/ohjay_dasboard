@@ -27,6 +27,8 @@ export type ShopifyOrder = {
     quantity: number;
     total_discount: string; // Discount on this line item, as string
   }[];
+  total_discounts?: string; // Order-level total discounts (preferred over summing line_items)
+  total_tax?: string; // Tax amount - should be excluded from gross sales (Shopify Finance excludes tax)
   refunds?: {
     id: number | string;
     created_at: string;
@@ -145,18 +147,33 @@ function calculateRefundLineItemSubtotal(
  */
 function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
   // Calculate Gross Sales: sum of (price × quantity) for all line items
+  // Note: line_items[].price does NOT include tax (tax is separate on order level)
   let grossSales = 0;
   for (const lineItem of order.line_items) {
     const price = parseFloat(lineItem.price);
     const quantity = lineItem.quantity;
     grossSales += price * quantity;
   }
+  
+  // Exclude tax from gross sales to match Shopify Finance reports
+  // Shopify Finance reports exclude tax from gross sales calculations
+  if (order.total_tax !== undefined && order.total_tax !== null) {
+    const tax = parseFloat(order.total_tax || '0');
+    grossSales -= tax;
+  }
+  
   grossSales = roundTo2Decimals(grossSales);
 
-  // Calculate Discounts: sum of total_discount for all line items
+  // Calculate Discounts: prefer order.total_discounts if available (includes both line-item and order-level discounts)
+  // Otherwise, fallback to summing line_items[].total_discount
   let discounts = 0;
-  for (const lineItem of order.line_items) {
-    discounts += parseFloat(lineItem.total_discount || '0');
+  if (order.total_discounts !== undefined && order.total_discounts !== null) {
+    discounts = parseFloat(order.total_discounts || '0');
+  } else {
+    // Fallback: sum line-item discounts
+    for (const lineItem of order.line_items) {
+      discounts += parseFloat(lineItem.total_discount || '0');
+    }
   }
   discounts = roundTo2Decimals(discounts);
 

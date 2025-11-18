@@ -46,10 +46,14 @@ type ShopifyOrderRow = {
   order_id: string;
   processed_at: string | null;
   total_price: number | null;
+  total_tax: number | null;
   discount_total: number | null;
   total_refunds: number | null;
   currency: string | null;
   customer_id: string | null;
+  financial_status: string | null;
+  fulfillment_status: string | null;
+  source_name: string | null;
   is_refund: boolean;
   gross_sales: number | null;
   net_sales: number | null;
@@ -94,15 +98,18 @@ type ShopifyOrder = {
   customer: { id: number } | null;
   line_items: Array<{
     id: number | string;
-    price: string; // Price per unit, as string
+    price: string; // Price per unit (before discount), as string
     quantity: number;
     total_discount: string; // Discount on this line item, as string
   }>;
   email: string | null;
   financial_status: string;
   fulfillment_status: string | null;
+  source_name?: string; // e.g., "web", "pos", "shopify_draft_order"
   refunds?: Array<ShopifyRefund>;
   cancelled_at?: string | null;
+  tags?: string; // Comma-separated tags, may include "test"
+  test?: boolean; // Indicates if this is a test order
 };
 
 const KEY_LENGTH = 32;
@@ -299,19 +306,16 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
     return { grossSales: 0, discounts: 0, returns: 0, netSales: 0 };
   }
 
-  // Calculate Gross Sales: sum of (price × quantity) for all line items
-  let grossSales = 0;
-  for (const lineItem of order.line_items || []) {
-    const price = parseFloat(lineItem.price || '0');
-    const quantity = lineItem.quantity;
-    grossSales += price * quantity;
-  }
-  grossSales = Math.round(grossSales * 100) / 100; // Round to 2 decimals
-
-  // Calculate Discounts: sum of total_discount for all line items
+  // Calculate Discounts: prefer order.total_discounts if available (includes both line-item and order-level discounts)
+  // Otherwise, fallback to summing line_items[].total_discount
   let discounts = 0;
-  for (const lineItem of order.line_items || []) {
-    discounts += parseFloat(lineItem.total_discount || '0');
+  if (order.total_discounts !== undefined && order.total_discounts !== null) {
+    discounts = parseFloat(order.total_discounts || '0');
+  } else {
+    // Fallback: sum line-item discounts
+    for (const lineItem of order.line_items || []) {
+      discounts += parseFloat(lineItem.total_discount || '0');
+    }
   }
   discounts = Math.round(discounts * 100) / 100;
 
@@ -344,7 +348,18 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
   }
   returns = Math.round(returns * 100) / 100;
 
-  // Calculate Net Sales
+  // Shopify Gross Sales calculation:
+  // Gross Sales = SUM(line_item.price × line_item.quantity)
+  // This is the product price × quantity, BEFORE discounts, tax, shipping
+  let grossSales = 0;
+  for (const lineItem of order.line_items || []) {
+    const price = parseFloat(lineItem.price || '0');
+    const quantity = lineItem.quantity || 0;
+    grossSales += price * quantity;
+  }
+  grossSales = Math.round(grossSales * 100) / 100;
+
+  // Net Sales = Gross Sales - (discounts + returns)
   const netSales = Math.round((grossSales - discounts - returns) * 100) / 100;
 
   return { grossSales, discounts, returns, netSales };
@@ -361,25 +376,52 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
 
   // Calculate prices
   const totalPrice = parseFloat(order.total_price || '0');
+  const totalTax = parseFloat(order.total_tax || '0');
   const totalDiscounts = parseFloat(order.total_discounts || '0');
+  const subtotalPrice = parseFloat(order.subtotal_price || '0');
   
-  // Use Shopify-like sales calculation for accurate gross/net sales
+  // Use Shopify-like sales calculation for refunds and discounts
   const sales = calculateShopifyLikeSalesInline(order);
   
-  // Use calculated values (or fallback if order was filtered out)
-  const grossSales = sales.grossSales > 0 ? sales.grossSales : null;
-  const netSales = sales.netSales > 0 ? sales.netSales : null;
-  const totalRefunds = sales.returns;
+  // Shopify Gross Sales filtering logic:
+  // Include order if:
+  // - cancelled_at = null (not cancelled)
+  // Exclude order if:
+  // - order is cancelled (cancelled_at != null)
+  // - order is a test order (test === true OR tags contains "test")
+  // - order is a draft that is not "completed" (source_name === "shopify_draft_order" AND processed_at is null)
+  // - order has 0 kr in order value (subtotal_price = 0)
+
+  const isCancelled = order.cancelled_at !== null && order.cancelled_at !== '';
+  const isTestOrder = order.test === true || (order.tags?.toLowerCase().includes('test') ?? false);
+  const isDraftNotCompleted = order.source_name === 'shopify_draft_order' && processedAt === null;
+  const hasZeroSubtotal = subtotalPrice === 0;
+
+  const shouldExclude = isCancelled || isTestOrder || isDraftNotCompleted || hasZeroSubtotal;
+  
+  // Calculate Gross Sales: SUM(line_item.price × line_item.quantity)
+  // This is the product price × quantity, BEFORE discounts, tax, shipping
+  let grossSales: number | null = null;
+  let netSales: number | null = null;
+
+  if (!shouldExclude) {
+    grossSales = sales.grossSales > 0 ? sales.grossSales : null;
+    netSales = grossSales !== null ? sales.netSales : null;
+  }
 
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
     total_price: totalPrice || null,
+    total_tax: totalTax || null,
     discount_total: sales.discounts || null,
-    total_refunds: totalRefunds || null,
+    total_refunds: sales.returns || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
+    financial_status: order.financial_status || null,
+    fulfillment_status: order.fulfillment_status || null,
+    source_name: order.source_name || null,
     is_refund: isRefund,
     gross_sales: grossSales,
     net_sales: netSales,

@@ -35,11 +35,12 @@ type ShopifyOrder = {
   total_price: string;
   subtotal_price: string;
   total_discounts: string;
+  total_tax?: string; // Tax amount - should be excluded from gross sales
   currency: string;
   customer?: { id: string };
   line_items: Array<{
     id: number | string;
-    price: string; // Price per unit, as string
+    price: string; // Price per unit (before discount), as string
     quantity: number;
     total_discount: string; // Discount on this line item, as string
   }>;
@@ -47,7 +48,10 @@ type ShopifyOrder = {
   email?: string;
   financial_status?: string;
   fulfillment_status?: string;
+  source_name?: string; // e.g., "web", "pos", "shopify_draft_order"
   cancelled_at?: string | null;
+  tags?: string; // Comma-separated tags, may include "test"
+  test?: boolean; // Indicates if this is a test order
 };
 
 function normalizeShopDomain(domain: string): string {
@@ -66,10 +70,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
   const isRefund = Array.isArray(order.refunds) && order.refunds.length > 0;
 
   const totalPrice = parseFloat(order.total_price || '0');
+  const totalTax = parseFloat(order.total_tax || '0');
   const totalDiscounts = parseFloat(order.total_discounts || '0');
+  const subtotalPrice = parseFloat(order.subtotal_price || '0');
   
-  // Use Shopify-like sales calculation for accurate gross/net sales
-  // Convert our ShopifyOrder to SalesShopifyOrder format
+  // Calculate refunds using Shopify-like calculation
+  // Convert our ShopifyOrder to SalesShopifyOrder format for refund calculation
   const salesOrder: SalesShopifyOrder = {
     id: order.id,
     created_at: order.created_at,
@@ -77,6 +83,8 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     financial_status: order.financial_status || 'unknown',
     cancelled_at: order.cancelled_at || null,
     line_items: order.line_items || [],
+    total_discounts: order.total_discounts,
+    total_tax: order.total_tax,
     refunds: order.refunds?.map((refund) => ({
       id: refund.id,
       created_at: refund.created_at,
@@ -84,63 +92,63 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     })) || [],
   };
 
-  // Calculate sales metrics using Shopify-like calculation
+  // Calculate refunds using Shopify-like calculation
   const salesResult = calculateShopifyLikeSales([salesOrder]);
   const orderSales = salesResult.perOrder[0];
+  const totalRefunds = orderSales ? orderSales.returns : 0;
 
-  // If order was filtered out (invalid financial_status), use fallback calculation
-  if (!orderSales) {
-    // Fallback: use old calculation for orders that don't pass financial_status filter
-    const subtotalPrice = parseFloat(order.subtotal_price || '0');
+  // Shopify Gross Sales filtering logic:
+  // Include order if:
+  // - cancelled_at = null (not cancelled)
+  // Exclude order if:
+  // - order is cancelled (cancelled_at != null)
+  // - order is a test order (test === true OR tags contains "test")
+  // - order is a draft that is not "completed" (source_name === "shopify_draft_order" AND processed_at is null)
+  // - order has 0 kr in order value (subtotal_price = 0)
+
+  const isCancelled = order.cancelled_at !== null && order.cancelled_at !== '';
+  const isTestOrder = order.test === true || (order.tags?.toLowerCase().includes('test') ?? false);
+  const isDraftNotCompleted = order.source_name === 'shopify_draft_order' && processedAt === null;
+  const hasZeroSubtotal = subtotalPrice === 0;
+
+  const shouldExclude = isCancelled || isTestOrder || isDraftNotCompleted || hasZeroSubtotal;
+
+  // Calculate Gross Sales: SUM(line_item.price × line_item.quantity)
+  // This is the product price × quantity, BEFORE discounts, tax, shipping
+  let grossSales: number | null = null;
+  let netSales: number | null = null;
+
+  if (!shouldExclude) {
+    const roundTo2Decimals = (num: number) => Math.round(num * 100) / 100;
     
-    let totalRefunds = 0;
-    if (Array.isArray(order.refunds) && order.refunds.length > 0) {
-      for (const refund of order.refunds) {
-        if (refund.refund_line_items && Array.isArray(refund.refund_line_items)) {
-          for (const item of refund.refund_line_items) {
-            if (item.subtotal) {
-              totalRefunds += parseFloat(item.subtotal);
-            }
-          }
-        }
-      }
+    // Gross Sales = sum of (line_item.price × line_item.quantity)
+    let calculatedGrossSales = 0;
+    for (const lineItem of order.line_items || []) {
+      const price = parseFloat(lineItem.price || '0');
+      const quantity = lineItem.quantity || 0;
+      calculatedGrossSales += price * quantity;
     }
-    
-    const grossSales = (subtotalPrice + totalDiscounts + totalRefunds) > 0 
-      ? subtotalPrice + totalDiscounts + totalRefunds 
-      : null;
-    const netSales = subtotalPrice > 0 ? subtotalPrice : null;
+    grossSales = calculatedGrossSales > 0 ? roundTo2Decimals(calculatedGrossSales) : null;
 
-    return {
-      tenant_id: tenantId,
-      order_id: order.id.toString(),
-      processed_at: processedAt,
-      total_price: totalPrice || null,
-      discount_total: totalDiscounts || null,
-      total_refunds: totalRefunds || null,
-      currency: order.currency || null,
-      customer_id: order.customer?.id?.toString() || null,
-      is_refund: isRefund,
-      gross_sales: grossSales,
-      net_sales: netSales,
-      is_new_customer: false, // Will be determined below
-    };
+    // Net Sales = Gross Sales - (discounts + returns)
+    if (grossSales !== null) {
+      netSales = roundTo2Decimals(grossSales - totalDiscounts - totalRefunds);
+    }
   }
-
-  // Use calculated values from Shopify-like function
-  const grossSales = orderSales.grossSales > 0 ? orderSales.grossSales : null;
-  const netSales = orderSales.netSales > 0 ? orderSales.netSales : null;
-  const totalRefunds = orderSales.returns;
 
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
     total_price: totalPrice || null,
-    discount_total: orderSales.discounts || null,
+    total_tax: totalTax || null,
+    discount_total: totalDiscounts || null,
     total_refunds: totalRefunds || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
+    financial_status: order.financial_status || null,
+    fulfillment_status: order.fulfillment_status || null,
+    source_name: order.source_name || null,
     is_refund: isRefund,
     gross_sales: grossSales,
     net_sales: netSales,
