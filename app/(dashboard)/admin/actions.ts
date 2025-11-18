@@ -53,6 +53,15 @@ const connectMetaSchema = z.object({
 
 const disconnectMetaSchema = connectMetaSchema
 
+const disconnectShopifySchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+})
+
+const connectShopifySchema = connectMetaSchema
+
 const updateMetaAccountSchema = z.object({
   tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
   tenantSlug: z
@@ -1268,6 +1277,213 @@ export async function startShopifyConnect(tenantId: string, shopDomain: string) 
   });
   
   redirect(url);
+}
+
+export async function startShopifyConnectAction(payload: { tenantId: string; tenantSlug: string; shopDomain?: string }) {
+  const user = await getCurrentUser();
+  
+  const result = connectShopifySchema.safeParse({
+    tenantId: payload.tenantId,
+    tenantSlug: payload.tenantSlug,
+  });
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid Shopify connection payload.');
+  }
+
+  const { tenantId, tenantSlug } = result.data;
+  
+  // Om shopDomain inte är skickat, redirecta till connect-sidan
+  if (!payload.shopDomain) {
+    const connectUrl = `/connect/shopify?shop=`;
+    return { redirectUrl: connectUrl };
+  }
+
+  const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+  if (!ENCRYPTION_KEY) {
+    throw new Error('ENCRYPTION_KEY environment variable is required');
+  }
+
+  const normalizedShop = payload.shopDomain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase();
+
+  // Skapa signed state
+  const stateData = {
+    tenantId,
+    shopDomain: normalizedShop,
+    userId: user.id,
+    timestamp: Date.now(),
+    nonce: crypto.randomUUID(),
+  };
+
+  const statePayload = JSON.stringify(stateData);
+  const signature = createHmac('sha256', ENCRYPTION_KEY)
+    .update(statePayload)
+    .digest('hex');
+
+  const state = Buffer.from(JSON.stringify({
+    data: stateData,
+    sig: signature
+  })).toString('base64');
+
+  // Hämta OAuth URL
+  const { url } = await getShopifyAuthorizeUrl({
+    tenantId,
+    shopDomain: normalizedShop,
+    state,
+  });
+
+  // Spara state i connection meta
+  const client = getSupabaseServiceClient();
+  const { data: existing, error: existingError } = await client
+    .from('connections')
+    .select('id, meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', 'shopify')
+    .maybeSingle();
+
+  if (existingError) {
+    throw new Error(`Failed to prepare Shopify connection: ${existingError.message}`);
+  }
+
+  const now = new Date().toISOString();
+  const baseMeta =
+    existing && typeof existing.meta === 'object' && existing.meta !== null ? (existing.meta as Record<string, unknown>) : {};
+  const nextMeta = {
+    ...baseMeta,
+    oauth_state: state,
+    oauth_state_created_at: now,
+    oauth_redirect_path: `/admin/tenants/${tenantSlug}/integrations`,
+  };
+
+  if (existing) {
+    const { error } = await client
+      .from('connections')
+      .update({
+        status: 'disconnected',
+        access_token_enc: null,
+        refresh_token_enc: null,
+        expires_at: null,
+        updated_at: now,
+        meta: nextMeta,
+      })
+      .eq('id', existing.id);
+
+    if (error) {
+      throw new Error(`Failed to update Shopify connection: ${error.message}`);
+    }
+  } else {
+    const { error } = await client.from('connections').insert({
+      tenant_id: tenantId,
+      source: 'shopify',
+      status: 'disconnected',
+      updated_at: now,
+      access_token_enc: null,
+      refresh_token_enc: null,
+      expires_at: null,
+      meta: nextMeta,
+    });
+
+    if (error) {
+      throw new Error(`Failed to create Shopify connection: ${error.message}`);
+    }
+  }
+
+  await revalidateTenantViews(tenantId, tenantSlug);
+
+  logger.info(
+    {
+      route: 'admin.shopify',
+      action: 'connect_initiated',
+      endpoint: '/api/oauth/shopify/callback',
+      tenantId,
+      tenantSlug,
+      userId: user.id,
+      shopDomain: normalizedShop,
+      state_prefix: state.slice(0, 8),
+      redirect_url: url,
+    },
+    'Shopify connect initiated',
+  );
+
+  return {
+    redirectUrl: url,
+    state,
+  };
+}
+
+export async function disconnectShopify(payload: { tenantId: string; tenantSlug: string }) {
+  await requirePlatformAdmin()
+
+  const result = disconnectShopifySchema.safeParse(payload)
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid disconnect payload.')
+  }
+
+  const { tenantId, tenantSlug } = result.data
+  const client = getSupabaseServiceClient()
+
+  const { data: existing, error: existingError } = await client
+    .from('connections')
+    .select('id, meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', 'shopify')
+    .maybeSingle()
+
+  if (existingError) {
+    throw new Error(`Failed to load Shopify connection: ${existingError.message}`)
+  }
+
+  const now = new Date().toISOString()
+  const baseMeta =
+    existing && typeof existing.meta === 'object' && existing.meta !== null ? (existing.meta as Record<string, unknown>) : {}
+  const nextMeta = {
+    ...baseMeta,
+    oauth_state: null,
+    oauth_state_created_at: null,
+    oauth_redirect_path: `/admin/tenants/${tenantSlug}/integrations`,
+    disconnected_at: now,
+  }
+
+  if (existing) {
+    const { error } = await client
+      .from('connections')
+      .update({
+        status: 'disconnected',
+        updated_at: now,
+        access_token_enc: null,
+        refresh_token_enc: null,
+        expires_at: null,
+        meta: nextMeta,
+      })
+      .eq('id', existing.id)
+
+    if (error) {
+      throw new Error(`Failed to disconnect Shopify: ${error.message}`)
+    }
+  } else {
+    const { error } = await client.from('connections').insert({
+      tenant_id: tenantId,
+      source: 'shopify',
+      status: 'disconnected',
+      updated_at: now,
+      access_token_enc: null,
+      refresh_token_enc: null,
+      expires_at: null,
+      meta: nextMeta,
+    })
+
+    if (error) {
+      throw new Error(`Failed to create Shopify connection placeholder: ${error.message}`)
+    }
+  }
+
+  await revalidateTenantViews(tenantId, tenantSlug)
+  redirect(`/admin/tenants/${tenantSlug}/integrations?status=shopify-disconnected`)
 }
 
 

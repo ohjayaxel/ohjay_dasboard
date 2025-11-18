@@ -5,8 +5,10 @@ import { notFound } from 'next/navigation'
 
 import {
   disconnectMeta,
+  disconnectShopify,
   queueMetaBackfillJobs,
   startMetaConnect,
+  startShopifyConnectAction,
   triggerMetaSyncNow,
   updateMetaSelectedAccount,
   updateIntegrationSettings,
@@ -180,8 +182,12 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             return 'Två backfill-jobb skapade. Du ser statusen nedan.'
           case 'meta-backfill-triggered':
             return 'Meta-backfill startad. Data fylls på i bakgrunden.'
-      case 'shopify-backfill-triggered':
-        return 'Shopify-backfill startad. Data fylls på i bakgrunden.'
+          case 'shopify-connected':
+            return 'Shopify connection established. Initial sync triggered.'
+          case 'shopify-disconnected':
+            return 'Shopify connection removed.'
+          case 'shopify-backfill-triggered':
+            return 'Shopify-backfill startad. Data fylls på i bakgrunden.'
           case 'meta-account-updated':
             return 'Meta ad account selection saved.'
           default:
@@ -191,6 +197,12 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
     : null
   const metaConnectAction = startMetaConnect.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
   const metaDisconnectAction = disconnectMeta.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
+  const shopifyConnectAction = startShopifyConnectAction.bind(null, { 
+    tenantId: tenant.id, 
+    tenantSlug: tenant.slug,
+    shopDomain: shopifyStoreDomain ?? undefined,
+  })
+  const shopifyDisconnectAction = disconnectShopify.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
 
   const metaAccountForm =
     metaAccounts.length > 0 ? (
@@ -432,6 +444,8 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           status={shopify.status}
           shopDomain={shopifyStoreDomain}
           lastSyncedAt={shopify.updatedAt ?? undefined}
+          onConnect={shopifyConnectAction}
+          onDisconnect={shopifyDisconnectAction}
         />
       ),
       syncStartDate: shopifySyncStartDate,

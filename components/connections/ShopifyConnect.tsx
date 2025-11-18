@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -28,6 +29,7 @@ export function ShopifyConnect({
   onDisconnect,
 }: ShopifyConnectProps) {
   const { toast } = useToast();
+  const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
   const statusLabel = useMemo(() => {
@@ -97,6 +99,7 @@ export function ShopifyConnect({
           title: 'Shopify disconnected',
           description: 'The Shopify connection has been disconnected.',
         });
+        router.refresh();
       } catch (error) {
         console.error('Failed to disconnect Shopify connection', error);
         toast({
