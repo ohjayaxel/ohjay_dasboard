@@ -41,12 +41,16 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
 
   const totalPrice = parseFloat(order.total_price || '0');
   const subtotalPrice = parseFloat(order.subtotal_price || '0');
-  const discountTotal = subtotalPrice - totalPrice; // Discount = subtotal - total
-
-  // gross_sales = subtotal_price (before discounts)
-  // net_sales = total_price (after discounts)
-  const grossSales = subtotalPrice > 0 ? subtotalPrice : null;
-  const netSales = totalPrice > 0 ? totalPrice : null;
+  const totalDiscounts = parseFloat(order.total_discounts || '0');
+  
+  // gross_sales = subtotal_price + total_discounts (before discounts)
+  // net_sales = subtotal_price (after discounts, excluding shipping/tax)
+  // Note: Using subtotal_price for net_sales to exclude shipping and tax
+  const grossSales = (subtotalPrice + totalDiscounts) > 0 ? subtotalPrice + totalDiscounts : null;
+  const netSales = subtotalPrice > 0 ? subtotalPrice : null;
+  
+  // Calculate discount_total for backward compatibility
+  const discountTotal = totalDiscounts || 0;
 
   return {
     tenant_id: tenantId,
