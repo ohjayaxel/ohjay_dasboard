@@ -227,13 +227,19 @@ async function fetchShopifyOrdersWithPagination(params: {
   accessToken: string;
   since?: string;
   until?: string;
+  sinceId?: number; // For continuing after API limit
 }): Promise<ShopifyOrder[]> {
   const normalizedShop = normalizeShopDomain(params.shopDomain);
   const allOrders: ShopifyOrder[] = [];
   let pageInfo: string | null = null;
   let page = 1;
+  let currentSinceId: number | undefined = params.sinceId;
 
-  console.log(`\n[shopify_backfill] Fetching orders from ${params.since || 'all time'}...`);
+  console.log(`\n[shopify_backfill] Fetching orders from ${params.since || 'all time'} to ${params.until || 'now'}...`);
+  
+  // Store date objects for local filtering if needed
+  const sinceDateObj = params.since ? new Date(`${params.since}T00:00:00`) : null;
+  const untilDateObj = params.until ? new Date(`${params.until}T23:59:59`) : null;
 
   while (true) {
     const url = new URL(`https://${normalizedShop}/admin/api/2023-10/orders.json`);
@@ -241,21 +247,30 @@ async function fetchShopifyOrdersWithPagination(params: {
 
     if (pageInfo) {
       // When using page_info, we can only set page_info and limit
+      // Date filters from first request are preserved by Shopify API
       url.searchParams.set('page_info', pageInfo);
+    } else if (currentSinceId) {
+      // Use since_id to continue after hitting API limit
+      url.searchParams.set('status', 'any');
+      url.searchParams.set('since_id', currentSinceId.toString());
+      if (params.since) {
+        url.searchParams.set('created_at_min', params.since);
+      }
+      if (params.until) {
+        url.searchParams.set('created_at_max', params.until);
+      }
     } else {
       // On first page, we can set status and date filters
       url.searchParams.set('status', 'any');
       if (params.since) {
-        // Add time to include full day
-        url.searchParams.set('created_at_min', `${params.since}T00:00:00`);
+        url.searchParams.set('created_at_min', params.since);
       }
       if (params.until) {
-        // Add time to include full day (23:59:59)
-        url.searchParams.set('created_at_max', `${params.until}T23:59:59`);
+        url.searchParams.set('created_at_max', params.until);
       }
     }
 
-    console.log(`[shopify_backfill] Fetching page ${page}${pageInfo ? ' (pagination)' : ''}...`);
+    console.log(`[shopify_backfill] Fetching page ${page}${pageInfo ? ' (pagination)' : currentSinceId ? ` (since_id: ${currentSinceId})` : ''}...`);
 
     const res = await fetch(url.toString(), {
       headers: {
@@ -271,8 +286,33 @@ async function fetchShopifyOrdersWithPagination(params: {
     const body = await res.json();
     const orders = (body.orders ?? []) as ShopifyOrder[];
 
-    allOrders.push(...orders);
-    console.log(`[shopify_backfill] Fetched ${orders.length} orders (total: ${allOrders.length})`);
+    if (orders.length === 0) {
+      break;
+    }
+
+    // Filter orders by date locally to ensure we get all orders in the range
+    // This is important because Shopify API pagination may not respect date filters fully
+    let filteredOrders = orders;
+    if (sinceDateObj || untilDateObj) {
+      filteredOrders = orders.filter((order) => {
+        // Check both created_at and processed_at
+        const created = order.created_at ? new Date(order.created_at) : null;
+        const processed = order.processed_at ? new Date(order.processed_at) : null;
+        
+        // Order matches if either created_at or processed_at is in range
+        const matchesSince = !sinceDateObj || 
+          (created && created >= sinceDateObj) || 
+          (processed && processed >= sinceDateObj);
+        const matchesUntil = !untilDateObj || 
+          (created && created <= untilDateObj) || 
+          (processed && processed <= untilDateObj);
+        
+        return matchesSince && matchesUntil;
+      });
+    }
+
+    allOrders.push(...filteredOrders);
+    console.log(`[shopify_backfill] Fetched ${orders.length} orders (${filteredOrders.length} in date range, total: ${allOrders.length})`);
 
     // Check for next page via Link header
     const linkHeader = res.headers.get('link');
@@ -282,6 +322,14 @@ async function fetchShopifyOrdersWithPagination(params: {
         const nextUrl = new URL(nextMatch[1]);
         pageInfo = nextUrl.searchParams.get('page_info');
         if (!pageInfo) {
+          // If no page_info but we got orders, try using since_id with last order ID
+          const lastOrderId = parseInt(orders[orders.length - 1].id.toString());
+          if (!Number.isNaN(lastOrderId) && lastOrderId > (currentSinceId || 0)) {
+            currentSinceId = lastOrderId;
+            pageInfo = null; // Reset to use since_id
+            page++;
+            continue;
+          }
           break;
         }
         page++;
@@ -289,7 +337,19 @@ async function fetchShopifyOrdersWithPagination(params: {
         break;
       }
     } else {
-      // No next page
+      // No next page link, but check if we might have hit API limit
+      // Shopify API limit is ~50 pages (12,500 orders)
+      if (page >= 49 && orders.length === 250) {
+        // Likely hit API limit, try using since_id
+        const lastOrderId = parseInt(orders[orders.length - 1].id.toString());
+        if (!Number.isNaN(lastOrderId) && lastOrderId > (currentSinceId || 0)) {
+          console.log(`[shopify_backfill] Possible API limit reached, switching to since_id pagination...`);
+          currentSinceId = lastOrderId;
+          pageInfo = null; // Reset to use since_id
+          page++;
+          continue;
+        }
+      }
       break;
     }
   }
@@ -396,79 +456,278 @@ async function main() {
 
   console.log(`[shopify_backfill] Access token decrypted successfully\n`);
 
-  // Split date range into monthly chunks to avoid API limits
-  // Shopify API can have issues with large date ranges
-  // Also split into smaller weekly chunks if monthly chunks don't work
-  const dateChunks: Array<{ since: string; until: string }> = [];
   const startDate = new Date(since);
   const endDate = new Date(until);
   
-  // Use weekly chunks for better reliability - Shopify API can miss orders with monthly chunks
-  let currentStart = new Date(startDate);
-  while (currentStart <= endDate) {
-    const currentEnd = new Date(currentStart);
-    currentEnd.setDate(currentEnd.getDate() + 6); // 7 days (week)
+  // Try fetching without date filter first to see if Shopify API limits results
+  // If we get fewer orders than expected, we'll split into smaller chunks
+  console.log(`[shopify_backfill] Attempting to fetch orders without date filter first...`);
+  
+  const allOrdersWithoutFilter = await fetchShopifyOrdersWithPagination({
+    shopDomain,
+    accessToken,
+    // No date filter - fetch all orders
+  });
+  
+  console.log(`[shopify_backfill] Fetched ${allOrdersWithoutFilter.length} total orders without date filter`);
+  
+  // Shopify API has a limit of ~50 pages (12,500 orders) per query
+  // If we got close to this limit, use date-based chunks instead of since_id
+  // since_id doesn't work well when Shopify returns orders in reverse chronological order
+  const SHOPIFY_API_MAX_ORDERS = 12500;
+  const mightBeLimited = allOrdersWithoutFilter.length >= SHOPIFY_API_MAX_ORDERS - 1000; // Close to limit
+  
+  let allOrdersWithDateFilter: ShopifyOrder[] = [];
+  
+  if (mightBeLimited) {
+    console.log(`[shopify_backfill] ⚠️  API limit reached (${allOrdersWithoutFilter.length} orders). Using monthly date chunks instead...\n`);
     
-    if (currentEnd > endDate) {
-      currentEnd.setTime(endDate.getTime());
-    }
+    // Filter initial batch
+    const filterSinceDate = new Date(`${since}T00:00:00`);
+    const filterUntilDate = new Date(`${until}T23:59:59`);
     
-    const sinceStr = currentStart.toISOString().slice(0, 10);
-    const untilStr = currentEnd.toISOString().slice(0, 10);
-    
-    dateChunks.push({
-      since: sinceStr,
-      until: untilStr,
+    const initialFiltered = allOrdersWithoutFilter.filter((order) => {
+      const created = order.created_at ? new Date(order.created_at) : null;
+      const processed = order.processed_at ? new Date(order.processed_at) : null;
+      const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
+      const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
+      return matchesSince && matchesUntil;
     });
     
-    currentStart = new Date(currentEnd);
-    currentStart.setDate(currentStart.getDate() + 1); // Start of next week
-  }
-
-  console.log(`[shopify_backfill] Split into ${dateChunks.length} weekly chunks for better API reliability\n`);
-
-  // Fetch orders in chunks
-  let allShopifyOrders: ShopifyOrder[] = [];
-  for (let i = 0; i < dateChunks.length; i++) {
-    const chunk = dateChunks[i];
-    console.log(`\n[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
+    allOrdersWithDateFilter.push(...initialFiltered);
+    console.log(`[shopify_backfill] Initial batch filtered: ${initialFiltered.length} orders in date range`);
     
-    const chunkOrders = await fetchShopifyOrdersWithPagination({
-      shopDomain,
-      accessToken,
-      since: chunk.since,
-      until: chunk.until,
+    // Use monthly chunks for remaining date range
+    const dateChunks: Array<{ since: string; until: string }> = [];
+    let currentStart = new Date(startDate);
+    while (currentStart <= endDate) {
+      const currentEnd = new Date(currentStart);
+      currentEnd.setMonth(currentEnd.getMonth() + 1);
+      currentEnd.setDate(0); // Last day of currentStart month
+      
+      if (currentEnd > endDate) {
+        currentEnd.setTime(endDate.getTime());
+      }
+      
+      const sinceStr = currentStart.toISOString().slice(0, 10);
+      const untilStr = currentEnd.toISOString().slice(0, 10);
+      
+      dateChunks.push({
+        since: sinceStr,
+        until: untilStr,
+      });
+      
+      currentStart = new Date(currentEnd);
+      currentStart.setDate(currentStart.getDate() + 1); // Start of next month
+    }
+
+    console.log(`[shopify_backfill] Processing ${dateChunks.length} monthly chunks...\n`);
+
+    // Fetch orders in chunks
+    for (let i = 0; i < dateChunks.length; i++) {
+      const chunk = dateChunks[i];
+      console.log(`[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
+      
+      const chunkOrders = await fetchShopifyOrdersWithPagination({
+        shopDomain,
+        accessToken,
+        since: chunk.since,
+        until: chunk.until,
+      });
+      
+      console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
+      allOrdersWithDateFilter.push(...chunkOrders);
+      
+      // Add small delay to avoid rate limiting
+      if (i < dateChunks.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+    }
+    
+    console.log(`[shopify_backfill] Fetched ${allOrdersWithDateFilter.length} total orders in date range ${since} to ${until}\n`);
+  } else if (allOrdersWithoutFilter.length > 0) {
+    console.log(`[shopify_backfill] ⚠️  Possible API limit reached (${allOrdersWithoutFilter.length} orders). Continuing with since_id (no date filter)...`);
+    
+    // Get last order ID and continue fetching WITHOUT date filters (since_id doesn't work well with date filters)
+    // We'll filter locally after fetching
+    const lastOrder = allOrdersWithoutFilter[allOrdersWithoutFilter.length - 1];
+    let lastOrderId = parseInt(lastOrder.id.toString());
+    
+    // Filter initial batch
+    const filterSinceDate = new Date(`${since}T00:00:00`);
+    const filterUntilDate = new Date(`${until}T23:59:59`);
+    
+    const initialFiltered = allOrdersWithoutFilter.filter((order) => {
+      const created = order.created_at ? new Date(order.created_at) : null;
+      const processed = order.processed_at ? new Date(order.processed_at) : null;
+      const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
+      const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
+      return matchesSince && matchesUntil;
     });
     
-    console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
-    allShopifyOrders.push(...chunkOrders);
+    allOrdersWithDateFilter.push(...initialFiltered);
+    console.log(`[shopify_backfill] Initial batch filtered: ${initialFiltered.length} orders in date range`);
     
-    // Add small delay to avoid rate limiting (Shopify allows 40 requests per app per store per minute)
-    if (i < dateChunks.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay between chunks
+    // Continue fetching with since_id (NO date filters) until we get no more orders
+    let moreOrders = true;
+    let consecutiveEmptyBatches = 0;
+    while (moreOrders && consecutiveEmptyBatches < 3) {
+      console.log(`[shopify_backfill] Continuing fetch with since_id: ${lastOrderId} (no date filter)...`);
+      
+      const nextBatch = await fetchShopifyOrdersWithPagination({
+        shopDomain,
+        accessToken,
+        // No date filters - fetch all orders after since_id
+        sinceId: lastOrderId,
+      });
+      
+      if (nextBatch.length === 0) {
+        consecutiveEmptyBatches++;
+        if (consecutiveEmptyBatches >= 3) {
+          console.log(`[shopify_backfill] No more orders found after ${consecutiveEmptyBatches} empty batches`);
+          moreOrders = false;
+          break;
+        }
+      } else {
+        consecutiveEmptyBatches = 0;
+        
+        // Filter locally by date
+        const filteredBatch = nextBatch.filter((order) => {
+          const created = order.created_at ? new Date(order.created_at) : null;
+          const processed = order.processed_at ? new Date(order.processed_at) : null;
+          const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
+          const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
+          return matchesSince && matchesUntil;
+        });
+        
+        console.log(`[shopify_backfill] Fetched ${nextBatch.length} orders, ${filteredBatch.length} in date range`);
+        allOrdersWithDateFilter.push(...filteredBatch);
+        
+        const newLastOrder = nextBatch[nextBatch.length - 1];
+        const newLastOrderId = parseInt(newLastOrder.id.toString());
+        
+        if (Number.isNaN(newLastOrderId) || newLastOrderId <= lastOrderId) {
+          console.log(`[shopify_backfill] Order ID didn't increase (${newLastOrderId} <= ${lastOrderId}), stopping`);
+          moreOrders = false;
+        } else {
+          lastOrderId = newLastOrderId;
+          
+          // If all orders in this batch are before our date range, we might be done
+          // But continue a bit more to be safe
+          if (filteredBatch.length === 0 && nextBatch.length > 0) {
+            const lastOrderDate = new Date(nextBatch[nextBatch.length - 1].created_at);
+            if (lastOrderDate < filterSinceDate) {
+              console.log(`[shopify_backfill] All orders are before date range, stopping`);
+              moreOrders = false;
+            }
+          }
+        }
+      }
+      
+      // Small delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1500));
     }
-  }
-
-  console.log(`\n[shopify_backfill] Total orders fetched across all chunks: ${allShopifyOrders.length}`);
-
-  if (allShopifyOrders.length === 0) {
-    console.log('\n[shopify_backfill] No orders found for the specified period.');
-    return;
+    
+    console.log(`[shopify_backfill] Fetched ${allOrdersWithDateFilter.length} total orders in date range ${since} to ${until}\n`);
+  } else {
+    // Filter orders locally by date range
+    const filterSinceDate = new Date(`${since}T00:00:00`);
+    const filterUntilDate = new Date(`${until}T23:59:59`);
+    
+    allOrdersWithDateFilter = allOrdersWithoutFilter.filter((order) => {
+      const created = order.created_at ? new Date(order.created_at) : null;
+      const processed = order.processed_at ? new Date(order.processed_at) : null;
+      const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
+      const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
+      return matchesSince && matchesUntil;
+    });
+    
+    console.log(`[shopify_backfill] Filtered to ${allOrdersWithDateFilter.length} orders in date range ${since} to ${until}\n`);
   }
   
-  // Deduplicate orders by order_id (in case of overlap)
-  const uniqueOrders = new Map<string, ShopifyOrder>();
-  for (const order of allShopifyOrders) {
+  // Deduplicate orders by order_id before using them
+  const uniqueOrdersMap = new Map<string, ShopifyOrder>();
+  for (const order of allOrdersWithDateFilter) {
     const orderId = order.id.toString();
-    if (!uniqueOrders.has(orderId)) {
-      uniqueOrders.set(orderId, order);
+    if (!uniqueOrdersMap.has(orderId)) {
+      uniqueOrdersMap.set(orderId, order);
     }
   }
-  const shopifyOrders = Array.from(uniqueOrders.values());
+  const shopifyOrders = Array.from(uniqueOrdersMap.values());
   
-  if (shopifyOrders.length < allShopifyOrders.length) {
-    console.log(`[shopify_backfill] Removed ${allShopifyOrders.length - shopifyOrders.length} duplicate orders`);
+  if (shopifyOrders.length < allOrdersWithDateFilter.length) {
+    console.log(`[shopify_backfill] Removed ${allOrdersWithDateFilter.length - shopifyOrders.length} duplicate orders`);
   }
+  
+  if (shopifyOrders.length > 0) {
+    console.log(`[shopify_backfill] Using ${shopifyOrders.length} unique orders\n`);
+  } else {
+    // Fallback to weekly chunks if single request didn't work
+    console.log(`[shopify_backfill] No orders found in single request, trying weekly chunks...\n`);
+    
+    const dateChunks: Array<{ since: string; until: string }> = [];
+    let currentStart = new Date(startDate);
+    while (currentStart <= endDate) {
+      const currentEnd = new Date(currentStart);
+      currentEnd.setDate(currentEnd.getDate() + 6); // 7 days (week)
+      
+      if (currentEnd > endDate) {
+        currentEnd.setTime(endDate.getTime());
+      }
+      
+      const sinceStr = currentStart.toISOString().slice(0, 10);
+      const untilStr = currentEnd.toISOString().slice(0, 10);
+      
+      dateChunks.push({
+        since: sinceStr,
+        until: untilStr,
+      });
+      
+      currentStart = new Date(currentEnd);
+      currentStart.setDate(currentStart.getDate() + 1); // Start of next week
+    }
+
+    console.log(`[shopify_backfill] Split into ${dateChunks.length} weekly chunks for better API reliability\n`);
+
+    // Fetch orders in chunks
+    let allShopifyOrders: ShopifyOrder[] = [];
+    for (let i = 0; i < dateChunks.length; i++) {
+      const chunk = dateChunks[i];
+      console.log(`\n[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
+      
+      const chunkOrders = await fetchShopifyOrdersWithPagination({
+        shopDomain,
+        accessToken,
+        since: chunk.since,
+        until: chunk.until,
+      });
+      
+      console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
+      allShopifyOrders.push(...chunkOrders);
+      
+      // Add small delay to avoid rate limiting (Shopify allows 40 requests per app per store per minute)
+      if (i < dateChunks.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay between chunks
+      }
+    }
+
+    console.log(`\n[shopify_backfill] Total orders fetched across all chunks: ${allShopifyOrders.length}`);
+
+    // Deduplicate orders by order_id (in case of overlap)
+    const uniqueOrders = new Map<string, ShopifyOrder>();
+    for (const order of allShopifyOrders) {
+      const orderId = order.id.toString();
+      if (!uniqueOrders.has(orderId)) {
+        uniqueOrders.set(orderId, order);
+      }
+    }
+    shopifyOrders = Array.from(uniqueOrders.values());
+    
+    if (shopifyOrders.length < allShopifyOrders.length) {
+      console.log(`[shopify_backfill] Removed ${allShopifyOrders.length - shopifyOrders.length} duplicate orders`);
+    }
+  }
+
 
   // Map to database rows
   let orderRows = shopifyOrders.map((order) => mapShopifyOrderToRow(tenant.id, order));
