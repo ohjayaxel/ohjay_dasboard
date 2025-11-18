@@ -204,7 +204,13 @@ export async function handleShopifyOAuthCallback(options: {
     },
   });
 
-  // TODO: Register webhooks (orders/create, orders/updated) after verifying credentials.
+  // Register webhooks after connection is established
+  try {
+    await registerShopifyWebhooks(normalizedShop, tokenResponse.access_token);
+  } catch (error) {
+    console.error(`Failed to register Shopify webhooks for ${normalizedShop}:`, error);
+    // Don't fail OAuth callback if webhook registration fails - can be done manually later
+  }
 }
 
 export async function verifyShopifyWebhook(payload: string, hmacHeader: string | null): Promise<boolean> {
@@ -228,6 +234,74 @@ export async function getShopifyAccessToken(tenantId: string): Promise<string | 
   }
 
   return decryptSecret(connection.access_token_enc);
+}
+
+export async function registerShopifyWebhooks(shopDomain: string, accessToken: string): Promise<void> {
+  requireAppCredentials();
+
+  const normalizedShop = normalizeShopDomain(shopDomain);
+  const webhookBaseUrl = APP_BASE_URL.replace(/\/$/, '');
+  const webhookUrl = `${webhookBaseUrl}/api/webhooks/shopify`;
+
+  const webhooks = [
+    { topic: 'orders/create', address: webhookUrl },
+    { topic: 'orders/updated', address: webhookUrl },
+  ];
+
+  console.log(`[shopify] Registering webhooks for ${normalizedShop}:`, webhooks);
+
+  for (const webhook of webhooks) {
+    try {
+      // First, check if webhook already exists
+      const listUrl = `https://${normalizedShop}/admin/api/2023-10/webhooks.json?topic=${webhook.topic}`;
+      const listRes = await fetch(listUrl, {
+        headers: {
+          'X-Shopify-Access-Token': accessToken,
+        },
+      });
+
+      if (listRes.ok) {
+        const listBody = await listRes.json();
+        const existingWebhook = (listBody.webhooks || []).find(
+          (wh: any) => wh.address === webhook.address && wh.topic === webhook.topic,
+        );
+
+        if (existingWebhook) {
+          console.log(`[shopify] Webhook ${webhook.topic} already registered: ${existingWebhook.id}`);
+          continue;
+        }
+      }
+
+      // Register new webhook
+      const createUrl = `https://${normalizedShop}/admin/api/2023-10/webhooks.json`;
+      const createRes = await fetch(createUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': accessToken,
+        },
+        body: JSON.stringify({
+          webhook: {
+            topic: webhook.topic,
+            address: webhook.address,
+            format: 'json',
+          },
+        }),
+      });
+
+      if (!createRes.ok) {
+        const body = await createRes.text();
+        throw new Error(`Failed to register webhook ${webhook.topic}: ${createRes.status} ${body}`);
+      }
+
+      const createBody = await createRes.json();
+      console.log(`[shopify] Successfully registered webhook ${webhook.topic}:`, createBody.webhook?.id);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[shopify] Failed to register webhook ${webhook.topic} for ${normalizedShop}:`, errorMessage);
+      // Continue with next webhook even if one fails
+    }
+  }
 }
 
 export async function fetchShopifyOrders(params: {
