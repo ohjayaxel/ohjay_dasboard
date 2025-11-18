@@ -394,17 +394,74 @@ async function main() {
 
   console.log(`[shopify_backfill] Access token decrypted successfully\n`);
 
-  // Fetch orders
-  const shopifyOrders = await fetchShopifyOrdersWithPagination({
-    shopDomain,
-    accessToken,
-    since,
-    until,
-  });
+  // Split date range into monthly chunks to avoid API limits
+  // Shopify API can have issues with large date ranges
+  const dateChunks: Array<{ since: string; until: string }> = [];
+  const startDate = new Date(since);
+  const endDate = new Date(until);
+  
+  let currentStart = new Date(startDate);
+  while (currentStart <= endDate) {
+    const currentEnd = new Date(currentStart);
+    currentEnd.setMonth(currentEnd.getMonth() + 1);
+    currentEnd.setDate(0); // Last day of currentStart month
+    
+    if (currentEnd > endDate) {
+      currentEnd.setTime(endDate.getTime());
+    }
+    
+    dateChunks.push({
+      since: currentStart.toISOString().slice(0, 10),
+      until: currentEnd.toISOString().slice(0, 10),
+    });
+    
+    currentStart = new Date(currentEnd);
+    currentStart.setDate(currentStart.getDate() + 1); // Start of next month
+  }
 
-  if (shopifyOrders.length === 0) {
+  console.log(`[shopify_backfill] Split into ${dateChunks.length} monthly chunks for better API reliability\n`);
+
+  // Fetch orders in chunks
+  let allShopifyOrders: ShopifyOrder[] = [];
+  for (let i = 0; i < dateChunks.length; i++) {
+    const chunk = dateChunks[i];
+    console.log(`\n[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
+    
+    const chunkOrders = await fetchShopifyOrdersWithPagination({
+      shopDomain,
+      accessToken,
+      since: chunk.since,
+      until: chunk.until,
+    });
+    
+    console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
+    allShopifyOrders.push(...chunkOrders);
+    
+    // Add small delay to avoid rate limiting (Shopify allows 40 requests per app per store per minute)
+    if (i < dateChunks.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay between chunks
+    }
+  }
+
+  console.log(`\n[shopify_backfill] Total orders fetched across all chunks: ${allShopifyOrders.length}`);
+
+  if (allShopifyOrders.length === 0) {
     console.log('\n[shopify_backfill] No orders found for the specified period.');
     return;
+  }
+  
+  // Deduplicate orders by order_id (in case of overlap)
+  const uniqueOrders = new Map<string, ShopifyOrder>();
+  for (const order of allShopifyOrders) {
+    const orderId = order.id.toString();
+    if (!uniqueOrders.has(orderId)) {
+      uniqueOrders.set(orderId, order);
+    }
+  }
+  const shopifyOrders = Array.from(uniqueOrders.values());
+  
+  if (shopifyOrders.length < allShopifyOrders.length) {
+    console.log(`[shopify_backfill] Removed ${allShopifyOrders.length - shopifyOrders.length} duplicate orders`);
   }
 
   // Map to database rows
