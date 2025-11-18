@@ -246,10 +246,12 @@ async function fetchShopifyOrdersWithPagination(params: {
       // On first page, we can set status and date filters
       url.searchParams.set('status', 'any');
       if (params.since) {
-        url.searchParams.set('created_at_min', params.since);
+        // Add time to include full day
+        url.searchParams.set('created_at_min', `${params.since}T00:00:00`);
       }
       if (params.until) {
-        url.searchParams.set('created_at_max', params.until);
+        // Add time to include full day (23:59:59)
+        url.searchParams.set('created_at_max', `${params.until}T23:59:59`);
       }
     }
 
@@ -396,30 +398,34 @@ async function main() {
 
   // Split date range into monthly chunks to avoid API limits
   // Shopify API can have issues with large date ranges
+  // Also split into smaller weekly chunks if monthly chunks don't work
   const dateChunks: Array<{ since: string; until: string }> = [];
   const startDate = new Date(since);
   const endDate = new Date(until);
   
+  // Use weekly chunks for better reliability - Shopify API can miss orders with monthly chunks
   let currentStart = new Date(startDate);
   while (currentStart <= endDate) {
     const currentEnd = new Date(currentStart);
-    currentEnd.setMonth(currentEnd.getMonth() + 1);
-    currentEnd.setDate(0); // Last day of currentStart month
+    currentEnd.setDate(currentEnd.getDate() + 6); // 7 days (week)
     
     if (currentEnd > endDate) {
       currentEnd.setTime(endDate.getTime());
     }
     
+    const sinceStr = currentStart.toISOString().slice(0, 10);
+    const untilStr = currentEnd.toISOString().slice(0, 10);
+    
     dateChunks.push({
-      since: currentStart.toISOString().slice(0, 10),
-      until: currentEnd.toISOString().slice(0, 10),
+      since: sinceStr,
+      until: untilStr,
     });
     
     currentStart = new Date(currentEnd);
-    currentStart.setDate(currentStart.getDate() + 1); // Start of next month
+    currentStart.setDate(currentStart.getDate() + 1); // Start of next week
   }
 
-  console.log(`[shopify_backfill] Split into ${dateChunks.length} monthly chunks for better API reliability\n`);
+  console.log(`[shopify_backfill] Split into ${dateChunks.length} weekly chunks for better API reliability\n`);
 
   // Fetch orders in chunks
   let allShopifyOrders: ShopifyOrder[] = [];
