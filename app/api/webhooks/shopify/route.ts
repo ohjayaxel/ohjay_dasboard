@@ -41,7 +41,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
 
   const totalPrice = parseFloat(order.total_price || '0');
   const subtotalPrice = parseFloat(order.subtotal_price || '0');
-  const discountTotal = totalPrice - subtotalPrice;
+  const discountTotal = subtotalPrice - totalPrice; // Discount = subtotal - total
+
+  // gross_sales = subtotal_price (before discounts)
+  // net_sales = total_price (after discounts)
+  const grossSales = subtotalPrice > 0 ? subtotalPrice : null;
+  const netSales = totalPrice > 0 ? totalPrice : null;
 
   return {
     tenant_id: tenantId,
@@ -52,32 +57,88 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
     is_refund: isRefund,
+    gross_sales: grossSales,
+    net_sales: netSales,
+    is_new_customer: false, // Will be determined below
   };
 }
 
 function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
-  const byDate = new Map<string, { revenue: number; conversions: number }>();
+  const byDate = new Map<
+    string,
+    {
+      revenue: number;
+      gross_sales: number;
+      net_sales: number;
+      conversions: number;
+      new_customer_conversions: number;
+      returning_customer_conversions: number;
+      currencies: Map<string, number>; // Track currency frequency
+    }
+  >();
 
   for (const row of rows) {
     if (!row.processed_at) continue;
-    const existing = byDate.get(row.processed_at) ?? { revenue: 0, conversions: 0 };
-    existing.revenue += row.total_price ?? 0;
+    const existing = byDate.get(row.processed_at) ?? {
+      revenue: 0,
+      gross_sales: 0,
+      net_sales: 0,
+      conversions: 0,
+      new_customer_conversions: 0,
+      returning_customer_conversions: 0,
+      currencies: new Map<string, number>(),
+    };
+
     if (!row.is_refund) {
+      existing.revenue += row.total_price ?? 0;
+      existing.gross_sales += row.gross_sales ?? 0;
+      existing.net_sales += row.net_sales ?? 0;
       existing.conversions += 1;
+      
+      // Track currency frequency (use most common currency for the day)
+      if (row.currency) {
+        const count = existing.currencies.get(row.currency) ?? 0;
+        existing.currencies.set(row.currency, count + 1);
+      }
+      
+      if (row.is_new_customer) {
+        existing.new_customer_conversions += 1;
+      } else {
+        existing.returning_customer_conversions += 1;
+      }
     } else {
+      // For refunds, subtract from revenue and sales
       existing.revenue -= row.total_price ?? 0;
+      existing.gross_sales -= row.gross_sales ?? 0;
+      existing.net_sales -= row.net_sales ?? 0;
     }
     byDate.set(row.processed_at, existing);
   }
 
   return Array.from(byDate.entries()).map(([date, values]) => {
     const aov = values.conversions > 0 ? values.revenue / values.conversions : null;
+    
+    // Find most common currency for this date
+    let mostCommonCurrency: string | null = null;
+    let maxCount = 0;
+    for (const [currency, count] of values.currencies.entries()) {
+      if (count > maxCount) {
+        maxCount = count;
+        mostCommonCurrency = currency;
+      }
+    }
+    
     return {
       date,
       spend: 0,
       clicks: null,
       conversions: values.conversions || null,
       revenue: values.revenue || null,
+      gross_sales: values.gross_sales || null,
+      net_sales: values.net_sales || null,
+      new_customer_conversions: values.new_customer_conversions || null,
+      returning_customer_conversions: values.returning_customer_conversions || null,
+      currency: mostCommonCurrency,
       aov,
       cos: null,
       roas: null,
@@ -90,7 +151,41 @@ async function processWebhookOrder(
   tenantId: string,
   order: ShopifyOrder,
 ) {
-  const orderRow = mapShopifyOrderToRow(tenantId, order);
+  let orderRow = mapShopifyOrderToRow(tenantId, order);
+
+  // Determine if customer is new or returning
+  if (orderRow.customer_id && orderRow.processed_at) {
+    // Check if there's an earlier order for this customer
+    const { data: earlierOrders, error: lookupError } = await client
+      .from('shopify_orders')
+      .select('processed_at')
+      .eq('tenant_id', tenantId)
+      .eq('customer_id', orderRow.customer_id)
+      .not('processed_at', 'is', null)
+      .lt('processed_at', orderRow.processed_at)
+      .limit(1);
+
+    if (lookupError) {
+      logger.warn(
+        {
+          route: 'shopify_webhook',
+          action: 'lookup_customer',
+          tenantId,
+          orderId: order.id,
+          customerId: orderRow.customer_id,
+          error_message: lookupError.message,
+        },
+        'Failed to lookup customer order history',
+      );
+      // Default to false if lookup fails
+      orderRow.is_new_customer = false;
+    } else {
+      // If no earlier orders found, this is a new customer
+      orderRow.is_new_customer = !earlierOrders || earlierOrders.length === 0;
+    }
+  } else {
+    orderRow.is_new_customer = false;
+  }
 
   // Upsert order
   const { error: upsertError } = await client.from('shopify_orders').upsert(orderRow, {
@@ -129,7 +224,11 @@ async function processWebhookOrder(
     const allOrderRows = (allOrdersForDate || []).map((o) => ({
       processed_at: o.processed_at,
       total_price: o.total_price,
+      gross_sales: o.gross_sales,
+      net_sales: o.net_sales,
+      currency: o.currency,
       is_refund: o.is_refund,
+      is_new_customer: o.is_new_customer ?? false,
     }));
 
     const aggregates = aggregateKpis(allOrderRows);
@@ -143,6 +242,11 @@ async function processWebhookOrder(
         clicks: kpiRow.clicks,
         conversions: kpiRow.conversions,
         revenue: kpiRow.revenue,
+        gross_sales: kpiRow.gross_sales,
+        net_sales: kpiRow.net_sales,
+        new_customer_conversions: kpiRow.new_customer_conversions,
+        returning_customer_conversions: kpiRow.returning_customer_conversions,
+        currency: kpiRow.currency,
         aov: kpiRow.aov,
         cos: kpiRow.cos,
         roas: kpiRow.roas,

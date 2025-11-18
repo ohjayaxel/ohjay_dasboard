@@ -6,23 +6,34 @@ export const revalidate = 60
 
 type PageProps = {
   params: Promise<{ tenantSlug: string }>
+  searchParams?: Promise<Record<string, string | string[] | undefined>>
 }
 
 export default async function ShopifyDashboardPage(props: PageProps) {
-  const { tenantSlug } = await props.params
+  const [{ tenantSlug }, rawSearchParams] = await Promise.all([
+    props.params,
+    props.searchParams ?? Promise.resolve({}),
+  ])
   const tenantId = await resolveTenantId(tenantSlug)
 
   const today = new Date()
   const startWindow = new Date(today)
   startWindow.setDate(startWindow.getDate() - 29)
 
-  const from = startWindow.toISOString().slice(0, 10)
-  const to = today.toISOString().slice(0, 10)
+  const defaultFrom = startWindow.toISOString().slice(0, 10)
+  const defaultTo = today.toISOString().slice(0, 10)
+
+  const fromParam = rawSearchParams?.from
+  const toParam = rawSearchParams?.to
+
+  const from = typeof fromParam === 'string' && fromParam.length > 0 ? fromParam : defaultFrom
+  const to = typeof toParam === 'string' && toParam.length > 0 ? toParam : defaultTo
 
   const { totals, series, currency } = await getKpiDaily({ tenantId, from, to, source: 'shopify' })
 
-  const numberLocale = 'en-US'
-  const currencyCode = currency ?? 'USD'
+  // Use Swedish locale for SEK, otherwise fallback to en-US
+  const currencyCode = currency ?? 'SEK' // Default to SEK for Swedish stores
+  const numberLocale = currencyCode === 'SEK' ? 'sv-SE' : 'en-US'
 
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)

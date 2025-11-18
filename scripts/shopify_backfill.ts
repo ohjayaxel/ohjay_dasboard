@@ -61,6 +61,9 @@ type ShopifyOrderRow = {
   currency: string | null;
   customer_id: string | null;
   is_refund: boolean;
+  gross_sales: number | null;
+  net_sales: number | null;
+  is_new_customer: boolean;
 };
 
 function normalizeShopDomain(domain: string): string {
@@ -80,7 +83,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
 
   const totalPrice = parseFloat(order.total_price || '0');
   const subtotalPrice = parseFloat(order.subtotal_price || '0');
-  const discountTotal = totalPrice - subtotalPrice;
+  const discountTotal = subtotalPrice - totalPrice; // Discount = subtotal - total
+
+  // gross_sales = subtotal_price (before discounts)
+  // net_sales = total_price (after discounts)
+  const grossSales = subtotalPrice > 0 ? subtotalPrice : null;
+  const netSales = totalPrice > 0 ? totalPrice : null;
 
   return {
     tenant_id: tenantId,
@@ -91,32 +99,88 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
     is_refund: isRefund,
+    gross_sales: grossSales,
+    net_sales: netSales,
+    is_new_customer: false, // Will be determined during batch processing
   };
 }
 
 function aggregateKpis(rows: ShopifyOrderRow[]) {
-  const byDate = new Map<string, { revenue: number; conversions: number }>();
+  const byDate = new Map<
+    string,
+    {
+      revenue: number;
+      gross_sales: number;
+      net_sales: number;
+      conversions: number;
+      new_customer_conversions: number;
+      returning_customer_conversions: number;
+      currencies: Map<string, number>; // Track currency frequency
+    }
+  >();
 
   for (const row of rows) {
     if (!row.processed_at) continue;
-    const existing = byDate.get(row.processed_at) ?? { revenue: 0, conversions: 0 };
-    existing.revenue += row.total_price ?? 0;
+    const existing = byDate.get(row.processed_at) ?? {
+      revenue: 0,
+      gross_sales: 0,
+      net_sales: 0,
+      conversions: 0,
+      new_customer_conversions: 0,
+      returning_customer_conversions: 0,
+      currencies: new Map<string, number>(),
+    };
+
     if (!row.is_refund) {
+      existing.revenue += row.total_price ?? 0;
+      existing.gross_sales += row.gross_sales ?? 0;
+      existing.net_sales += row.net_sales ?? 0;
       existing.conversions += 1;
+      
+      // Track currency frequency (use most common currency for the day)
+      if (row.currency) {
+        const count = existing.currencies.get(row.currency) ?? 0;
+        existing.currencies.set(row.currency, count + 1);
+      }
+      
+      if (row.is_new_customer) {
+        existing.new_customer_conversions += 1;
+      } else {
+        existing.returning_customer_conversions += 1;
+      }
     } else {
+      // For refunds, subtract from revenue and sales
       existing.revenue -= row.total_price ?? 0;
+      existing.gross_sales -= row.gross_sales ?? 0;
+      existing.net_sales -= row.net_sales ?? 0;
     }
     byDate.set(row.processed_at, existing);
   }
 
   return Array.from(byDate.entries()).map(([date, values]) => {
     const aov = values.conversions > 0 ? values.revenue / values.conversions : null;
+    
+    // Find most common currency for this date
+    let mostCommonCurrency: string | null = null;
+    let maxCount = 0;
+    for (const [currency, count] of values.currencies.entries()) {
+      if (count > maxCount) {
+        maxCount = count;
+        mostCommonCurrency = currency;
+      }
+    }
+    
     return {
       date,
       spend: 0,
       clicks: null,
       conversions: values.conversions || null,
       revenue: values.revenue || null,
+      gross_sales: values.gross_sales || null,
+      net_sales: values.net_sales || null,
+      new_customer_conversions: values.new_customer_conversions || null,
+      returning_customer_conversions: values.returning_customer_conversions || null,
+      currency: mostCommonCurrency,
       aov,
       cos: null,
       roas: null,
@@ -139,22 +203,20 @@ async function fetchShopifyOrdersWithPagination(params: {
 
   while (true) {
     const url = new URL(`https://${normalizedShop}/admin/api/2023-10/orders.json`);
-    url.searchParams.set('status', 'any');
     url.searchParams.set('limit', '250'); // Max limit per page
 
-    if (params.since && !pageInfo) {
-      // Only add created_at_min on first page
-      url.searchParams.set('created_at_min', params.since);
-    }
-    if (params.until && !pageInfo) {
-      // Only add created_at_max on first page
-      url.searchParams.set('created_at_max', params.until);
-    }
     if (pageInfo) {
+      // When using page_info, we can only set page_info and limit
       url.searchParams.set('page_info', pageInfo);
-      // Remove date filters when using pagination
-      url.searchParams.delete('created_at_min');
-      url.searchParams.delete('created_at_max');
+    } else {
+      // On first page, we can set status and date filters
+      url.searchParams.set('status', 'any');
+      if (params.since) {
+        url.searchParams.set('created_at_min', params.since);
+      }
+      if (params.until) {
+        url.searchParams.set('created_at_max', params.until);
+      }
     }
 
     console.log(`[shopify_backfill] Fetching page ${page}${pageInfo ? ' (pagination)' : ''}...`);
@@ -312,7 +374,78 @@ async function main() {
   }
 
   // Map to database rows
-  const orderRows = shopifyOrders.map((order) => mapShopifyOrderToRow(tenant.id, order));
+  let orderRows = shopifyOrders.map((order) => mapShopifyOrderToRow(tenant.id, order));
+
+  // Determine if customers are new or returning
+  // Sort orders by processed_at (oldest first) to process chronologically
+  orderRows.sort((a, b) => {
+    if (!a.processed_at) return 1;
+    if (!b.processed_at) return -1;
+    return a.processed_at.localeCompare(b.processed_at);
+  });
+
+  // Get all unique customer IDs from this batch
+  const customerIdsInBatch = new Set<string>();
+  orderRows.forEach((row) => {
+    if (row.customer_id) {
+      customerIdsInBatch.add(row.customer_id);
+    }
+  });
+
+  // Bulk check: Get earliest processed_at for each customer from database
+  const customerEarliestOrder = new Map<string, string | null>();
+  if (customerIdsInBatch.size > 0) {
+    const { data: existingOrders, error: lookupError } = await supabase
+      .from('shopify_orders')
+      .select('customer_id, processed_at')
+      .eq('tenant_id', tenant.id)
+      .in('customer_id', Array.from(customerIdsInBatch))
+      .not('customer_id', 'is', null)
+      .not('processed_at', 'is', null);
+
+    if (lookupError) {
+      console.warn(`[shopify_backfill] Failed to lookup existing orders: ${lookupError.message}`);
+    } else if (existingOrders) {
+      for (const order of existingOrders) {
+        const customerId = order.customer_id as string;
+        const processedAt = order.processed_at as string;
+        const currentEarliest = customerEarliestOrder.get(customerId);
+        if (!currentEarliest || (processedAt && processedAt < currentEarliest)) {
+          customerEarliestOrder.set(customerId, processedAt);
+        }
+      }
+    }
+  }
+
+  // Track customers seen in this batch chronologically
+  const customersSeenInBatch = new Map<string, string>();
+
+  // Determine is_new_customer for each order
+  orderRows = orderRows.map((row) => {
+    if (!row.customer_id || !row.processed_at) {
+      return { ...row, is_new_customer: false };
+    }
+
+    // Check if we've seen this customer earlier in this batch
+    const seenInBatchAt = customersSeenInBatch.get(row.customer_id);
+    if (seenInBatchAt && seenInBatchAt < row.processed_at) {
+      customersSeenInBatch.set(row.customer_id, seenInBatchAt);
+      return { ...row, is_new_customer: false };
+    }
+
+    // Check if customer exists in database with earlier order
+    const earliestInDb = customerEarliestOrder.get(row.customer_id);
+    if (earliestInDb && earliestInDb < row.processed_at) {
+      customersSeenInBatch.set(row.customer_id, earliestInDb);
+      return { ...row, is_new_customer: false };
+    }
+
+    // This is a new customer (first order in batch and no earlier order in DB)
+    if (!seenInBatchAt) {
+      customersSeenInBatch.set(row.customer_id, row.processed_at);
+    }
+    return { ...row, is_new_customer: true };
+  });
 
   console.log(`\n[shopify_backfill] Mapped ${orderRows.length} orders to database rows`);
 
@@ -345,6 +478,11 @@ async function main() {
     clicks: row.clicks,
     conversions: row.conversions,
     revenue: row.revenue,
+    gross_sales: row.gross_sales,
+    net_sales: row.net_sales,
+    new_customer_conversions: row.new_customer_conversions,
+    returning_customer_conversions: row.returning_customer_conversions,
+    currency: row.currency,
     aov: row.aov,
     cos: row.cos,
     roas: row.roas,

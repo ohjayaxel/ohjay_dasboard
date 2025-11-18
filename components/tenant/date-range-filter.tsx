@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState, useTransition } from 'react'
+import { useEffect, useMemo, useState, useTransition } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 
 import { Button } from '@/components/ui/button'
@@ -32,6 +32,19 @@ export function TenantDateRangeFilter() {
 
   const [from, setFrom] = useState(initialRange.from)
   const [to, setTo] = useState(initialRange.to)
+
+  // Sync state with URL params when they change
+  useEffect(() => {
+    const currentFrom = searchParams.get('from')
+    const currentTo = searchParams.get('to')
+    const defaults = getLast30DayRange()
+    
+    const newFrom = currentFrom ?? defaults.from
+    const newTo = currentTo ?? defaults.to
+    
+    setFrom((prev) => newFrom !== prev ? newFrom : prev)
+    setTo((prev) => newTo !== prev ? newTo : prev)
+  }, [searchParams])
 
   const disabled = isPending
 
