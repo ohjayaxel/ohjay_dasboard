@@ -112,9 +112,8 @@ export default async function TenantOverviewPage(props: PageProps) {
 
       <OverviewChart
         data={series}
-        formatCurrency={formatCurrency}
-        formatNumber={formatNumber}
-        formatRatio={formatRatio}
+        currencyCode={currencyCode}
+        numberLocale={numberLocale}
       />
 
       <Card>
@@ -126,9 +125,8 @@ export default async function TenantOverviewPage(props: PageProps) {
         <CardContent>
           <OverviewTable
             data={series}
-            formatCurrency={formatCurrency}
-            formatNumber={formatNumber}
-            formatRatio={formatRatio}
+            currencyCode={currencyCode}
+            numberLocale={numberLocale}
           />
         </CardContent>
       </Card>

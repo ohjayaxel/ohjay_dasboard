@@ -24,18 +24,36 @@ import type { OverviewDataPoint } from "@/lib/data/agg"
 
 type OverviewTableProps = {
   data: OverviewDataPoint[]
-  formatCurrency: (value: number | null) => string
-  formatNumber: (value: number | null) => string
-  formatRatio: (value: number | null) => string
+  currencyCode: string
+  numberLocale: string
 }
 
 export function OverviewTable({
   data,
-  formatCurrency,
-  formatNumber,
-  formatRatio,
+  currencyCode,
+  numberLocale,
 }: OverviewTableProps) {
   const [sorting, setSorting] = React.useState<SortingState>([])
+
+  const formatCurrency = React.useCallback((value: number | null) => {
+    return value !== null && Number.isFinite(value)
+      ? new Intl.NumberFormat(numberLocale, {
+          style: 'currency',
+          currency: currencyCode,
+          maximumFractionDigits: 0,
+        }).format(value)
+      : '—'
+  }, [currencyCode, numberLocale])
+
+  const formatNumber = React.useCallback((value: number | null) => {
+    return value !== null && Number.isFinite(value)
+      ? new Intl.NumberFormat(numberLocale).format(value)
+      : '0'
+  }, [numberLocale])
+
+  const formatRatio = React.useCallback((value: number | null) => {
+    return value === null || Number.isNaN(value) ? '—' : value.toFixed(2)
+  }, [])
 
   const columns: ColumnDef<OverviewDataPoint>[] = React.useMemo(
     () => [

@@ -27,35 +27,52 @@ import type { OverviewDataPoint } from "@/lib/data/agg"
 type MetricOption = {
   key: keyof OverviewDataPoint
   label: string
-  format: (value: number | null) => string
 }
 
 type OverviewChartProps = {
   data: OverviewDataPoint[]
-  formatCurrency: (value: number | null) => string
-  formatNumber: (value: number | null) => string
-  formatRatio: (value: number | null) => string
+  currencyCode: string
+  numberLocale: string
 }
 
 const metricOptions: MetricOption[] = [
-  { key: "net_sales", label: "Net Sales", format: (v) => String(v) },
-  { key: "gross_sales", label: "Gross Sales", format: (v) => String(v) },
-  { key: "new_customer_net_sales", label: "New Customer Net Sales", format: (v) => String(v) },
-  { key: "marketing_spend", label: "Marketing Spend", format: (v) => String(v) },
-  { key: "amer", label: "aMER", format: (v) => String(v ?? 0) },
-  { key: "orders", label: "Orders", format: (v) => String(v) },
-  { key: "aov", label: "AOV", format: (v) => String(v ?? 0) },
+  { key: "net_sales", label: "Net Sales" },
+  { key: "gross_sales", label: "Gross Sales" },
+  { key: "new_customer_net_sales", label: "New Customer Net Sales" },
+  { key: "marketing_spend", label: "Marketing Spend" },
+  { key: "amer", label: "aMER" },
+  { key: "orders", label: "Orders" },
+  { key: "aov", label: "AOV" },
 ]
 
 export function OverviewChart({
   data,
-  formatCurrency,
-  formatNumber,
-  formatRatio,
+  currencyCode,
+  numberLocale,
 }: OverviewChartProps) {
   const [selectedMetric, setSelectedMetric] = React.useState<keyof OverviewDataPoint>("net_sales")
 
   const selectedOption = metricOptions.find((opt) => opt.key === selectedMetric) ?? metricOptions[0]
+
+  const formatCurrency = React.useCallback((value: number | null) => {
+    return value !== null && Number.isFinite(value)
+      ? new Intl.NumberFormat(numberLocale, {
+          style: 'currency',
+          currency: currencyCode,
+          maximumFractionDigits: 0,
+        }).format(value)
+      : '—'
+  }, [currencyCode, numberLocale])
+
+  const formatNumber = React.useCallback((value: number | null) => {
+    return value !== null && Number.isFinite(value)
+      ? new Intl.NumberFormat(numberLocale).format(value)
+      : '0'
+  }, [numberLocale])
+
+  const formatRatio = React.useCallback((value: number | null) => {
+    return value === null || Number.isNaN(value) ? '—' : value.toFixed(2)
+  }, [])
 
   const chartData = data.map((point) => ({
     date: point.date,
@@ -69,7 +86,7 @@ export function OverviewChart({
     },
   } satisfies ChartConfig
 
-  const formatValue = (value: number) => {
+  const formatValue = React.useCallback((value: number) => {
     if (selectedMetric === "net_sales" || selectedMetric === "gross_sales" || 
         selectedMetric === "new_customer_net_sales" || selectedMetric === "marketing_spend" || 
         selectedMetric === "aov") {
@@ -79,7 +96,7 @@ export function OverviewChart({
       return formatRatio(value)
     }
     return formatNumber(value)
-  }
+  }, [selectedMetric, formatCurrency, formatNumber, formatRatio])
 
   return (
     <Card>
