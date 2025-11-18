@@ -15,16 +15,29 @@ function getEnvVar(key: string) {
 }
 
 function createSupabaseClient(): SupabaseClient {
-  const url = getEnvVar('SUPABASE_URL');
-  const serviceRole = getEnvVar('SUPABASE_SERVICE_ROLE_KEY');
+  // Try secrets first, then fall back to automatic Supabase environment variables
+  const url = Deno.env.get('SUPABASE_URL') || 
+              Deno.env.get('SUPABASE_PROJECT_URL') || 
+              getEnvVar('SUPABASE_URL');
+  
+  const serviceRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || 
+                      Deno.env.get('SUPABASE_ANON_KEY') || 
+                      getEnvVar('SUPABASE_SERVICE_ROLE_KEY');
 
   return createClient(url, serviceRole, {
     auth: { persistSession: false },
   });
 }
 
+type BufferJson = {
+  type: 'Buffer'
+  data: number[]
+}
+
 type ShopifyConnection = {
+  id: string
   tenant_id: string;
+  access_token_enc: Uint8Array | string | null;
   meta: Record<string, any> | null;
 };
 
@@ -46,21 +59,218 @@ type JobResult = {
   inserted?: number;
 };
 
-function mockShopifyOrders(tenantId: string): ShopifyOrderRow[] {
-  const orderId = `mock-order-${crypto.randomUUID()}`;
-  const processedAt = new Date().toISOString().slice(0, 10);
-  return [
-    {
-      tenant_id: tenantId,
-      order_id: orderId,
-      processed_at: processedAt,
-      total_price: 220.4,
-      discount_total: 12.5,
-      currency: 'USD',
-      customer_id: 'mock-customer-id',
-      is_refund: false,
+type ShopifyOrder = {
+  id: number;
+  order_number: number;
+  processed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  total_price: string;
+  subtotal_price: string;
+  total_discounts: string;
+  total_tax: string;
+  currency: string;
+  customer: { id: number } | null;
+  email: string | null;
+  financial_status: string;
+  fulfillment_status: string | null;
+  refunds?: Array<{ id: number; created_at: string; refund_line_items: Array<{ subtotal: string }> }>;
+};
+
+const KEY_LENGTH = 32;
+const IV_LENGTH = 12;
+const AUTH_TAG_LENGTH = 16;
+
+function parseEncryptionKey(): Uint8Array {
+  const rawKey = getEnvVar('ENCRYPTION_KEY');
+
+  // Try hex
+  if (/^[0-9a-fA-F]+$/.test(rawKey) && rawKey.length === KEY_LENGTH * 2) {
+    return new Uint8Array(
+      rawKey.match(/.{1,2}/g)!.map((byte) => parseInt(byte, 16))
+    );
+  }
+
+  // Try base64
+  try {
+    const decoded = Uint8Array.from(atob(rawKey), (c) => c.charCodeAt(0));
+    if (decoded.length === KEY_LENGTH) {
+      return decoded;
+    }
+  } catch {
+    // Fall through
+  }
+
+  // Try UTF-8 (should be exact length)
+  const utf8 = new TextEncoder().encode(rawKey);
+  if (utf8.length === KEY_LENGTH) {
+    return utf8;
+  }
+
+  throw new Error(`ENCRYPTION_KEY must be ${KEY_LENGTH} bytes after decoding.`);
+}
+
+function hexToUint8Array(hex: string): Uint8Array {
+  const matches = hex.match(/.{1,2}/g) ?? [];
+  const bytes = matches.map((byte) => parseInt(byte, 16));
+  return new Uint8Array(bytes);
+}
+
+function decodeBufferJsonString(value: string): Uint8Array | null {
+  try {
+    const parsed = JSON.parse(value) as BufferJson | null;
+    if (parsed?.type === 'Buffer' && Array.isArray(parsed.data)) {
+      return new Uint8Array(parsed.data);
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function coercePayloadToUint8Array(payload: Uint8Array | string | BufferJson | null): Uint8Array | null {
+  if (!payload) {
+    return null;
+  }
+
+  if (payload instanceof Uint8Array) {
+    return payload;
+  }
+
+  if (typeof payload === 'object' && payload.type === 'Buffer' && Array.isArray(payload.data)) {
+    return new Uint8Array(payload.data);
+  }
+
+  if (typeof payload === 'string') {
+    if (payload.startsWith('\\x')) {
+      const hexPayload = payload.slice(2);
+      const hexBuffer = hexToUint8Array(hexPayload);
+      const asString = new TextDecoder().decode(hexBuffer);
+      if (asString.startsWith('{') && asString.includes('"type":"Buffer"')) {
+        const parsed = decodeBufferJsonString(asString);
+        if (parsed) {
+          return parsed;
+        }
+      }
+      return hexBuffer;
+    }
+
+    if (payload.startsWith('{') && payload.includes('"type":"Buffer"')) {
+      const parsed = decodeBufferJsonString(payload);
+      if (parsed) {
+        return parsed;
+      }
+    }
+
+    try {
+      return Uint8Array.from(atob(payload), (c) => c.charCodeAt(0));
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+async function decryptSecret(payload: Uint8Array | string | BufferJson | null): Promise<string | null> {
+  const key = parseEncryptionKey();
+  const buffer = coercePayloadToUint8Array(payload);
+
+  if (!buffer || buffer.length < IV_LENGTH + AUTH_TAG_LENGTH) {
+    throw new Error('Encrypted payload too short to contain IV and auth tag.');
+  }
+
+  const iv = buffer.subarray(0, IV_LENGTH);
+  const authTag = buffer.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+  const encrypted = buffer.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+
+  const encryptedWithTag = new Uint8Array(encrypted.length + authTag.length);
+  encryptedWithTag.set(encrypted, 0);
+  encryptedWithTag.set(authTag, encrypted.length);
+
+  try {
+    const keyBuffer = await crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['decrypt']);
+
+    const decrypted = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv,
+        tagLength: AUTH_TAG_LENGTH * 8,
+      },
+      keyBuffer,
+      encryptedWithTag,
+    );
+
+    return new TextDecoder().decode(decrypted);
+  } catch (error) {
+    console.error('[sync-shopify] Failed to decrypt access token', {
+      payloadType: typeof payload,
+      bufferLength: buffer.length,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw new Error('Decryption failed');
+  }
+}
+
+async function fetchShopifyOrders(params: {
+  shopDomain: string;
+  accessToken: string;
+  since?: string;
+}): Promise<ShopifyOrder[]> {
+  const url = new URL(`https://${params.shopDomain}/admin/api/2023-10/orders.json`);
+  url.searchParams.set('status', 'any');
+  url.searchParams.set('limit', '250');
+  if (params.since) {
+    url.searchParams.set('created_at_min', params.since);
+  }
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      'X-Shopify-Access-Token': params.accessToken,
     },
-  ];
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Shopify orders fetch failed: ${res.status} ${body}`);
+  }
+
+  const body = await res.json();
+  return (body.orders ?? []) as ShopifyOrder[];
+}
+
+function normalizeShopDomain(domain: string): string {
+  return domain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase();
+}
+
+function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrderRow {
+  // Extract date from processed_at (format: "2024-01-15T10:30:00-05:00")
+  const processedAt = order.processed_at
+    ? new Date(order.processed_at).toISOString().slice(0, 10)
+    : null;
+
+  // Check if this is a refund by looking at refunds array
+  const isRefund = Array.isArray(order.refunds) && order.refunds.length > 0;
+
+  // Calculate discount_total (total_price - subtotal_price)
+  const totalPrice = parseFloat(order.total_price || '0');
+  const subtotalPrice = parseFloat(order.subtotal_price || '0');
+  const discountTotal = totalPrice - subtotalPrice;
+
+  return {
+    tenant_id: tenantId,
+    order_id: order.id.toString(),
+    processed_at: processedAt,
+    total_price: totalPrice || null,
+    discount_total: discountTotal || null,
+    currency: order.currency || null,
+    customer_id: order.customer?.id?.toString() || null,
+    is_refund: isRefund,
+  };
 }
 
 function aggregateKpis(rows: ShopifyOrderRow[]) {
@@ -121,11 +331,45 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
   await upsertJobLog(client, { tenantId, status: 'running', startedAt });
 
   try {
-    // TODO: integrate with Shopify Admin API using stored credentials.
-    const orders = mockShopifyOrders(tenantId);
+    // Get access token
+    const accessToken = await decryptSecret(connection.access_token_enc);
 
-    if (orders.length > 0) {
-      const { error: upsertError } = await client.from('shopify_orders').upsert(orders, {
+    if (!accessToken) {
+      throw new Error('No access token found for this connection.');
+    }
+
+    // Get shop domain from meta
+    const shopDomain = connection.meta?.store_domain || connection.meta?.shop;
+    if (!shopDomain || typeof shopDomain !== 'string') {
+      throw new Error('No shop domain found in connection metadata.');
+    }
+
+    const normalizedShop = normalizeShopDomain(shopDomain);
+
+    const syncStartDate = connection.meta?.sync_start_date;
+    const backfillSince = connection.meta?.backfill_since;
+    const since =
+      typeof backfillSince === 'string' && backfillSince.length > 0
+        ? backfillSince
+        : typeof syncStartDate === 'string' && syncStartDate.length > 0
+          ? syncStartDate
+          : undefined;
+
+    // Fetch orders from Shopify
+    console.log(`[sync-shopify] Fetching orders for tenant ${tenantId}, shop ${normalizedShop}, since ${since || 'all time'}`);
+    const shopifyOrders = await fetchShopifyOrders({
+      shopDomain: normalizedShop,
+      accessToken,
+      since,
+    });
+
+    console.log(`[sync-shopify] Fetched ${shopifyOrders.length} orders for tenant ${tenantId}`);
+
+    // Map to database rows
+    const orderRows = shopifyOrders.map((order) => mapShopifyOrderToRow(tenantId, order));
+
+    if (orderRows.length > 0) {
+      const { error: upsertError } = await client.from('shopify_orders').upsert(orderRows, {
         onConflict: 'tenant_id,order_id',
       });
 
@@ -133,7 +377,7 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
         throw new Error(upsertError.message);
       }
 
-      const aggregates = aggregateKpis(orders);
+      const aggregates = aggregateKpis(orderRows);
       const kpiRows = aggregates.map((row) => ({
         tenant_id: tenantId,
         date: row.date,
@@ -156,6 +400,30 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       }
     }
 
+    if (backfillSince) {
+      const clearedMeta = {
+        ...(connection.meta ?? {}),
+        backfill_since: null,
+      };
+
+      const { error: clearBackfillError } = await client
+        .from('connections')
+        .update({
+          meta: clearedMeta,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', connection.id);
+
+      if (clearBackfillError) {
+        console.error(
+          `[sync-shopify] Failed to clear Shopify backfill flag for tenant ${tenantId}:`,
+          clearBackfillError.message,
+        );
+      } else {
+        console.log(`[sync-shopify] Cleared Shopify backfill flag for tenant ${tenantId}`);
+      }
+    }
+
     await upsertJobLog(client, {
       tenantId,
       status: 'succeeded',
@@ -163,9 +431,10 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       finishedAt: new Date().toISOString(),
     });
 
-    return { tenantId, status: 'succeeded', inserted: orders.length };
+    return { tenantId, status: 'succeeded', inserted: orderRows.length };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    console.error(`[sync-shopify] Error processing tenant ${tenantId}:`, message);
     await upsertJobLog(client, {
       tenantId,
       status: 'failed',
@@ -178,14 +447,32 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
   }
 }
 
-serve(async () => {
+serve(async (request) => {
   try {
+    let tenantFilter: string | null = null;
+    if (request) {
+      try {
+        const payload = await request.json();
+        if (payload && typeof payload.tenantId === 'string' && payload.tenantId.length > 0) {
+          tenantFilter = payload.tenantId;
+        }
+      } catch {
+        // ignore invalid JSON
+      }
+    }
+
     const client = createSupabaseClient();
-    const { data, error } = await client
+    let query = client
       .from('connections')
-      .select('tenant_id, meta')
+      .select('id, tenant_id, access_token_enc, meta')
       .eq('source', SOURCE)
       .eq('status', 'connected');
+
+    if (tenantFilter) {
+      query = query.eq('tenant_id', tenantFilter);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       throw new Error(`Failed to list connections: ${error.message}`);
@@ -193,6 +480,12 @@ serve(async () => {
 
     const connections = (data as ShopifyConnection[]) ?? [];
     const results: JobResult[] = [];
+
+    console.log(
+      `[sync-shopify] Processing ${connections.length} connected Shopify tenants${
+        tenantFilter ? ` (filtered to tenant ${tenantFilter})` : ''
+      }`,
+    );
 
     for (const connection of connections) {
       const result = await processTenant(client, connection);

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createHmac } from 'crypto';
 
 import { handleShopifyOAuthCallback } from '@/lib/integrations/shopify';
+import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler';
 import { logger, withRequestContext } from '@/lib/logger';
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
 
@@ -280,6 +281,22 @@ export async function GET(request: NextRequest) {
           state,
           shop: normalizedShop,
         });
+
+        try {
+          await triggerSyncJobForTenant('shopify', tenantId);
+        } catch (syncError) {
+          logger.warn(
+            {
+              route: 'shopify_callback',
+              action: 'trigger_initial_sync',
+              endpoint: CALLBACK_ENDPOINT,
+              tenantId,
+              shop: normalizedShop,
+              error_message: syncError instanceof Error ? syncError.message : String(syncError),
+            },
+            'Failed to trigger initial Shopify sync after OAuth, will rely on cron job.',
+          );
+        }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error(

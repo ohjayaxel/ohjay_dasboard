@@ -10,6 +10,7 @@ import {
   triggerMetaSyncNow,
   updateMetaSelectedAccount,
   updateIntegrationSettings,
+  triggerShopifyBackfill,
 } from '@/app/(dashboard)/admin/actions'
 import { getAdminTenantBySlug } from '@/lib/admin/tenants'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
@@ -179,6 +180,8 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             return 'Två backfill-jobb skapade. Du ser statusen nedan.'
           case 'meta-backfill-triggered':
             return 'Meta-backfill startad. Data fylls på i bakgrunden.'
+      case 'shopify-backfill-triggered':
+        return 'Shopify-backfill startad. Data fylls på i bakgrunden.'
           case 'meta-account-updated':
             return 'Meta ad account selection saved.'
           default:
@@ -350,6 +353,39 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       </div>
     ) : null
 
+  const defaultShopifyBackfillSince = shopifySyncStartDate || '2025-01-01'
+  const shopifyBackfillForm =
+    shopify.status === 'connected' ? (
+      <form
+        action={triggerShopifyBackfill}
+        className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+      >
+        <input type="hidden" name="tenantId" value={tenant.id} />
+        <input type="hidden" name="tenantSlug" value={tenant.slug} />
+        <div className="space-y-2">
+          <Label htmlFor="shopify-backfill-since">Backfill från datum</Label>
+          <Input
+            id="shopify-backfill-since"
+            type="date"
+            name="since"
+            defaultValue={defaultShopifyBackfillSince}
+            className="h-10"
+            required
+          />
+          <p className="text-xs text-muted-foreground">
+            Hämtar ordrar från valt datum fram till idag en gång. Flaggan återställs automatiskt efter körning.
+          </p>
+        </div>
+        <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Backfillar...">
+          Kör backfill
+        </FormSubmitButton>
+      </form>
+    ) : (
+      <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm text-muted-foreground">
+        Koppla Shopify för att kunna backfilla historiska ordrar.
+      </div>
+    )
+
   const integrationSections = [
     {
       source: 'meta' as const,
@@ -401,7 +437,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       syncStartDate: shopifySyncStartDate,
       selectedKpis: shopifyDisplayKpis,
       preferencesHint: 'Define the Shopify import window and KPIs shown in reporting.',
-      extra: null,
+      extra: shopifyBackfillForm,
     },
   ]
 

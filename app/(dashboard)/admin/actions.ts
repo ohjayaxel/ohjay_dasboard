@@ -103,6 +103,16 @@ const triggerMetaBackfillSchema = z.object({
     .transform((value) => (typeof value === 'string' && value.trim().length > 0 ? value.trim() : null)),
 })
 
+const triggerShopifyBackfillSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+  since: z
+    .string({ required_error: 'Start date is required.' })
+    .min(1, { message: 'Start date is required.' }),
+})
+
 const INTEGRATION_SOURCES = ['meta', 'google_ads', 'shopify'] as const
 const integrationSourceEnum = z.enum(INTEGRATION_SOURCES)
 
@@ -117,6 +127,10 @@ const updateIntegrationSettingsSchema = z.object({
     .optional()
     .transform((value) => (value && value.length > 0 ? value : null)),
   kpis: z.array(z.string()).optional(),
+  shopifyBackfillSince: z
+    .string()
+    .optional()
+    .transform((value) => (value && value.length > 0 ? value : null)),
 })
 
 const slugify = (value: string) =>
@@ -932,6 +946,80 @@ export async function queueMetaBackfillJobs(formData: FormData) {
   await revalidateTenantViews(tenantId, tenantSlug)
 
   redirect(`/admin/tenants/${tenantSlug}/integrations?status=meta-backfill-queued`)
+}
+
+export async function triggerShopifyBackfill(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const parsed = triggerShopifyBackfillSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+    since: formData.get('since'),
+  })
+
+  if (!parsed.success) {
+    throw new Error(parsed.error.errors[0]?.message ?? 'Invalid Shopify backfill request.')
+  }
+
+  const { tenantId, tenantSlug, since } = parsed.data
+
+  const client = getSupabaseServiceClient()
+
+  const { data: connection, error: fetchError } = await client
+    .from('connections')
+    .select('id, status, meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', 'shopify')
+    .maybeSingle()
+
+  if (fetchError) {
+    throw new Error(`Failed to load Shopify connection: ${fetchError.message}`)
+  }
+
+  if (!connection) {
+    throw new Error('Shopify connection not initialized for this tenant.')
+  }
+
+  if ((connection.status as string | null) !== 'connected') {
+    throw new Error('Connect Shopify before running a backfill.')
+  }
+
+  const nextMeta = {
+    ...(connection.meta ?? {}),
+    backfill_since: since,
+  }
+
+  const { error: updateError } = await client
+    .from('connections')
+    .update({
+      meta: nextMeta,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', connection.id)
+
+  if (updateError) {
+    throw new Error(`Failed to schedule Shopify backfill: ${updateError.message}`)
+  }
+
+  try {
+    await triggerSyncJobForTenant('shopify', tenantId)
+  } catch (error) {
+    logger.error(
+      {
+        route: 'admin.shopify',
+        action: 'manual_backfill',
+        tenantId,
+        since,
+        error_message: error instanceof Error ? error.message : String(error),
+      },
+      'Failed to trigger Shopify backfill manually',
+    )
+    throw new Error('Failed to trigger Shopify sync. Check logs for details.')
+  }
+
+  await revalidateTenantViews(tenantId, tenantSlug)
+
+  redirect(`/admin/tenants/${tenantSlug}/integrations?status=shopify-backfill-triggered`)
 }
 
 const addPlatformAdminSchema = z.object({
