@@ -1656,14 +1656,43 @@ async function processTenant(
       console.log(`Skipping campaign catalog fetch for Skinome tenant ${tenantId} to avoid timeout`)
     }
 
-    const matrixResult = await runFullMatrix(
-      client,
-      tenantId,
-      preferredAccountId,
-      accessToken,
-      syncWindow.since,
-      syncWindow.until,
-    )
+    // Wrap runFullMatrix in try-catch to handle timeouts/permissions errors gracefully
+    // If it fails, we can still aggregate KPI from existing meta_insights_daily data
+    let matrixResult: MatrixRunResult
+    let matrixRunFailed = false
+    let matrixRunError: string | null = null
+    
+    try {
+      matrixResult = await runFullMatrix(
+        client,
+        tenantId,
+        preferredAccountId,
+        accessToken,
+        syncWindow.since,
+        syncWindow.until,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      matrixRunError = message
+      matrixRunFailed = true
+      
+      // Check if it's a permissions error - log but continue with fallback
+      if (message.includes('does not exist') || message.includes('cannot be loaded due to missing permissions')) {
+        console.warn(`Meta API permissions error for tenant ${tenantId}, account ${preferredAccountId}: ${message}`)
+        console.warn('Continuing with KPI aggregation from existing meta_insights_daily data')
+      } else {
+        console.error(`runFullMatrix failed for tenant ${tenantId}: ${message}`)
+      }
+      
+      // Create empty matrix result - we'll use fallback KPI aggregation
+      matrixResult = {
+        factRows: [],
+        accountRows: [],
+        windowSince: syncWindow.since,
+        windowUntil: syncWindow.until,
+        dailyRowCount: 0,
+      }
+    }
 
     if (campaignCatalog.length > 0) {
       const metaMap = new Map(
@@ -1695,7 +1724,8 @@ async function processTenant(
       }
     }
 
-    if (matrixResult.factRows.length > 0) {
+    // Only upsert factRows if runFullMatrix succeeded and returned data
+    if (matrixResult.factRows.length > 0 && !matrixRunFailed) {
       const { error: deleteError } = await client
         .from('meta_insights_levels')
         .delete()
@@ -1723,6 +1753,8 @@ async function processTenant(
         windowUntil: matrixResult.windowUntil,
         rows: matrixResult.factRows.length,
       })
+    } else if (matrixRunFailed) {
+      console.warn(`Skipping factRows upsert for tenant ${tenantId} because runFullMatrix failed`)
     }
 
     if (campaignCatalog.length > 0) {
@@ -1779,9 +1811,11 @@ async function processTenant(
         roas: row.roas,
         currency: row.currency ?? null,
       }))
-    } else if (mode === 'incremental') {
-      // Fallback: aggregate directly from meta_insights_daily for incremental sync
-      // when canonical combo (7d_click) is not available
+    } else {
+      // Fallback: always aggregate from meta_insights_daily if accountRows are missing
+      // This ensures KPI data is updated even if runFullMatrix fails, returns no accountRows,
+      // or if canonical combo (7d_click) is not available
+      // (previously only done for incremental mode, now done for both modes)
       const { data: insightsData, error: insightsError } = await client
         .from('meta_insights_daily')
         .select('date, spend, inline_link_clicks, purchases, conversions, revenue, currency')
@@ -1899,23 +1933,38 @@ async function processTenant(
       console.error(`Failed to update connection metadata for tenant ${tenantId}:`, connectionUpdateError)
     }
 
+    // If runFullMatrix failed but we managed to aggregate KPI from existing data, 
+    // mark as succeeded with a warning, otherwise mark as failed
+    const finalStatus = matrixRunFailed && kpiRows.length === 0 ? 'failed' : 'succeeded'
+    const finalError = finalStatus === 'failed' ? matrixRunError ?? 'Unknown error during sync' : undefined
+
     await upsertJobLog(client, {
       tenantId,
-      status: 'succeeded',
+      status: finalStatus,
       startedAt,
       finishedAt,
+      error: finalError,
     })
 
-    logSyncEvent('sync_complete', {
-      tenantId,
-      accountId: preferredAccountId,
-      rowsInserted: matrixResult.dailyRowCount,
-      windowSince: matrixResult.windowSince,
-      windowUntil: matrixResult.windowUntil,
-      mode,
-    })
+    if (finalStatus === 'succeeded') {
+      logSyncEvent('sync_complete', {
+        tenantId,
+        accountId: preferredAccountId,
+        rowsInserted: matrixResult.dailyRowCount,
+        windowSince: matrixResult.windowSince,
+        windowUntil: matrixResult.windowUntil,
+        mode,
+        matrixRunFailed,
+        kpiRowsUpdated: kpiRows.length,
+      })
+    }
 
-    return { tenantId, status: 'succeeded', inserted: matrixResult.dailyRowCount }
+    return { 
+      tenantId, 
+      status: finalStatus, 
+      inserted: matrixResult.dailyRowCount,
+      error: finalError,
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     await upsertJobLog(client, {

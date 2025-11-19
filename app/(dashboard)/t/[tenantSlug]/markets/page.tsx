@@ -1,39 +1,42 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { getMetaMarkets } from '@/lib/data/metaMarkets'
+import { getMarketsData, type MarketsTotals } from '@/lib/data/agg'
 import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
+import { MarketsTable } from '@/components/tenant/markets-table'
+import { MarketsChart } from '@/components/tenant/markets-chart'
 
 export const revalidate = 60
 
 type PageProps = {
   params: Promise<{ tenantSlug: string }>
+  searchParams?: Promise<Record<string, string | string[] | undefined>>
 }
 
-const COLUMNS = [
-  { key: 'country', label: 'Market' },
-  { key: 'spend', label: 'Spend' },
-  { key: 'linkClicks', label: 'Link clicks' },
-  { key: 'clicks', label: 'Clicks' },
-  { key: 'conversions', label: 'Results' },
-  { key: 'revenue', label: 'Revenue' },
-  { key: 'roas', label: 'ROAS' },
-  { key: 'cpa', label: 'CPA' },
-] as const
-
 export default async function MarketsPage(props: PageProps) {
-  const { tenantSlug } = await props.params
+  const [{ tenantSlug }, rawSearchParams] = await Promise.all([
+    props.params,
+    props.searchParams ?? Promise.resolve({}),
+  ])
+
   const tenantId = await resolveTenantId(tenantSlug)
 
   const today = new Date()
-  const since = new Date(today)
-  since.setDate(since.getDate() - 29)
+  const startWindow = new Date(today)
+  startWindow.setDate(startWindow.getDate() - 29)
 
-  const from = since.toISOString().slice(0, 10)
-  const to = today.toISOString().slice(0, 10)
+  const defaultFrom = startWindow.toISOString().slice(0, 10)
+  const defaultTo = today.toISOString().slice(0, 10)
 
-  const markets = await getMetaMarkets({ tenantId, from, to })
-  const numberLocale = 'en-US'
-  const currencyCode = markets.find((row) => row.currency)?.currency ?? 'USD'
+  const fromParam = rawSearchParams?.from
+  const toParam = rawSearchParams?.to
+
+  const from = typeof fromParam === 'string' && fromParam.length > 0 ? fromParam : defaultFrom
+  const to = typeof toParam === 'string' && toParam.length > 0 ? toParam : defaultTo
+
+  const { series, totals, currency } = await getMarketsData({ tenantId, from, to })
+
+  // Use Swedish locale for SEK, otherwise fallback to en-US
+  const currencyCode = currency ?? 'SEK' // Default to SEK for Swedish stores
+  const numberLocale = currencyCode === 'SEK' ? 'sv-SE' : 'en-US'
 
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
@@ -44,61 +47,89 @@ export default async function MarketsPage(props: PageProps) {
         }).format(value)
       : '—'
 
-  const formatNumber = (value: number) =>
-    Number.isFinite(value) ? new Intl.NumberFormat(numberLocale).format(value) : '0'
+  const formatNumber = (value: number | null) =>
+    value !== null && Number.isFinite(value)
+      ? new Intl.NumberFormat(numberLocale).format(value)
+      : '0'
 
-  const formatRatio = (value: number | null) => (value === null || Number.isNaN(value) ? '—' : value.toFixed(2))
+  const formatRatio = (value: number | null) =>
+    value === null || Number.isNaN(value) ? '—' : value.toFixed(2)
+
+  const metricCards = [
+    {
+      key: 'gross_sales',
+      label: 'Gross Sales',
+      value: formatCurrency(totals.gross_sales),
+    },
+    {
+      key: 'net_sales',
+      label: 'Net Sales',
+      value: formatCurrency(totals.net_sales),
+    },
+    {
+      key: 'new_customer_net_sales',
+      label: 'New Customer Net Sales',
+      value: formatCurrency(totals.new_customer_net_sales),
+    },
+    {
+      key: 'marketing_spend',
+      label: 'Marketing Spend',
+      value: formatCurrency(totals.marketing_spend),
+    },
+    {
+      key: 'amer',
+      label: 'aMER',
+      value: formatRatio(totals.amer),
+    },
+    {
+      key: 'orders',
+      label: 'Orders',
+      value: formatNumber(totals.orders),
+    },
+    {
+      key: 'aov',
+      label: 'AOV',
+      value: formatCurrency(totals.aov),
+    },
+  ]
 
   return (
     <div className="space-y-6">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        {metricCards.map((item) => (
+          <Card key={item.key}>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                {item.label}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold tracking-tight">{item.value}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <MarketsChart
+        data={series}
+        currencyCode={currencyCode}
+        numberLocale={numberLocale}
+      />
+
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base font-semibold">Markets</CardTitle>
-          <p className="text-sm text-muted-foreground">Meta Ads performance by market (last 30 days, conversion / 1d click)</p>
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Performance by Market ({from} → {to})
+          </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  {COLUMNS.map((column) => (
-                    <TableHead key={column.key} className="whitespace-nowrap">
-                      {column.label}
-                    </TableHead>
-                  ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {markets.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={COLUMNS.length} className="py-8 text-center text-muted-foreground">
-                      No data yet for this timeframe.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  markets.map((market) => {
-                    const isTotal = market.country === 'Total'
-                    return (
-                      <TableRow key={market.country} className={isTotal ? 'font-semibold' : undefined}>
-                        <TableCell>{market.country}</TableCell>
-                        <TableCell>{formatCurrency(market.spend)}</TableCell>
-                        <TableCell>{formatNumber(market.linkClicks)}</TableCell>
-                        <TableCell>{formatNumber(market.clicks)}</TableCell>
-                        <TableCell>{formatNumber(market.conversions)}</TableCell>
-                        <TableCell>{formatCurrency(market.revenue)}</TableCell>
-                        <TableCell>{formatRatio(market.roas)}</TableCell>
-                        <TableCell>{formatCurrency(market.cpa)}</TableCell>
-                      </TableRow>
-                    )
-                  })
-                )}
-              </TableBody>
-            </Table>
-          </div>
+          <MarketsTable
+            data={series}
+            currencyCode={currencyCode}
+            numberLocale={numberLocale}
+          />
         </CardContent>
       </Card>
     </div>
   )
 }
-
-

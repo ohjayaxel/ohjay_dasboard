@@ -45,6 +45,7 @@ type IconKey =
   | 'chart-dots'
   | 'chart-bar'
   | 'users'
+  | 'list-details'
 
 type IconSource = Icon | IconKey
 
@@ -57,6 +58,7 @@ const iconMap: Record<IconKey, Icon> = {
   'chart-dots': IconChartDots,
   'chart-bar': IconChartBar,
   users: IconUsers,
+  'list-details': IconListDetails,
 }
 
 type NavItem = {

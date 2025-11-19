@@ -44,17 +44,6 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
       icon: 'chart-dots',
     },
     {
-      title: 'Shopify',
-      url: `/t/${tenantSlug}/shopify`,
-      icon: 'brand-shopify',
-      items: [
-        {
-          title: 'Orders',
-          url: `/t/${tenantSlug}/shopify/orders`,
-        },
-      ],
-    },
-    {
       title: 'Account',
       url: `/t/${tenantSlug}/account`,
       icon: 'users',

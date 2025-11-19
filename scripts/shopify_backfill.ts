@@ -79,6 +79,14 @@ type ShopifyOrder = {
   cancelled_at?: string | null;
   tags?: string; // Comma-separated tags, may include "test"
   test?: boolean; // Indicates if this is a test order
+  billing_address?: {
+    country_code?: string;
+    country?: string;
+  };
+  shipping_address?: {
+    country_code?: string;
+    country?: string;
+  };
 };
 
 type ShopifyOrderRow = {
@@ -98,6 +106,7 @@ type ShopifyOrderRow = {
   gross_sales: number | null;
   net_sales: number | null;
   is_new_customer: boolean;
+  country: string | null;
 };
 
 function normalizeShopDomain(domain: string): string {
@@ -200,6 +209,20 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     }
   }
 
+  // Extract country from billing_address (preferred) or shipping_address
+  // Shopify API can provide country_code (ISO 2-letter) or country (full name)
+  // Prefer country_code if available, otherwise use country
+  let country: string | null = null;
+  if (order.billing_address?.country_code) {
+    country = order.billing_address.country_code;
+  } else if (order.billing_address?.country) {
+    country = order.billing_address.country;
+  } else if (order.shipping_address?.country_code) {
+    country = order.shipping_address.country_code;
+  } else if (order.shipping_address?.country) {
+    country = order.shipping_address.country;
+  }
+
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
@@ -217,6 +240,7 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     gross_sales: grossSales,
     net_sales: netSales,
     is_new_customer: false, // Will be determined during batch processing
+    country: country || null,
   };
 }
 
@@ -345,8 +369,8 @@ async function fetchShopifyOrdersWithPagination(params: {
   while (true) {
     const url = new URL(`https://${normalizedShop}/admin/api/2023-10/orders.json`);
     url.searchParams.set('limit', '250'); // Max limit per page
-    // Ensure we fetch total_tax field (though it should be included by default)
-    url.searchParams.set('fields', 'id,order_number,processed_at,created_at,updated_at,total_price,subtotal_price,total_discounts,total_tax,currency,customer,line_items,refunds,email,financial_status,fulfillment_status,source_name,cancelled_at,tags,test');
+    // Ensure we fetch total_tax and billing/shipping addresses for country
+    url.searchParams.set('fields', 'id,order_number,processed_at,created_at,updated_at,total_price,subtotal_price,total_discounts,total_tax,currency,customer,line_items,refunds,email,financial_status,fulfillment_status,source_name,cancelled_at,tags,test,billing_address,shipping_address');
 
     if (pageInfo) {
       // When using page_info, we can only set page_info and limit

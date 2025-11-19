@@ -6,7 +6,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { requirePlatformAdmin } from '@/lib/auth/current-user'
 import { listAdminTenants } from '@/lib/admin/tenants'
 
-export default async function AdminLayout({ children }: { children: ReactNode }) {
+export default async function SettingsLayout({ children }: { children: ReactNode }) {
   const user = await requirePlatformAdmin()
   const tenants = await listAdminTenants()
   const environment = process.env.APP_ENV ?? 'development'

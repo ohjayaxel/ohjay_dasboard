@@ -154,7 +154,7 @@ const slugify = (value: string) =>
 
 async function revalidateTenantViews(tenantId: string, tenantSlug?: string) {
   revalidatePath('/admin')
-  revalidatePath('/admin/settings')
+  revalidatePath('/settings')
 
   let slug = tenantSlug
   if (!slug) {
@@ -1074,7 +1074,7 @@ export async function addPlatformAdmin(formData: FormData) {
 
   if (!user) {
     redirect(
-      `/admin/settings?error=${encodeURIComponent(
+      `/settings?error=${encodeURIComponent(
         'No Supabase Auth user found for that email. Invite the user first, then grant platform admin access.',
       )}`,
     )
@@ -1119,8 +1119,8 @@ export async function addPlatformAdmin(formData: FormData) {
     }
   }
 
-  revalidatePath('/admin/settings')
-  redirect('/admin/settings?status=platform-admin-added')
+  revalidatePath('/settings')
+  redirect('/settings?status=platform-admin-added')
 }
 
 export async function removePlatformAdmin(formData: FormData) {
@@ -1162,8 +1162,8 @@ export async function removePlatformAdmin(formData: FormData) {
     throw new Error(`Failed to remove platform admin: ${error.message}`)
   }
 
-  revalidatePath('/admin/settings')
-  redirect('/admin/settings?status=platform-admin-removed')
+  revalidatePath('/settings')
+  redirect('/settings?status=platform-admin-removed')
 }
 
 export async function updatePlatformAdminRole(formData: FormData) {
@@ -1207,8 +1207,8 @@ export async function updatePlatformAdminRole(formData: FormData) {
     throw new Error(`Failed to update member role: ${updateError.message}`)
   }
 
-  revalidatePath('/admin/settings')
-  redirect(`/admin/settings?status=role-updated`)
+  revalidatePath('/settings')
+  redirect(`/settings?status=role-updated`)
 }
 
 export async function startShopifyConnect(tenantId: string, shopDomain: string) {

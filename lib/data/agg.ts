@@ -302,12 +302,179 @@ export async function getOverviewData(params: {
   return { series, totals, currency };
 }
 
+export type MarketsDataPoint = {
+  country: string;
+  gross_sales: number;
+  net_sales: number;
+  new_customer_net_sales: number;
+  marketing_spend: number;
+  amer: number | null;
+  orders: number;
+  aov: number | null;
+};
+
+export type MarketsTotals = {
+  gross_sales: number;
+  net_sales: number;
+  new_customer_net_sales: number;
+  marketing_spend: number;
+  amer: number | null;
+  orders: number;
+  aov: number | null;
+};
+
+export type MarketsResult = {
+  series: MarketsDataPoint[];
+  totals: MarketsTotals;
+  currency: string | null;
+};
+
+export async function getMarketsData(params: {
+  tenantId: string;
+  from?: string;
+  to?: string;
+}): Promise<MarketsResult> {
+  const { getSupabaseServiceClient } = await import('@/lib/supabase/server');
+  const client = getSupabaseServiceClient();
+
+  // Fetch Shopify orders with country
+  let ordersQuery = client
+    .from('shopify_orders')
+    .select('country, gross_sales, net_sales, is_new_customer, is_refund, processed_at, currency')
+    .eq('tenant_id', params.tenantId)
+    .not('country', 'is', null)
+    .not('gross_sales', 'is', null)
+    .gt('gross_sales', 0);
+
+  if (params.from) {
+    ordersQuery = ordersQuery.gte('processed_at', params.from);
+  }
+
+  if (params.to) {
+    ordersQuery = ordersQuery.lte('processed_at', params.to);
+  }
+
+  const { data: orders, error: ordersError } = await ordersQuery;
+
+  if (ordersError) {
+    throw new Error(`Failed to fetch Shopify orders: ${ordersError.message}`);
+  }
+
+  // Fetch marketing spend (Meta + Google) - aggregated per date, then we'll distribute proportionally
+  // or fetch Meta insights with country breakdown if available
+  const [metaRows, googleRows] = await Promise.all([
+    fetchKpiDaily({
+      tenantId: params.tenantId,
+      from: params.from,
+      to: params.to,
+      source: 'meta',
+    }),
+    fetchKpiDaily({
+      tenantId: params.tenantId,
+      from: params.from,
+      to: params.to,
+      source: 'google_ads',
+    }),
+  ]);
+
+  const totalMarketingSpend = sum([
+    ...metaRows.map((row) => row.spend ?? 0),
+    ...googleRows.map((row) => row.spend ?? 0),
+  ]);
+
+  // Aggregate Shopify orders by country
+  const byCountry = new Map<string, MarketsDataPoint>();
+
+  for (const order of orders ?? []) {
+    const country = order.country as string;
+    if (!country) continue;
+
+    const existing = byCountry.get(country) ?? {
+      country,
+      gross_sales: 0,
+      net_sales: 0,
+      new_customer_net_sales: 0,
+      marketing_spend: 0,
+      amer: null,
+      orders: 0,
+      aov: null,
+    };
+
+    const grossSales = Number(order.gross_sales) || 0;
+    const netSales = Number(order.net_sales) || 0;
+    const isNewCustomer = order.is_new_customer === true;
+    const isRefund = order.is_refund === true;
+
+    existing.gross_sales += grossSales;
+    existing.net_sales += netSales;
+
+    // Only count orders (not refunds) for order count
+    if (!isRefund) {
+      existing.orders += 1;
+    }
+
+    // Calculate new customer net sales
+    if (isNewCustomer && !isRefund) {
+      existing.new_customer_net_sales += netSales;
+    }
+
+    byCountry.set(country, existing);
+  }
+
+  // Distribute marketing spend proportionally based on gross_sales
+  const totalGrossSales = sum(Array.from(byCountry.values()).map((p) => p.gross_sales));
+  
+  const series = Array.from(byCountry.values())
+    .map((point) => {
+      // Distribute marketing spend proportionally
+      const marketingSpend = totalGrossSales > 0 
+        ? (point.gross_sales / totalGrossSales) * totalMarketingSpend
+        : 0;
+
+      const amer = marketingSpend > 0 
+        ? point.new_customer_net_sales / marketingSpend 
+        : null;
+      const aov = point.orders > 0 
+        ? point.net_sales / point.orders 
+        : null;
+
+      return {
+        ...point,
+        marketing_spend: marketingSpend,
+        amer,
+        aov,
+      };
+    })
+    .sort((a, b) => b.gross_sales - a.gross_sales); // Sort by gross_sales descending
+
+  // Calculate totals
+  const totalGrossSalesCalculated = sum(series.map((p) => p.gross_sales));
+  const totalNetSales = sum(series.map((p) => p.net_sales));
+  const totalNewCustomerNetSales = sum(series.map((p) => p.new_customer_net_sales));
+  const totalOrders = sum(series.map((p) => p.orders));
+
+  const totals: MarketsTotals = {
+    gross_sales: totalGrossSalesCalculated,
+    net_sales: totalNetSales,
+    new_customer_net_sales: totalNewCustomerNetSales,
+    marketing_spend: totalMarketingSpend,
+    amer: totalMarketingSpend > 0 ? totalNewCustomerNetSales / totalMarketingSpend : null,
+    orders: totalOrders,
+    aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
+  };
+
+  const currency = orders?.find((order) => order.currency)?.currency ?? null;
+
+  return { series, totals, currency };
+}
+
 export async function revalidateKpiForTenant(tenantSlug: string) {
   const routes = [
     `/t/${tenantSlug}`,
     `/t/${tenantSlug}/meta`,
     `/t/${tenantSlug}/google`,
     `/t/${tenantSlug}/shopify`,
+    `/t/${tenantSlug}/markets`,
   ];
 
   for (const route of routes) {

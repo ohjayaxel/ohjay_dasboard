@@ -52,6 +52,14 @@ type ShopifyOrder = {
   cancelled_at?: string | null;
   tags?: string; // Comma-separated tags, may include "test"
   test?: boolean; // Indicates if this is a test order
+  billing_address?: {
+    country_code?: string;
+    country?: string;
+  };
+  shipping_address?: {
+    country_code?: string;
+    country?: string;
+  };
 };
 
 function normalizeShopDomain(domain: string): string {
@@ -154,6 +162,20 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     }
   }
 
+  // Extract country from billing_address (preferred) or shipping_address
+  // Shopify API can provide country_code (ISO 2-letter) or country (full name)
+  // Prefer country_code if available, otherwise use country
+  let country: string | null = null;
+  if (order.billing_address?.country_code) {
+    country = order.billing_address.country_code;
+  } else if (order.billing_address?.country) {
+    country = order.billing_address.country;
+  } else if (order.shipping_address?.country_code) {
+    country = order.shipping_address.country_code;
+  } else if (order.shipping_address?.country) {
+    country = order.shipping_address.country;
+  }
+
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
@@ -171,6 +193,7 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     gross_sales: grossSales,
     net_sales: netSales,
     is_new_customer: false, // Will be determined below
+    country: country || null,
   };
 }
 

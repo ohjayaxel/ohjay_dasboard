@@ -59,7 +59,7 @@ type OrdersTableProps = {
   orders: ShopifyOrder[]
   from: string
   to: string
-  tenantSlug: string
+  tenantSlug?: string // Optional for admin context
 }
 
 const formatCurrency = (value: number | null, currency: string = 'SEK') => {
@@ -96,7 +96,16 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
   const handleDateChange = (field: 'from' | 'to', value: string) => {
     const params = new URLSearchParams(searchParams.toString())
     params.set(field, value)
-    router.push(`/t/${tenantSlug}/shopify/orders?${params.toString()}`)
+    // Support both tenant context and admin context
+    const isAdminContext = typeof window !== 'undefined' && window.location.pathname.includes('/admin/audits/orders')
+    if (isAdminContext) {
+      // Preserve tenant param if exists
+      const tenant = searchParams.get('tenant')
+      if (tenant) params.set('tenant', tenant)
+      router.push(`/admin/audits/orders?${params.toString()}`)
+    } else if (tenantSlug) {
+      router.push(`/t/${tenantSlug}/shopify/orders?${params.toString()}`)
+    }
   }
 
   // Filter orders that are included in gross sales calculation
