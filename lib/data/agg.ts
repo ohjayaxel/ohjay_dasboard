@@ -433,12 +433,12 @@ export async function getMarketsData(params: {
 
   // Aggregate Meta spend by country if we have country breakdown data
   const metaSpendByCountry = new Map<string, number>();
+  let totalMetaSpendWithCountry = 0;
   let totalMetaSpend = 0;
 
   if (metaInsightsWithCountry && metaInsightsWithCountry.length > 0) {
     for (const insight of metaInsightsWithCountry) {
       const spend = Number(insight.spend) || 0;
-      totalMetaSpend += spend;
 
       // Check if this insight has country breakdown
       if (insight.breakdowns && typeof insight.breakdowns === 'object') {
@@ -450,13 +450,27 @@ export async function getMarketsData(params: {
           const country = normalizeCountryToPriority(rawCountry);
           const existing = metaSpendByCountry.get(country) ?? 0;
           metaSpendByCountry.set(country, existing + spend);
+          totalMetaSpendWithCountry += spend;
         }
       }
     }
-  }
 
-  // If we don't have country breakdown data, fetch aggregated Meta spend
-  if (metaSpendByCountry.size === 0) {
+    // If we have country breakdown data, use the total from country breakdown
+    // Otherwise, fetch aggregated Meta spend for the period
+    if (metaSpendByCountry.size > 0) {
+      totalMetaSpend = totalMetaSpendWithCountry;
+    } else {
+      // We fetched insights with breakdowns but none had country - fetch aggregated total
+      const metaRows = await fetchKpiDaily({
+        tenantId: params.tenantId,
+        from: params.from,
+        to: params.to,
+        source: 'meta',
+      });
+      totalMetaSpend = sum(metaRows.map((row) => row.spend ?? 0));
+    }
+  } else {
+    // If we don't have country breakdown data, fetch aggregated Meta spend
     const metaRows = await fetchKpiDaily({
       tenantId: params.tenantId,
       from: params.from,
@@ -566,13 +580,14 @@ export async function getMarketsData(params: {
   const totalNetSales = sum(series.map((p) => p.net_sales));
   const totalNewCustomerNetSales = sum(series.map((p) => p.new_customer_net_sales));
   const totalOrders = sum(series.map((p) => p.orders));
+  const totalMarketingSpendCalculated = sum(series.map((p) => p.marketing_spend));
 
   const totals: MarketsTotals = {
     gross_sales: totalGrossSalesCalculated,
     net_sales: totalNetSales,
     new_customer_net_sales: totalNewCustomerNetSales,
-    marketing_spend: totalMarketingSpend,
-    amer: totalMarketingSpend > 0 ? totalNewCustomerNetSales / totalMarketingSpend : null,
+    marketing_spend: totalMarketingSpendCalculated,
+    amer: totalMarketingSpendCalculated > 0 ? totalNewCustomerNetSales / totalMarketingSpendCalculated : null,
     orders: totalOrders,
     aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
   };
