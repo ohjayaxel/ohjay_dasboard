@@ -335,52 +335,119 @@ export async function getMarketsData(params: {
   to?: string;
 }): Promise<MarketsResult> {
   const { getSupabaseServiceClient } = await import('@/lib/supabase/server');
-  const client = getSupabaseServiceClient();
+  const supabase = getSupabaseServiceClient();
 
-  // Fetch Shopify orders with country
-  let ordersQuery = client
-    .from('shopify_orders')
-    .select('country, gross_sales, net_sales, is_new_customer, is_refund, processed_at, currency')
+  // Fetch Shopify orders with country - paginate to get all orders
+  const orders: Array<{
+    country: string;
+    gross_sales: number | null;
+    net_sales: number | null;
+    is_new_customer: boolean | null;
+    is_refund: boolean | null;
+    processed_at: string | null;
+    currency: string | null;
+  }> = [];
+
+  let offset = 0;
+  const limit = 1000;
+  let hasMore = true;
+
+  while (hasMore) {
+    let ordersQuery = supabase
+      .from('shopify_orders')
+      .select('country, gross_sales, net_sales, is_new_customer, is_refund, processed_at, currency')
+      .eq('tenant_id', params.tenantId)
+      .not('country', 'is', null)
+      .not('gross_sales', 'is', null)
+      .gt('gross_sales', 0)
+      .range(offset, offset + limit - 1)
+      .order('processed_at', { ascending: false });
+
+    if (params.from) {
+      ordersQuery = ordersQuery.gte('processed_at', params.from);
+    }
+
+    if (params.to) {
+      ordersQuery = ordersQuery.lte('processed_at', params.to);
+    }
+
+    const { data: batch, error: ordersError } = await ordersQuery;
+
+    if (ordersError) {
+      throw new Error(`Failed to fetch Shopify orders: ${ordersError.message}`);
+    }
+
+    if (!batch || batch.length === 0) {
+      hasMore = false;
+    } else {
+      orders.push(...batch);
+      offset += limit;
+      
+      // If we got fewer than limit, we've reached the end
+      if (batch.length < limit) {
+        hasMore = false;
+      }
+    }
+  }
+
+  // Fetch marketing spend with country breakdown from Meta insights if available
+  // Otherwise fall back to aggregating total spend and distributing proportionally
+  // Only fetch insights with country breakdown (country_priority or country breakdown keys)
+  const { data: metaInsightsWithCountry } = await supabase
+    .from('meta_insights_daily')
+    .select('date, spend, breakdowns, breakdowns_key')
     .eq('tenant_id', params.tenantId)
-    .not('country', 'is', null)
-    .not('gross_sales', 'is', null)
-    .gt('gross_sales', 0);
+    .gte('date', params.from ?? '1970-01-01')
+    .lte('date', params.to ?? '2100-01-01')
+    .eq('action_report_time', 'impression')
+    .eq('attribution_window', '1d_click')
+    .in('breakdowns_key', ['country_priority', 'country'])
+    .not('spend', 'is', null)
+    .gt('spend', 0)
+    .not('breakdowns', 'is', null);
 
-  if (params.from) {
-    ordersQuery = ordersQuery.gte('processed_at', params.from);
+  // Try to fetch Google Ads spend (no country breakdown available currently)
+  const googleRows = await fetchKpiDaily({
+    tenantId: params.tenantId,
+    from: params.from,
+    to: params.to,
+    source: 'google_ads',
+  });
+
+  const totalGoogleSpend = sum(googleRows.map((row) => row.spend ?? 0));
+
+  // Aggregate Meta spend by country if we have country breakdown data
+  const metaSpendByCountry = new Map<string, number>();
+  let totalMetaSpend = 0;
+
+  if (metaInsightsWithCountry && metaInsightsWithCountry.length > 0) {
+    for (const insight of metaInsightsWithCountry) {
+      const spend = Number(insight.spend) || 0;
+      totalMetaSpend += spend;
+
+      // Check if this insight has country breakdown
+      if (insight.breakdowns && typeof insight.breakdowns === 'object') {
+        const breakdowns = insight.breakdowns as Record<string, unknown>;
+        const country = breakdowns.country as string | undefined;
+
+        if (country) {
+          const existing = metaSpendByCountry.get(country) ?? 0;
+          metaSpendByCountry.set(country, existing + spend);
+        }
+      }
+    }
   }
 
-  if (params.to) {
-    ordersQuery = ordersQuery.lte('processed_at', params.to);
-  }
-
-  const { data: orders, error: ordersError } = await ordersQuery;
-
-  if (ordersError) {
-    throw new Error(`Failed to fetch Shopify orders: ${ordersError.message}`);
-  }
-
-  // Fetch marketing spend (Meta + Google) - aggregated per date, then we'll distribute proportionally
-  // or fetch Meta insights with country breakdown if available
-  const [metaRows, googleRows] = await Promise.all([
-    fetchKpiDaily({
+  // If we don't have country breakdown data, fetch aggregated Meta spend
+  if (metaSpendByCountry.size === 0) {
+    const metaRows = await fetchKpiDaily({
       tenantId: params.tenantId,
       from: params.from,
       to: params.to,
       source: 'meta',
-    }),
-    fetchKpiDaily({
-      tenantId: params.tenantId,
-      from: params.from,
-      to: params.to,
-      source: 'google_ads',
-    }),
-  ]);
-
-  const totalMarketingSpend = sum([
-    ...metaRows.map((row) => row.spend ?? 0),
-    ...googleRows.map((row) => row.spend ?? 0),
-  ]);
+    });
+    totalMetaSpend = sum(metaRows.map((row) => row.spend ?? 0));
+  }
 
   // Aggregate Shopify orders by country
   const byCountry = new Map<string, MarketsDataPoint>();
@@ -421,15 +488,30 @@ export async function getMarketsData(params: {
     byCountry.set(country, existing);
   }
 
-  // Distribute marketing spend proportionally based on gross_sales
-  const totalGrossSales = sum(Array.from(byCountry.values()).map((p) => p.gross_sales));
+  // Assign marketing spend per country
+  // If we have Meta country breakdown, use it. Otherwise distribute proportionally based on net_sales
+  const totalNetSales = sum(Array.from(byCountry.values()).map((p) => p.net_sales));
+  const totalMarketingSpend = totalMetaSpend + totalGoogleSpend;
   
   const series = Array.from(byCountry.values())
     .map((point) => {
-      // Distribute marketing spend proportionally
-      const marketingSpend = totalGrossSales > 0 
-        ? (point.gross_sales / totalGrossSales) * totalMarketingSpend
-        : 0;
+      let marketingSpend = 0;
+
+      // Use Meta country breakdown if available
+      const metaSpendForCountry = metaSpendByCountry.get(point.country) ?? 0;
+      
+      if (metaSpendByCountry.size > 0) {
+        // We have country breakdown: use Meta spend per country + distribute Google spend proportionally
+        const googleSpendProportion = totalNetSales > 0 
+          ? point.net_sales / totalNetSales 
+          : 0;
+        marketingSpend = metaSpendForCountry + (googleSpendProportion * totalGoogleSpend);
+      } else {
+        // No country breakdown: distribute total marketing spend proportionally based on net_sales
+        marketingSpend = totalNetSales > 0 
+          ? (point.net_sales / totalNetSales) * totalMarketingSpend
+          : 0;
+      }
 
       const amer = marketingSpend > 0 
         ? point.new_customer_net_sales / marketingSpend 
