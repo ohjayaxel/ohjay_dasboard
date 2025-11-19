@@ -329,6 +329,21 @@ export type MarketsResult = {
   currency: string | null;
 };
 
+// Country priority mapping: DE, SE, NO, FI are kept as-is, all others become OTHER
+const COUNTRY_PRIORITY_CODES = new Set(['DE', 'SE', 'NO', 'FI']);
+const COUNTRY_PRIORITY_ORDER = ['DE', 'SE', 'NO', 'FI', 'OTHER'] as const;
+
+/**
+ * Normalize country code to country_priority format
+ * DE, SE, NO, FI are kept as-is, all others become OTHER
+ */
+function normalizeCountryToPriority(country: string | null | undefined): string {
+  if (!country) return 'OTHER';
+  
+  const upperCountry = country.toUpperCase();
+  return COUNTRY_PRIORITY_CODES.has(upperCountry) ? upperCountry : 'OTHER';
+}
+
 export async function getMarketsData(params: {
   tenantId: string;
   from?: string;
@@ -428,9 +443,11 @@ export async function getMarketsData(params: {
       // Check if this insight has country breakdown
       if (insight.breakdowns && typeof insight.breakdowns === 'object') {
         const breakdowns = insight.breakdowns as Record<string, unknown>;
-        const country = breakdowns.country as string | undefined;
+        const rawCountry = breakdowns.country as string | undefined;
 
-        if (country) {
+        if (rawCountry) {
+          // Normalize country to country_priority format (DE, SE, NO, FI, or OTHER)
+          const country = normalizeCountryToPriority(rawCountry);
           const existing = metaSpendByCountry.get(country) ?? 0;
           metaSpendByCountry.set(country, existing + spend);
         }
@@ -449,12 +466,15 @@ export async function getMarketsData(params: {
     totalMetaSpend = sum(metaRows.map((row) => row.spend ?? 0));
   }
 
-  // Aggregate Shopify orders by country
+  // Aggregate Shopify orders by country (normalized to country_priority format)
   const byCountry = new Map<string, MarketsDataPoint>();
 
   for (const order of orders ?? []) {
-    const country = order.country as string;
-    if (!country) continue;
+    const rawCountry = order.country as string;
+    if (!rawCountry) continue;
+
+    // Normalize country to country_priority format (DE, SE, NO, FI, or OTHER)
+    const country = normalizeCountryToPriority(rawCountry);
 
     const existing = byCountry.get(country) ?? {
       country,
@@ -527,7 +547,19 @@ export async function getMarketsData(params: {
         aov,
       };
     })
-    .sort((a, b) => b.gross_sales - a.gross_sales); // Sort by gross_sales descending
+    .sort((a, b) => {
+      // Sort by country_priority order first (DE, SE, NO, FI, OTHER), then by gross_sales descending
+      const priority = new Map(COUNTRY_PRIORITY_ORDER.map((country, index) => [country, index]));
+      const aRank = priority.has(a.country) ? priority.get(a.country)! : COUNTRY_PRIORITY_ORDER.length + 1;
+      const bRank = priority.has(b.country) ? priority.get(b.country)! : COUNTRY_PRIORITY_ORDER.length + 1;
+
+      if (aRank !== bRank) {
+        return aRank - bRank;
+      }
+
+      // If same priority, sort by gross_sales descending
+      return b.gross_sales - a.gross_sales;
+    });
 
   // Calculate totals
   const totalGrossSalesCalculated = sum(series.map((p) => p.gross_sales));
