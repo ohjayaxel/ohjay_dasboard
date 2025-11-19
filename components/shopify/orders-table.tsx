@@ -70,6 +70,17 @@ const formatCurrency = (value: number | null, currency: string = 'SEK') => {
   }).format(value)
 }
 
+const getNumericValue = (value: number | null | undefined) => {
+  if (typeof value === 'number' && !Number.isNaN(value)) {
+    return value
+  }
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return 0
+}
+
 const formatDate = (date: string | null) => {
   if (!date) return '—'
   return new Date(date).toLocaleDateString('sv-SE')
@@ -135,17 +146,26 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
         id: 'gross_sales_calculated',
         header: 'Gross Sales',
         accessorFn: (row) => {
-          const totalSales = row.gross_sales
-          const tax = row.total_tax
-          return (totalSales && tax !== null) ? totalSales - tax : null
+          if (row.gross_sales === null || row.gross_sales === undefined) {
+            return null
+          }
+          const tax = getNumericValue(row.total_tax)
+          return row.gross_sales - tax
         },
         cell: ({ row }) => {
           const totalSales = row.original.gross_sales as number | null
           const tax = row.original.total_tax as number | null
           const currency = row.original.currency || 'SEK'
-          const grossSales = (totalSales && tax !== null) ? totalSales - tax : null
+          const grossSales =
+            totalSales !== null && totalSales !== undefined
+              ? totalSales - getNumericValue(tax)
+              : null
           return (
-            <div className={grossSales && grossSales > 0 ? 'font-medium' : 'text-muted-foreground'}>
+            <div
+              className={
+                grossSales !== null && grossSales > 0 ? 'font-medium' : 'text-muted-foreground'
+              }
+            >
               {formatCurrency(grossSales, currency)}
             </div>
           )
@@ -250,20 +270,19 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
     },
   })
 
-  const totalGrossSales = includedOrders.reduce(
-    (sum, o) => {
-      const gross = o.gross_sales
-      return sum + (typeof gross === 'number' ? gross : parseFloat((gross || 0).toString()) || 0)
-    },
-    0
-  )
-  const totalNetSales = includedOrders.reduce(
-    (sum, o) => {
-      const net = o.net_sales
-      return sum + (typeof net === 'number' ? net : parseFloat((net || 0).toString()) || 0)
-    },
-    0
-  )
+  const totalSalesSum = includedOrders.reduce((sum, order) => {
+    return sum + getNumericValue(order.gross_sales)
+  }, 0)
+
+  const totalGrossSales = includedOrders.reduce((sum, order) => {
+    const totalSalesValue = getNumericValue(order.gross_sales)
+    const taxValue = getNumericValue(order.total_tax)
+    return sum + (totalSalesValue - taxValue)
+  }, 0)
+
+  const totalNetSales = includedOrders.reduce((sum, order) => {
+    return sum + getNumericValue(order.net_sales)
+  }, 0)
 
   return (
     <div className="space-y-4">
@@ -296,20 +315,29 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
       </div>
 
       {/* Summary */}
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-lg border p-4">
           <div className="text-sm text-muted-foreground">Included Orders</div>
           <div className="text-2xl font-semibold">{includedOrders.length}</div>
         </div>
         <div className="rounded-lg border p-4">
-          <div className="text-sm text-muted-foreground">Total Gross Sales</div>
-          <div className="text-2xl font-semibold">
-            {formatCurrency(totalGrossSales)}
-          </div>
+          <div className="text-sm font-medium text-muted-foreground">Total Sales</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totalSalesSum)}</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            SUM(line_item.price × quantity) before discounts, tax, or shipping.
+          </p>
         </div>
         <div className="rounded-lg border p-4">
-          <div className="text-sm text-muted-foreground">Total Net Sales</div>
+          <div className="text-sm font-medium text-muted-foreground">Gross Sales</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totalGrossSales)}</div>
+          <p className="mt-1 text-xs text-muted-foreground">Total Sales minus collected tax.</p>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Net Sales</div>
           <div className="text-2xl font-semibold">{formatCurrency(totalNetSales)}</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Gross Sales minus Discounts and Returns.
+          </p>
         </div>
       </div>
 
