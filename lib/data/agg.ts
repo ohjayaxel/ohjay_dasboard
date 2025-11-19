@@ -490,7 +490,7 @@ export async function getMarketsData(params: {
 
   // Assign marketing spend per country
   // If we have Meta country breakdown, use it. Otherwise distribute proportionally based on net_sales
-  const totalNetSales = sum(Array.from(byCountry.values()).map((p) => p.net_sales));
+  const totalNetSalesForDistribution = sum(Array.from(byCountry.values()).map((p) => p.net_sales));
   const totalMarketingSpend = totalMetaSpend + totalGoogleSpend;
   
   const series = Array.from(byCountry.values())
@@ -502,14 +502,14 @@ export async function getMarketsData(params: {
       
       if (metaSpendByCountry.size > 0) {
         // We have country breakdown: use Meta spend per country + distribute Google spend proportionally
-        const googleSpendProportion = totalNetSales > 0 
-          ? point.net_sales / totalNetSales 
+        const googleSpendProportion = totalNetSalesForDistribution > 0 
+          ? point.net_sales / totalNetSalesForDistribution 
           : 0;
         marketingSpend = metaSpendForCountry + (googleSpendProportion * totalGoogleSpend);
       } else {
         // No country breakdown: distribute total marketing spend proportionally based on net_sales
-        marketingSpend = totalNetSales > 0 
-          ? (point.net_sales / totalNetSales) * totalMarketingSpend
+        marketingSpend = totalNetSalesForDistribution > 0 
+          ? (point.net_sales / totalNetSalesForDistribution) * totalMarketingSpend
           : 0;
       }
 
