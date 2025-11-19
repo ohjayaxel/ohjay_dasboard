@@ -179,7 +179,8 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
     string,
     {
       revenue: number;
-      gross_sales: number;
+      total_sales: number; // Total Sales (SUM(line_item.price × quantity)) - stored in gross_sales column
+      total_tax: number; // Total tax aggregated
       net_sales: number;
       conversions: number;
       new_customer_conversions: number;
@@ -192,9 +193,16 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
 
   for (const row of rows) {
     if (!row.processed_at) continue;
+    
+    // Filter out orders with gross_sales = null or <= 0 (match Orders page logic)
+    // Orders page filters: includedOrders = orders.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
+    const grossSalesValue = row.gross_sales ?? 0;
+    if (grossSalesValue <= 0) continue;
+    
     const existing = byDate.get(row.processed_at) ?? {
       revenue: 0,
-      gross_sales: 0,
+      total_sales: 0,
+      total_tax: 0,
       net_sales: 0,
       conversions: 0,
       new_customer_conversions: 0,
@@ -207,7 +215,8 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
     if (!row.is_refund) {
       existing.revenue += row.total_price ?? 0;
       const netValue = row.net_sales ?? 0;
-      existing.gross_sales += row.gross_sales ?? 0;
+      existing.total_sales += row.gross_sales ?? 0; // gross_sales in shopify_orders is Total Sales
+      existing.total_tax += row.total_tax ?? 0;
       existing.net_sales += netValue;
       existing.conversions += 1;
       
@@ -228,7 +237,8 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
       // For refunds, subtract from revenue and sales
       const netValue = row.net_sales ?? 0;
       existing.revenue -= row.total_price ?? 0;
-      existing.gross_sales -= row.gross_sales ?? 0;
+      existing.total_sales -= row.gross_sales ?? 0;
+      existing.total_tax -= row.total_tax ?? 0;
       existing.net_sales -= netValue;
       if (row.is_new_customer) {
         existing.new_customer_net_sales -= netValue;
@@ -252,13 +262,16 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
       }
     }
     
+    // Calculate Gross Sales as Total Sales - Tax (to match Orders page)
+    const grossSales = values.total_sales - values.total_tax;
+    
     return {
       date,
       spend: 0,
       clicks: null,
       conversions: values.conversions || null,
       revenue: values.revenue || null,
-      gross_sales: values.gross_sales || null,
+      gross_sales: grossSales || null,
       net_sales: values.net_sales || null,
       new_customer_conversions: values.new_customer_conversions || null,
       returning_customer_conversions: values.returning_customer_conversions || null,
