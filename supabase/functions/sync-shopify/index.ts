@@ -467,10 +467,13 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
   for (const row of rows) {
     if (!row.processed_at) continue;
     
-    // Filter out orders with gross_sales = null or <= 0 (match Orders page logic)
-    // Orders page filters: includedOrders = orders.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
-    const grossSalesValue = row.gross_sales ?? 0;
-    if (grossSalesValue <= 0) continue;
+    // Filter out non-refund orders with gross_sales = null or <= 0 (match Orders page logic)
+    // Orders page filters: includedOrders = orders.filter((o) => o.is_refund || parseFloat((o.gross_sales || 0).toString()) > 0)
+    // Refunds should always be included to subtract them from totals, even if gross_sales <= 0
+    if (!row.is_refund) {
+      const grossSalesValue = row.gross_sales ?? 0;
+      if (grossSalesValue <= 0) continue;
+    }
     
     const existing = byDate.get(row.processed_at) ?? {
       revenue: 0,

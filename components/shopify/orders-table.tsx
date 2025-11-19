@@ -52,6 +52,7 @@ type ShopifyOrder = {
   financial_status: string | null
   fulfillment_status: string | null
   source_name: string | null
+  is_refund: boolean | null
 }
 
 type OrdersTableProps = {
@@ -99,8 +100,19 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
   }
 
   // Filter orders that are included in gross sales calculation
-  const includedOrders = orders.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
-  const excludedOrders = orders.filter((o) => parseFloat((o.gross_sales || 0).toString()) === 0)
+  // Match KPI aggregation logic:
+  // - Include non-refund orders only if gross_sales > 0
+  // - Always include refunds (they'll be subtracted from totals)
+  const includedOrders = orders.filter((o) => {
+    const grossSales = parseFloat((o.gross_sales || 0).toString())
+    // Include if it's a refund (always) or if it's a regular order with gross_sales > 0
+    return o.is_refund || grossSales > 0
+  })
+  const excludedOrders = orders.filter((o) => {
+    const grossSales = parseFloat((o.gross_sales || 0).toString())
+    // Exclude non-refund orders with gross_sales <= 0
+    return !o.is_refund && grossSales <= 0
+  })
 
   const columns: ColumnDef<ShopifyOrder>[] = React.useMemo(
     () => [
@@ -270,18 +282,22 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
     },
   })
 
+  // Calculate totals: add regular orders, subtract refunds (match KPI aggregation logic)
   const totalSalesSum = includedOrders.reduce((sum, order) => {
-    return sum + getNumericValue(order.gross_sales)
+    const value = getNumericValue(order.gross_sales)
+    return sum + (order.is_refund ? -value : value)
   }, 0)
 
   const totalGrossSales = includedOrders.reduce((sum, order) => {
     const totalSalesValue = getNumericValue(order.gross_sales)
     const taxValue = getNumericValue(order.total_tax)
-    return sum + (totalSalesValue - taxValue)
+    const grossSales = totalSalesValue - taxValue
+    return sum + (order.is_refund ? -grossSales : grossSales)
   }, 0)
 
   const totalNetSales = includedOrders.reduce((sum, order) => {
-    return sum + getNumericValue(order.net_sales)
+    const value = getNumericValue(order.net_sales)
+    return sum + (order.is_refund ? -value : value)
   }, 0)
 
   return (
