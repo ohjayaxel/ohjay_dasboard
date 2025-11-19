@@ -184,6 +184,8 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
       conversions: number;
       new_customer_conversions: number;
       returning_customer_conversions: number;
+      new_customer_net_sales: number;
+      returning_customer_net_sales: number;
       currencies: Map<string, number>; // Track currency frequency
     }
   >();
@@ -197,13 +199,16 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
       conversions: 0,
       new_customer_conversions: 0,
       returning_customer_conversions: 0,
+      new_customer_net_sales: 0,
+      returning_customer_net_sales: 0,
       currencies: new Map<string, number>(),
     };
 
     if (!row.is_refund) {
       existing.revenue += row.total_price ?? 0;
+      const netValue = row.net_sales ?? 0;
       existing.gross_sales += row.gross_sales ?? 0;
-      existing.net_sales += row.net_sales ?? 0;
+      existing.net_sales += netValue;
       existing.conversions += 1;
       
       // Track currency frequency (use most common currency for the day)
@@ -214,14 +219,22 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
       
       if (row.is_new_customer) {
         existing.new_customer_conversions += 1;
+        existing.new_customer_net_sales += netValue;
       } else {
         existing.returning_customer_conversions += 1;
+        existing.returning_customer_net_sales += netValue;
       }
     } else {
       // For refunds, subtract from revenue and sales
+      const netValue = row.net_sales ?? 0;
       existing.revenue -= row.total_price ?? 0;
       existing.gross_sales -= row.gross_sales ?? 0;
-      existing.net_sales -= row.net_sales ?? 0;
+      existing.net_sales -= netValue;
+      if (row.is_new_customer) {
+        existing.new_customer_net_sales -= netValue;
+      } else {
+        existing.returning_customer_net_sales -= netValue;
+      }
     }
     byDate.set(row.processed_at, existing);
   }
@@ -249,6 +262,8 @@ function aggregateKpis(rows: ReturnType<typeof mapShopifyOrderToRow>[]) {
       net_sales: values.net_sales || null,
       new_customer_conversions: values.new_customer_conversions || null,
       returning_customer_conversions: values.returning_customer_conversions || null,
+      new_customer_net_sales: values.new_customer_net_sales || null,
+      returning_customer_net_sales: values.returning_customer_net_sales || null,
       currency: mostCommonCurrency,
       aov,
       cos: null,
@@ -363,6 +378,8 @@ async function processWebhookOrder(
         net_sales: kpiRow.net_sales,
         new_customer_conversions: kpiRow.new_customer_conversions,
         returning_customer_conversions: kpiRow.returning_customer_conversions,
+        new_customer_net_sales: kpiRow.new_customer_net_sales,
+        returning_customer_net_sales: kpiRow.returning_customer_net_sales,
         currency: kpiRow.currency,
         aov: kpiRow.aov,
         cos: kpiRow.cos,

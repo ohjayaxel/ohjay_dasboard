@@ -228,12 +228,19 @@ export async function getOverviewData(params: {
     existing.net_sales += row.net_sales ?? 0;
     existing.orders += row.conversions ?? 0;
     
-    // Calculate new customer net sales
-    // We need to estimate this from new_customer_conversions and net_sales
-    // If we have new_customer_conversions, we can estimate: (new_customer_conversions / conversions) * net_sales
-    if (row.new_customer_conversions && row.conversions && row.conversions > 0 && row.net_sales) {
+    let newCustomerNet = row.new_customer_net_sales ?? null;
+    if (
+      newCustomerNet === null &&
+      row.new_customer_conversions &&
+      row.conversions &&
+      row.conversions > 0 &&
+      row.net_sales
+    ) {
       const newCustomerRatio = row.new_customer_conversions / row.conversions;
-      existing.new_customer_net_sales += row.net_sales * newCustomerRatio;
+      newCustomerNet = row.net_sales * newCustomerRatio;
+    }
+    if (newCustomerNet !== null) {
+      existing.new_customer_net_sales += newCustomerNet;
     }
 
     byDate.set(row.date, existing);
