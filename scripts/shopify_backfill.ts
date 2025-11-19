@@ -240,13 +240,11 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
   for (const row of rows) {
     if (!row.processed_at) continue;
     
-    // Filter out non-refund orders with gross_sales = null or <= 0 (match Orders page logic)
+    // Filter out orders with gross_sales = null or <= 0 (match Orders page logic)
     // Orders page filters: includedOrders = orders.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
-    // Refunds should always be included to subtract them from totals, even if gross_sales <= 0
-    if (!row.is_refund) {
-      const grossSalesValue = row.gross_sales ?? 0;
-      if (grossSalesValue <= 0) continue;
-    }
+    // Include all orders (both regular orders and refunds) with gross_sales > 0
+    const grossSalesValue = row.gross_sales ?? 0;
+    if (grossSalesValue <= 0) continue;
     
     const existing = byDate.get(row.processed_at) ?? {
       revenue: 0,
@@ -261,12 +259,15 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
       currencies: new Map<string, number>(),
     };
 
+    // Add all orders (both regular orders and refunds) to totals
+    existing.revenue += row.total_price ?? 0;
+    existing.total_sales += row.gross_sales ?? 0; // gross_sales in shopify_orders is Total Sales
+    existing.total_tax += row.total_tax ?? 0;
+    const netValue = row.net_sales ?? 0;
+    existing.net_sales += netValue;
+    
+    // Only count conversions for non-refund orders
     if (!row.is_refund) {
-      existing.revenue += row.total_price ?? 0;
-      existing.total_sales += row.gross_sales ?? 0; // gross_sales in shopify_orders is Total Sales
-      existing.total_tax += row.total_tax ?? 0;
-      const netValue = row.net_sales ?? 0;
-      existing.net_sales += netValue;
       existing.conversions += 1;
       
       // Track currency frequency (use most common currency for the day)
@@ -281,18 +282,6 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
       } else {
         existing.returning_customer_conversions += 1;
         existing.returning_customer_net_sales += netValue;
-      }
-    } else {
-      // For refunds, subtract from revenue and sales
-      const netValue = row.net_sales ?? 0;
-      existing.revenue -= row.total_price ?? 0;
-      existing.total_sales -= row.gross_sales ?? 0;
-      existing.total_tax -= row.total_tax ?? 0;
-      existing.net_sales -= netValue;
-      if (row.is_new_customer) {
-        existing.new_customer_net_sales -= netValue;
-      } else {
-        existing.returning_customer_net_sales -= netValue;
       }
     }
     byDate.set(row.processed_at, existing);

@@ -56,10 +56,10 @@ async function check() {
     .eq('processed_at', date);
 
   if (orders) {
-    // Match Orders page filter: include refunds always, non-refunds only if gross_sales > 0
+    // Match Orders page filter: include all orders with gross_sales > 0 (both regular orders and refunds)
     const includedOrders = orders.filter((o) => {
       const grossSales = Number(o.gross_sales) || 0;
-      return o.is_refund || grossSales > 0;
+      return grossSales > 0;
     });
 
     let ordersTotalSales = 0;
@@ -67,44 +67,40 @@ async function check() {
     let ordersNetSales = 0;
     let ordersTotalTax = 0;
     
-    // Match Orders page calculation: add regular orders, subtract refunds
+    // Match Orders page calculation: add all included orders (both regular orders and refunds)
     for (const order of includedOrders) {
       const totalSales = Number(order.gross_sales) || 0;
       const tax = Number(order.total_tax) || 0;
       const net = Number(order.net_sales) || 0;
       const grossSales = totalSales - tax;
 
-      if (order.is_refund) {
-        // Subtract refunds
-        ordersTotalSales -= totalSales;
-        ordersTotalTax -= tax;
-        ordersGrossSales -= grossSales;
-        ordersNetSales -= net;
-      } else {
-        // Add regular orders
-        ordersTotalSales += totalSales;
-        ordersTotalTax += tax;
-        ordersGrossSales += grossSales;
-        ordersNetSales += net;
-      }
+      // Add all orders (both regular orders and refunds)
+      ordersTotalSales += totalSales;
+      ordersTotalTax += tax;
+      ordersGrossSales += grossSales;
+      ordersNetSales += net;
     }
 
     const refunds = orders.filter(o => o.is_refund);
     const regularOrders = orders.filter(o => !o.is_refund);
+    const includedRefunds = includedOrders.filter(o => o.is_refund);
+    const includedRegular = includedOrders.filter(o => !o.is_refund);
 
     console.log('=== Orders calculation (from shopify_orders, matching Orders page) ===');
     console.log(`Total orders: ${orders.length}`);
     console.log(`Regular orders: ${regularOrders.length}`);
     console.log(`Refunds: ${refunds.length}`);
-    console.log(`Included orders (refunds always + non-refunds with gross_sales > 0): ${includedOrders.length}\n`);
-    console.log(`Total Sales (SUM, refunds subtracted): ${ordersTotalSales}`);
+    console.log(`Included orders (gross_sales > 0): ${includedOrders.length}`);
+    console.log(`  - Regular orders included: ${includedRegular.length}`);
+    console.log(`  - Refunds included: ${includedRefunds.length}\n`);
+    console.log(`Total Sales (SUM of all included): ${ordersTotalSales}`);
     console.log(`Total Tax: ${ordersTotalTax}`);
-    console.log(`Gross Sales (Total Sales - Tax, refunds subtracted): ${ordersGrossSales}`);
-    console.log(`Net Sales (refunds subtracted): ${ordersNetSales}\n`);
+    console.log(`Gross Sales (Total Sales - Tax): ${ordersGrossSales}`);
+    console.log(`Net Sales: ${ordersNetSales}\n`);
     
     console.log('=== Difference ===');
     console.log(`KPI Gross Sales: ${totalGrossSales}`);
-    console.log(`Orders Gross Sales (with refunds subtracted): ${ordersGrossSales}`);
+    console.log(`Orders Gross Sales: ${ordersGrossSales}`);
     console.log(`Difference: ${Math.abs(ordersGrossSales - totalGrossSales)}`);
   }
 }
