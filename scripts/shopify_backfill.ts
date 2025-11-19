@@ -115,10 +115,16 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
 
   const isRefund = Array.isArray(order.refunds) && order.refunds.length > 0;
 
-  const totalPrice = parseFloat(order.total_price || '0');
-  const totalTax = parseFloat(order.total_tax || '0');
-  const totalDiscounts = parseFloat(order.total_discounts || '0');
-  const subtotalPrice = parseFloat(order.subtotal_price || '0');
+  const parseAmount = (value: string | number | null | undefined) => {
+    if (value === null || value === undefined || value === '') return 0;
+    const num = typeof value === 'number' ? value : parseFloat(value);
+    return Number.isFinite(num) ? num : 0;
+  };
+
+  const totalPrice = parseAmount(order.total_price);
+  const totalTax = parseAmount(order.total_tax);
+  const totalDiscounts = parseAmount(order.total_discounts);
+  const subtotalPrice = parseAmount(order.subtotal_price);
   
   // Calculate refunds using Shopify-like calculation
   // Convert our ShopifyOrder to SalesShopifyOrder format for refund calculation
@@ -186,9 +192,11 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
       // (as long as there are line_items, it's a valid sale)
       grossSales = roundTo2Decimals(calculatedGrossSales);
 
-      // Net Sales = Gross Sales - (discounts + returns)
+      const grossExcludingTax = roundTo2Decimals(calculatedGrossSales - totalTax);
+
+      // Net Sales = (Gross Sales - Tax) - (discounts + returns)
       // Net Sales can be negative if discounts exceed gross sales
-      netSales = roundTo2Decimals(grossSales - totalDiscounts - totalRefunds);
+      netSales = roundTo2Decimals(grossExcludingTax - totalDiscounts - totalRefunds);
     }
   }
 

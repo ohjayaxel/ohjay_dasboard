@@ -359,8 +359,18 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
   }
   grossSales = Math.round(grossSales * 100) / 100;
 
-  // Net Sales = Gross Sales - (discounts + returns)
-  const netSales = Math.round((grossSales - discounts - returns) * 100) / 100;
+  const totalTax = (() => {
+    if (order.total_tax === null || order.total_tax === undefined || order.total_tax === '') {
+      return 0;
+    }
+    const tax = parseFloat(order.total_tax);
+    return Number.isFinite(tax) ? tax : 0;
+  })();
+
+  const grossExcludingTax = Math.round((grossSales - totalTax) * 100) / 100;
+
+  // Net Sales = (Gross Sales - Tax) - (discounts + returns)
+  const netSales = Math.round((grossExcludingTax - discounts - returns) * 100) / 100;
 
   return { grossSales, discounts, returns, netSales };
 }
