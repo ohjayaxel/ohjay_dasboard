@@ -26,13 +26,22 @@ function buildRedirectUri(): string {
   return `${baseUrl}${redirectPath}`;
 }
 
-function requireAppCredentials() {
+// Kräv credentials för OAuth flow
+function requireOAuthCredentials() {
   if (!SHOPIFY_API_KEY) {
-    throw new Error('Missing SHOPIFY_API_KEY environment variable.');
+    throw new Error('Missing SHOPIFY_API_KEY environment variable. Required for OAuth flow.');
   }
 
   if (!SHOPIFY_API_SECRET) {
-    throw new Error('Missing SHOPIFY_API_SECRET environment variable.');
+    throw new Error('Missing SHOPIFY_API_SECRET environment variable. Required for OAuth flow.');
+  }
+}
+
+// Varning för bakåtkompatibilitet (Custom Apps behöver inte dessa)
+function requireAppCredentials() {
+  // Varnar bara, kastar inte error (för Custom Apps kan fungera utan dessa)
+  if (!SHOPIFY_API_KEY || !SHOPIFY_API_SECRET) {
+    console.warn('SHOPIFY_API_KEY or SHOPIFY_API_SECRET missing. OAuth flow will not work, but Custom Apps can still be used.');
   }
 }
 
@@ -95,7 +104,7 @@ export async function getShopifyAuthorizeUrl(options: {
   shopDomain: string;
   state?: string; // Optional pre-signed state from API
 }) {
-  requireAppCredentials();
+  requireOAuthCredentials(); // Kräv credentials för OAuth
 
   // Normalisera shop domain
   const normalizedShop = options.shopDomain
@@ -155,7 +164,7 @@ export async function handleShopifyOAuthCallback(options: {
   state: string;
   shop: string;
 }) {
-  requireAppCredentials();
+  requireOAuthCredentials(); // Kräv credentials för OAuth
 
   // Normalisera shop domain
   const normalizedShop = normalizeShopDomain(options.shop);
@@ -214,17 +223,24 @@ export async function handleShopifyOAuthCallback(options: {
   }
 }
 
-export async function verifyShopifyWebhook(payload: string, hmacHeader: string | null): Promise<boolean> {
-  if (!SHOPIFY_API_SECRET) {
-    console.warn('Missing SHOPIFY_API_SECRET; skipping webhook verification.');
-    return true;
+export async function verifyShopifyWebhook(
+  payload: string, 
+  hmacHeader: string | null,
+  webhookSecret?: string // Optional: custom webhook secret från connection metadata
+): Promise<boolean> {
+  // För Custom Apps, kan webhook secret komma från connection metadata
+  const secretToUse = webhookSecret || SHOPIFY_API_SECRET;
+  
+  if (!secretToUse) {
+    console.warn('Missing webhook secret; skipping webhook verification.');
+    return true; // Allow if no secret configured (för development/Custom Apps)
   }
 
   if (!hmacHeader) {
     return false;
   }
 
-  const digest = createHmac('sha256', SHOPIFY_API_SECRET).update(payload).digest('base64');
+  const digest = createHmac('sha256', secretToUse).update(payload).digest('base64');
   return digest === hmacHeader;
 }
 
@@ -238,7 +254,8 @@ export async function getShopifyAccessToken(tenantId: string): Promise<string | 
 }
 
 export async function registerShopifyWebhooks(shopDomain: string, accessToken: string): Promise<void> {
-  requireAppCredentials();
+  // Webhooks behöver bara access token, inte API_KEY/SECRET
+  // requireAppCredentials(); // <-- TA BORT - behövs inte för Custom Apps
 
   const normalizedShop = normalizeShopDomain(shopDomain);
   const webhookBaseUrl = APP_BASE_URL.replace(/\/$/, '');
@@ -387,19 +404,9 @@ export async function fetchShopifyOrders(params: {
 }) {
   const accessToken = await getShopifyAccessToken(params.tenantId);
 
-  if (!accessToken || !SHOPIFY_API_SECRET) {
-    const today = new Date().toISOString().slice(0, 10);
-    return [
-      {
-        id: `mock-order-${params.tenantId}`,
-        processed_at: today,
-        total_price: '120.50',
-        subtotal_price: '110.00',
-        total_discounts: '10.50',
-        currency: 'USD',
-        customer: { id: 'mock-customer' },
-      },
-    ];
+  // TA BORT kontrollen på SHOPIFY_API_SECRET - den behövs inte för att hämta orders
+  if (!accessToken) {
+    throw new Error('No access token found for this tenant');
   }
 
   const url = new URL(`https://${params.shopDomain}/admin/api/2023-10/orders.json`);
