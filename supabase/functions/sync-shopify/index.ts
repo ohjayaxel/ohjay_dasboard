@@ -437,18 +437,16 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     // (discounts will be subtracted in Net Sales, not excluded from Gross Sales)
     const hasLineItems = order.line_items && order.line_items.length > 0;
     if (hasLineItems) {
-      // Gross Sales should EXCLUDE tax to match file definition (Bruttoförsäljning exklusive moms)
-      // sales.grossSales includes tax (25% VAT), so we divide by 1.25 to get gross excluding tax
-      // This matches the file calculation method
-      const grossExcludingTax = sales.grossSales / 1.25;
-      grossSales = Math.round(grossExcludingTax * 100) / 100; // Store gross_sales excluding tax
+      // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
+      // This matches what user expects: gross_sales should be the same as total_price
+      grossSales = Math.round(totalPrice * 100) / 100;
       
       // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
       // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
       // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
       // In our system, sales.discounts is POSITIVE, so we subtract it
       // File does NOT subtract tax from net sales
-      netSales = Math.round((grossExcludingTax - sales.discounts - sales.returns) * 100) / 100;
+      netSales = Math.round((grossSales - sales.discounts - sales.returns) * 100) / 100;
     }
   }
 
@@ -529,7 +527,9 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
     // Add all orders (both regular orders and refunds) to totals
     const netValue = row.net_sales ?? 0;
     existing.revenue += row.total_price ?? 0;
-    existing.total_sales += row.gross_sales ?? 0; // gross_sales in shopify_orders is Total Sales
+    // Total Sales = total_price + tax (the actual total sales including tax)
+    const totalSales = (row.total_price ?? 0) + (row.total_tax ?? 0);
+    existing.total_sales += totalSales;
     existing.total_tax += row.total_tax ?? 0;
     existing.net_sales += netValue;
     
@@ -567,9 +567,9 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
       }
     }
     
-    // Gross Sales is already stored excluding tax in shopify_orders table
-    // So we just sum it up directly (no need to subtract tax again)
-    const grossSales = values.total_sales;
+    // Gross Sales = sum of gross_sales from shopify_orders (which is now total_price)
+    // This is the same as revenue, but kept separate for clarity
+    const grossSales = values.revenue;
     
     return {
       date,
