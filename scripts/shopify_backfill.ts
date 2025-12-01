@@ -675,9 +675,16 @@ async function main() {
   
   const allOrdersWithDateFilter = allOrdersFetched.filter((order) => {
     // Match file behavior: Include orders based on created_at OR processed_at OR refund.created_at
-    // File seems to use created_at when grouping orders, not just processed_at
-    const processed = order.processed_at ? new Date(order.processed_at) : null;
-    const created = order.created_at ? new Date(order.created_at) : null;
+    // Parse dates in local timezone (Stockholm/EU) to match Shopify's date display
+    const processedDateStr = order.processed_at 
+      ? new Date(order.processed_at).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' })
+      : null;
+    const createdDateStr = order.created_at
+      ? new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' })
+      : null;
+    
+    const processed = processedDateStr ? new Date(processedDateStr + 'T00:00:00') : null;
+    const created = createdDateStr ? new Date(createdDateStr + 'T00:00:00') : null;
     
     // Order matches if created_at OR processed_at is in target range
     const matchesCreatedDate = created ? created >= targetSinceDate && created <= targetUntilDate : false;
@@ -689,7 +696,8 @@ async function main() {
     if (order.refunds && Array.isArray(order.refunds) && order.refunds.length > 0) {
       for (const refund of order.refunds) {
         if (refund.created_at) {
-          const refundDate = new Date(refund.created_at);
+          const refundDateStr = new Date(refund.created_at).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' });
+          const refundDate = new Date(refundDateStr + 'T00:00:00');
           if (refundDate >= targetSinceDate && refundDate <= targetUntilDate) {
             hasRefundOnTargetDate = true;
             break;
@@ -735,7 +743,11 @@ async function main() {
     // 2. If order was created on target date (but processed_at is different), use created_at as processed_at
     // 3. Otherwise, use processed_at as-is
     
-    const orderCreatedAt = order.created_at ? new Date(order.created_at).toISOString().slice(0, 10) : null;
+    // Parse dates in local timezone (not UTC) to match Shopify's date display
+    // Shopify dates like "2025-11-28T00:55:21+01:00" should be treated as 2025-11-28, not 2025-11-27 (UTC)
+    const orderCreatedAt = order.created_at 
+      ? new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' })
+      : null;
     const orderProcessedAt = originalProcessedAt;
     
     let targetDate: string | null = null;
@@ -744,7 +756,7 @@ async function main() {
     if (order.refunds && Array.isArray(order.refunds) && order.refunds.length > 0) {
       for (const refund of order.refunds) {
         if (refund.created_at) {
-          const refundDate = new Date(refund.created_at).toISOString().slice(0, 10);
+          const refundDate = new Date(refund.created_at).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' });
           if (refundDate >= since && refundDate <= until) {
             targetDate = refundDate;
             console.log(`[shopify_backfill] Order ${order.id}: Using refund.created_at=${refundDate} (was processed_at=${orderProcessedAt})`);
