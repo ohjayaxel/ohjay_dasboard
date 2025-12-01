@@ -405,30 +405,46 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
   const defaultShopifyBackfillSince = shopifySyncStartDate || '2025-01-01'
   const shopifyBackfillForm =
     shopify.status === 'connected' ? (
-      <form
-        action={triggerShopifyBackfill}
-        className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
-      >
-        <input type="hidden" name="tenantId" value={tenant.id} />
-        <input type="hidden" name="tenantSlug" value={tenant.slug} />
-        <div className="space-y-2">
-          <Label htmlFor="shopify-backfill-since">Backfill från datum</Label>
-          <Input
-            id="shopify-backfill-since"
-            type="date"
-            name="since"
-            defaultValue={defaultShopifyBackfillSince}
-            className="h-10"
-            required
-          />
-          <p className="text-xs text-muted-foreground">
-            Hämtar ordrar från valt datum fram till idag en gång. Flaggan återställs automatiskt efter körning.
-          </p>
-        </div>
-        <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Backfillar...">
-          Kör backfill
-        </FormSubmitButton>
-      </form>
+      <div className="space-y-4">
+        <Alert>
+          <AlertDescription>
+            <p className="font-medium mb-2">💡 Rekommendation: Använd lokal backfill</p>
+            <p className="text-sm text-muted-foreground mb-2">
+              För stora backfills (mer än ~100 ordrar eller längre än 1 månad) rekommenderas att köra backfill lokalt istället för online via denna knapp.
+            </p>
+            <p className="text-sm font-mono bg-muted p-2 rounded mt-2">
+              pnpm tsx scripts/shopify_backfill.ts --tenant {tenant.slug} --since {defaultShopifyBackfillSince}
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              Se <code className="text-xs">scripts/README_SHOPIFY_BACKFILL.md</code> för mer information.
+            </p>
+          </AlertDescription>
+        </Alert>
+        <form
+          action={triggerShopifyBackfill}
+          className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+        >
+          <input type="hidden" name="tenantId" value={tenant.id} />
+          <input type="hidden" name="tenantSlug" value={tenant.slug} />
+          <div className="space-y-2">
+            <Label htmlFor="shopify-backfill-since">Backfill från datum (online)</Label>
+            <Input
+              id="shopify-backfill-since"
+              type="date"
+              name="since"
+              defaultValue={defaultShopifyBackfillSince}
+              className="h-10"
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              Hämtar ordrar från valt datum fram till idag en gång. Rekommenderas endast för små backfills (&lt;100 ordrar, &lt;1 månad). Flaggan återställs automatiskt efter körning.
+            </p>
+          </div>
+          <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Backfillar...">
+            Kör backfill (online)
+          </FormSubmitButton>
+        </form>
+      </div>
     ) : (
       <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm text-muted-foreground">
         Koppla Shopify för att kunna backfilla historiska ordrar.
