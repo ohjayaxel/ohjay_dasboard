@@ -182,6 +182,53 @@ export function ShopifyConnect({
     }
   };
 
+  const handleCustomAppConnect = () => {
+    startTransition(async () => {
+      if (!customAppShopDomain.trim() || !customAppToken.trim()) {
+        toast({
+          title: 'Missing fields',
+          description: 'Please enter both shop domain and access token.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      try {
+        const formData = new FormData();
+        formData.set('tenantId', tenantId);
+        if (tenantSlug) {
+          formData.set('tenantSlug', tenantSlug);
+        }
+        formData.set('shopDomain', customAppShopDomain.trim());
+        formData.set('accessToken', customAppToken.trim());
+
+        await connectShopifyCustomAppAction(formData);
+        
+        // Success - redirect will happen in server action
+        toast({
+          title: 'Connecting...',
+          description: 'Setting up Shopify connection.',
+        });
+      } catch (error: any) {
+        // NEXT_REDIRECT is expected and should be handled gracefully
+        if (error?.digest === 'NEXT_REDIRECT' || error?.message === 'NEXT_REDIRECT') {
+          if (tenantSlug) {
+            router.push(`/admin/tenants/${tenantSlug}/integrations?status=shopify-connected`);
+          } else {
+            router.refresh();
+          }
+          return;
+        }
+        console.error('Failed to connect Shopify Custom App', error);
+        toast({
+          title: 'Connection failed',
+          description: error instanceof Error ? error.message : 'Unable to connect. Please try again.',
+          variant: 'destructive',
+        });
+      }
+    });
+  };
+
 
   return (
     <div className="space-y-4">
@@ -240,14 +287,11 @@ export function ShopifyConnect({
               <p className="text-sm text-muted-foreground">
                 Connect using a Custom App access token from your Shopify Admin.
               </p>
-              <form action={connectShopifyCustomAppAction} className="space-y-4">
-                <input type="hidden" name="tenantId" value={tenantId} />
-                <input type="hidden" name="tenantSlug" value={tenantSlug || ''} />
+              <form className="space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="shop-domain">Shop Domain</Label>
                   <Input
                     id="shop-domain"
-                    name="shopDomain"
                     type="text"
                     placeholder="your-store.myshopify.com"
                     value={customAppShopDomain}
@@ -262,7 +306,6 @@ export function ShopifyConnect({
                   <Label htmlFor="access-token">Access Token</Label>
                   <Input
                     id="access-token"
-                    name="accessToken"
                     type="password"
                     placeholder="shpat_..."
                     value={customAppToken}
@@ -282,7 +325,11 @@ export function ShopifyConnect({
                   >
                     {isTestingToken ? 'Testing...' : 'Test Connection'}
                   </Button>
-                  <Button type="submit" disabled={isPending || !customAppShopDomain.trim() || !customAppToken.trim()}>
+                  <Button 
+                    type="button"
+                    onClick={handleCustomAppConnect}
+                    disabled={isPending || !customAppShopDomain.trim() || !customAppToken.trim()}
+                  >
                     {isPending ? 'Connecting...' : 'Connect'}
                   </Button>
                 </div>
