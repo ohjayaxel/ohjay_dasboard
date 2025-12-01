@@ -390,11 +390,62 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
   return { grossSales, discounts, returns, netSales };
 }
 
+// Helper function to parse date in Stockholm timezone (not UTC)
+// This matches file behavior where dates are grouped by local date, not UTC date
+function parseDateInStockholmTimezone(dateStr: string | null): string | null {
+  if (!dateStr) return null;
+  try {
+    // Parse date and convert to Stockholm timezone
+    const date = new Date(dateStr);
+    // Use toLocaleDateString with Stockholm timezone to get correct date
+    // 'en-CA' format gives us YYYY-MM-DD
+    return date.toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' });
+  } catch {
+    return null;
+  }
+}
+
 function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrderRow {
-  // Extract date from processed_at (format: "2024-01-15T10:30:00-05:00")
-  const processedAt = order.processed_at
-    ? new Date(order.processed_at).toISOString().slice(0, 10)
+  // Extract date from processed_at using Stockholm timezone (matches file behavior)
+  // For sync: Use processed_at as-is, but with correct timezone parsing
+  // Priority logic for date assignment (created_at vs processed_at vs refund.created_at)
+  // will be handled in backfill script, but for real-time syncs we use processed_at
+  const processedAtRaw = order.processed_at
+    ? parseDateInStockholmTimezone(order.processed_at)
     : null;
+  
+  // For sync operations, determine the correct processed_at based on the same logic as backfill:
+  // 1. If order has refunds created today, use refund.created_at
+  // 2. If created_at is today, use created_at (file behavior)
+  // 3. Otherwise, use processed_at
+  const orderCreatedAt = order.created_at
+    ? parseDateInStockholmTimezone(order.created_at)
+    : null;
+  
+  let processedAt: string | null = processedAtRaw;
+  
+  // Get today's date in Stockholm timezone for comparison
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' });
+  
+  // Priority 1: Check for refunds created today
+  if (order.refunds && Array.isArray(order.refunds) && order.refunds.length > 0) {
+    for (const refund of order.refunds) {
+      if (refund.created_at) {
+        const refundDate = parseDateInStockholmTimezone(refund.created_at);
+        if (refundDate === today) {
+          processedAt = refundDate;
+          break;
+        }
+      }
+    }
+  }
+  
+  // Priority 2: If created_at is today, use created_at (file behavior)
+  if (orderCreatedAt === today) {
+    processedAt = orderCreatedAt;
+  }
+  
+  // Priority 3: Use processed_at if available (already set above)
 
   // Check if this is a refund by looking at refunds array
   const isRefund = Array.isArray(order.refunds) && order.refunds.length > 0;
