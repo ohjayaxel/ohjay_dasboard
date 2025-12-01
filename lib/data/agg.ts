@@ -224,8 +224,13 @@ export async function getOverviewData(params: {
       aov: null,
     };
 
-    existing.gross_sales += row.gross_sales ?? 0;
-    existing.net_sales += row.net_sales ?? 0;
+    // Use gross_sales if available, otherwise fallback to revenue
+    // This handles cases where orders have revenue but gross_sales is null (e.g., test/cancelled orders)
+    const grossSales = row.gross_sales ?? row.revenue ?? 0;
+    const netSales = row.net_sales ?? row.revenue ?? 0;
+    
+    existing.gross_sales += grossSales;
+    existing.net_sales += netSales;
     existing.orders += row.conversions ?? 0;
     
     let newCustomerNet = row.new_customer_net_sales ?? null;
@@ -234,10 +239,10 @@ export async function getOverviewData(params: {
       row.new_customer_conversions &&
       row.conversions &&
       row.conversions > 0 &&
-      row.net_sales
+      netSales > 0
     ) {
       const newCustomerRatio = row.new_customer_conversions / row.conversions;
-      newCustomerNet = row.net_sales * newCustomerRatio;
+      newCustomerNet = netSales * newCustomerRatio;
     }
     if (newCustomerNet !== null) {
       existing.new_customer_net_sales += newCustomerNet;
@@ -470,7 +475,7 @@ export async function getMarketsData(params: {
       totalMetaSpend = sum(metaRows.map((row) => row.spend ?? 0));
     }
   } else {
-    // If we don't have country breakdown data, fetch aggregated Meta spend
+  // If we don't have country breakdown data, fetch aggregated Meta spend
     const metaRows = await fetchKpiDaily({
       tenantId: params.tenantId,
       from: params.from,
