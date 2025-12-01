@@ -304,6 +304,79 @@ export async function registerShopifyWebhooks(shopDomain: string, accessToken: s
   }
 }
 
+export async function validateCustomAppToken(shopDomain: string, accessToken: string): Promise<{ valid: boolean; error?: string }> {
+  const normalizedShop = normalizeShopDomain(shopDomain);
+  const testUrl = `https://${normalizedShop}/admin/api/2023-10/shop.json`;
+
+  try {
+    const res = await fetch(testUrl, {
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+      },
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      let errorMessage = `Shopify API returned ${res.status}`;
+      try {
+        const errorBody = JSON.parse(body);
+        if (errorBody.errors) {
+          errorMessage = typeof errorBody.errors === 'string' 
+            ? errorBody.errors 
+            : JSON.stringify(errorBody.errors);
+        }
+      } catch {
+        errorMessage = body || errorMessage;
+      }
+      return { valid: false, error: errorMessage };
+    }
+
+    // Token is valid if we can successfully fetch shop data
+    const body = await res.json();
+    if (body.shop) {
+      return { valid: true };
+    }
+
+    return { valid: false, error: 'Invalid response from Shopify API' };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return { valid: false, error: `Failed to validate token: ${errorMessage}` };
+  }
+}
+
+export async function connectShopifyCustomApp(options: {
+  tenantId: string;
+  shopDomain: string;
+  accessToken: string;
+}): Promise<void> {
+  const normalizedShop = normalizeShopDomain(options.shopDomain);
+
+  // Validate token first
+  const validation = await validateCustomAppToken(normalizedShop, options.accessToken);
+  if (!validation.valid) {
+    throw new Error(validation.error || 'Invalid Shopify access token');
+  }
+
+  // Save connection
+  await upsertConnection(options.tenantId, {
+    status: 'connected',
+    accessToken: options.accessToken,
+    meta: {
+      shop: normalizedShop,
+      store_domain: normalizedShop,
+      connection_method: 'custom_app',
+    },
+  });
+
+  // Register webhooks automatically
+  try {
+    await registerShopifyWebhooks(normalizedShop, options.accessToken);
+  } catch (error) {
+    console.error(`Failed to register Shopify webhooks for ${normalizedShop}:`, error);
+    // Don't fail connection if webhook registration fails - can be done manually later
+  }
+}
+
 export async function fetchShopifyOrders(params: {
   tenantId: string;
   shopDomain: string;

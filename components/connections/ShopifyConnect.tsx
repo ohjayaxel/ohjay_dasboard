@@ -1,11 +1,15 @@
 'use client';
 
-import { useMemo, useTransition } from 'react';
+import { useState, useMemo, useTransition } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
+import { connectShopifyCustomAppAction, testShopifyCustomAppToken } from '@/app/(dashboard)/admin/actions';
 
 type ConnectActionResult = {
   redirectUrl: string;
@@ -17,6 +21,7 @@ export type ShopifyConnectProps = {
   status: 'connected' | 'disconnected' | 'error';
   shopDomain?: string | null;
   lastSyncedAt?: string | null;
+  tenantId: string;
   onConnect?: AsyncAction<ConnectActionResult>;
   onDisconnect?: AsyncAction;
 };
@@ -25,6 +30,7 @@ export function ShopifyConnect({
   status,
   shopDomain,
   lastSyncedAt,
+  tenantId,
   onConnect,
   onDisconnect,
 }: ShopifyConnectProps) {
@@ -32,6 +38,10 @@ export function ShopifyConnect({
   const router = useRouter();
   const pathname = usePathname();
   const [isPending, startTransition] = useTransition();
+  const [connectionMethod, setConnectionMethod] = useState<'oauth' | 'custom_app'>('oauth');
+  const [customAppShopDomain, setCustomAppShopDomain] = useState('');
+  const [customAppToken, setCustomAppToken] = useState('');
+  const [isTestingToken, setIsTestingToken] = useState(false);
   
   // Extract tenantSlug from pathname (/admin/tenants/[tenantSlug]/integrations)
   const tenantSlugMatch = pathname.match(/\/admin\/tenants\/([^/]+)/);
@@ -131,6 +141,55 @@ export function ShopifyConnect({
     });
   };
 
+  const handleTestToken = async () => {
+    if (!customAppShopDomain.trim() || !customAppToken.trim()) {
+      toast({
+        title: 'Missing fields',
+        description: 'Please enter both shop domain and access token.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setIsTestingToken(true);
+    try {
+      const result = await testShopifyCustomAppToken({
+        shopDomain: customAppShopDomain.trim(),
+        accessToken: customAppToken.trim(),
+      });
+
+      if (result.valid) {
+        toast({
+          title: 'Token valid',
+          description: 'The access token is valid and can connect to Shopify.',
+        });
+      } else {
+        toast({
+          title: 'Token invalid',
+          description: result.error || 'The access token could not be validated.',
+          variant: 'destructive',
+        });
+      }
+    } catch (error) {
+      console.error('Failed to test token', error);
+      toast({
+        title: 'Test failed',
+        description: 'Unable to test token. Please try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsTestingToken(false);
+    }
+  };
+
+  const handleCustomAppConnect = async (formData: FormData) => {
+    formData.set('tenantId', tenantId);
+    if (tenantSlug) {
+      formData.set('tenantSlug', tenantSlug);
+    }
+    await connectShopifyCustomAppAction(formData);
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4">
@@ -154,18 +213,89 @@ export function ShopifyConnect({
         </div>
       </dl>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={handleConnect} disabled={isPending || status === 'connected'}>
-          {status === 'connected' ? 'Reconnect Shopify' : 'Connect Shopify'}
-        </Button>
-        <Button
-          variant="outline"
-          onClick={handleDisconnect}
-          disabled={isPending || status !== 'connected'}
-        >
-          Disconnect
-        </Button>
-      </div>
+      {status === 'connected' ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={handleConnect} disabled={isPending}>
+            Reconnect Shopify
+          </Button>
+          <Button
+            variant="outline"
+            onClick={handleDisconnect}
+            disabled={isPending}
+          >
+            Disconnect
+          </Button>
+        </div>
+      ) : (
+        <Tabs value={connectionMethod} onValueChange={(value) => setConnectionMethod(value as 'oauth' | 'custom_app')}>
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="oauth">OAuth</TabsTrigger>
+            <TabsTrigger value="custom_app">Custom App</TabsTrigger>
+          </TabsList>
+          <TabsContent value="oauth" className="space-y-4">
+            <div className="rounded-lg border bg-muted/30 p-4">
+              <p className="text-sm text-muted-foreground mb-4">
+                Connect via OAuth to automatically authorize your Shopify store.
+              </p>
+              <Button onClick={handleConnect} disabled={isPending}>
+                Connect via OAuth
+              </Button>
+            </div>
+          </TabsContent>
+          <TabsContent value="custom_app" className="space-y-4">
+            <div className="rounded-lg border bg-muted/30 p-4 space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Connect using a Custom App access token from your Shopify Admin.
+              </p>
+              <form action={handleCustomAppConnect} className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="shop-domain">Shop Domain</Label>
+                  <Input
+                    id="shop-domain"
+                    name="shopDomain"
+                    type="text"
+                    placeholder="your-store.myshopify.com"
+                    value={customAppShopDomain}
+                    onChange={(e) => setCustomAppShopDomain(e.target.value)}
+                    required
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Enter your Shopify store domain (e.g., your-store.myshopify.com)
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="access-token">Access Token</Label>
+                  <Input
+                    id="access-token"
+                    name="accessToken"
+                    type="password"
+                    placeholder="shpat_..."
+                    value={customAppToken}
+                    onChange={(e) => setCustomAppToken(e.target.value)}
+                    required
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Enter the Admin API access token from your Custom App settings
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleTestToken}
+                    disabled={isTestingToken || !customAppShopDomain.trim() || !customAppToken.trim()}
+                  >
+                    {isTestingToken ? 'Testing...' : 'Test Connection'}
+                  </Button>
+                  <Button type="submit" disabled={isPending || !customAppShopDomain.trim() || !customAppToken.trim()}>
+                    {isPending ? 'Connecting...' : 'Connect'}
+                  </Button>
+                </div>
+              </form>
+            </div>
+          </TabsContent>
+        </Tabs>
+      )}
     </div>
   );
 }

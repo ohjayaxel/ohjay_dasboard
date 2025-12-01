@@ -444,6 +444,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           status={shopify.status}
           shopDomain={shopifyStoreDomain}
           lastSyncedAt={shopify.updatedAt ?? undefined}
+          tenantId={tenant.id}
           onConnect={shopifyConnectAction}
           onDisconnect={shopifyDisconnectAction}
         />

@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { requirePlatformAdmin, getCurrentUser } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
-import { getShopifyAuthorizeUrl } from '@/lib/integrations/shopify'
+import { getShopifyAuthorizeUrl, connectShopifyCustomApp, validateCustomAppToken } from '@/lib/integrations/shopify'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { logger, withRequestContext } from '@/lib/logger'
 import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
@@ -61,6 +61,19 @@ const disconnectShopifySchema = z.object({
 })
 
 const connectShopifySchema = connectMetaSchema
+
+const connectShopifyCustomAppSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+  shopDomain: z
+    .string({ required_error: 'Shop domain is required.' })
+    .min(1, { message: 'Shop domain is required.' }),
+  accessToken: z
+    .string({ required_error: 'Access token is required.' })
+    .min(1, { message: 'Access token is required.' }),
+})
 
 const updateMetaAccountSchema = z.object({
   tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
@@ -1413,6 +1426,80 @@ export async function startShopifyConnectAction(payload: { tenantId: string; ten
     redirectUrl: url,
     state,
   };
+}
+
+export async function testShopifyCustomAppToken(payload: {
+  shopDomain: string;
+  accessToken: string;
+}) {
+  await requirePlatformAdmin();
+
+  const validation = await validateCustomAppToken(payload.shopDomain, payload.accessToken);
+  
+  if (!validation.valid) {
+    return {
+      valid: false,
+      error: validation.error || 'Invalid token',
+    };
+  }
+
+  return {
+    valid: true,
+  };
+}
+
+export async function connectShopifyCustomAppAction(formData: FormData) {
+  await requirePlatformAdmin();
+
+  const result = connectShopifyCustomAppSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+    shopDomain: formData.get('shopDomain'),
+    accessToken: formData.get('accessToken'),
+  });
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid Custom App connection payload.');
+  }
+
+  const { tenantId, tenantSlug, shopDomain, accessToken } = result.data;
+
+  try {
+    await connectShopifyCustomApp({
+      tenantId,
+      shopDomain,
+      accessToken,
+    });
+
+    // Trigger initial sync
+    try {
+      await triggerSyncJobForTenant('shopify', tenantId);
+    } catch (syncError) {
+      console.error('Failed to trigger initial Shopify sync:', syncError);
+      // Don't fail connection if sync trigger fails
+    }
+
+    const user = await getCurrentUser();
+    await withRequestContext(
+      {
+        action: 'shopify_custom_app_connected',
+        tenantId,
+        tenantSlug,
+        userId: user.id,
+        shopDomain,
+      },
+      'Shopify Custom App connected',
+    );
+
+    revalidatePath(`/admin/tenants/${tenantSlug}/integrations`);
+    redirect(`/admin/tenants/${tenantSlug}/integrations?status=shopify-connected`);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error('Failed to connect Shopify Custom App:', errorMessage);
+    
+    revalidatePath(`/admin/tenants/${tenantSlug}/integrations`);
+    redirect(`/admin/tenants/${tenantSlug}/integrations?status=shopify-error&error=${encodeURIComponent(errorMessage)}`);
+  }
 }
 
 export async function disconnectShopify(payload: { tenantId: string; tenantSlug: string }) {
