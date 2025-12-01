@@ -151,6 +151,26 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       ? (shopifyDetails.store_domain as string)
       : null
 
+  const shopifyBackfillSince =
+    typeof shopifyDetails.backfill_since === 'string' && shopifyDetails.backfill_since.length > 0
+      ? (shopifyDetails.backfill_since as string)
+      : null
+
+  // Get recent Shopify sync jobs
+  const { data: shopifyJobs, error: shopifyJobsError } = await supabase
+    .from('jobs_log')
+    .select('id, status, started_at, finished_at, error')
+    .eq('tenant_id', tenant.id)
+    .eq('source', 'shopify')
+    .order('started_at', { ascending: false })
+    .limit(1)
+
+  if (shopifyJobsError) {
+    console.warn('Failed to load Shopify jobs:', shopifyJobsError.message)
+  }
+
+  const latestShopifyJob = shopifyJobs && shopifyJobs.length > 0 ? shopifyJobs[0] : null
+
   const formatTimestamp = (value?: string | null) => {
     if (!value) return null
     try {
@@ -445,6 +465,13 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           shopDomain={shopifyStoreDomain}
           lastSyncedAt={shopify.updatedAt ?? undefined}
           tenantId={tenant.id}
+          backfillSince={shopifyBackfillSince ?? undefined}
+          latestJob={latestShopifyJob ? {
+            status: latestShopifyJob.status as 'pending' | 'running' | 'succeeded' | 'failed',
+            startedAt: latestShopifyJob.started_at || null,
+            finishedAt: latestShopifyJob.finished_at || null,
+            error: latestShopifyJob.error || null,
+          } : undefined}
           onConnect={shopifyConnectAction}
           onDisconnect={shopifyDisconnectAction}
         />

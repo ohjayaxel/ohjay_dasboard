@@ -23,6 +23,13 @@ export type ShopifyConnectProps = {
   shopDomain?: string | null;
   lastSyncedAt?: string | null;
   tenantId: string;
+  backfillSince?: string | null;
+  latestJob?: {
+    status: 'pending' | 'running' | 'succeeded' | 'failed';
+    startedAt: string | null;
+    finishedAt: string | null;
+    error: string | null;
+  };
   onConnect?: AsyncAction<ConnectActionResult>;
   onDisconnect?: AsyncAction;
 };
@@ -32,6 +39,8 @@ export function ShopifyConnect({
   shopDomain,
   lastSyncedAt,
   tenantId,
+  backfillSince,
+  latestJob,
   onConnect,
   onDisconnect,
 }: ShopifyConnectProps) {
@@ -78,6 +87,17 @@ export function ShopifyConnect({
     }
   }, [status, tenantId]);
 
+  // Auto-refresh page when backfill is running
+  useEffect(() => {
+    if (backfillStatus?.active) {
+      const interval = setInterval(() => {
+        router.refresh();
+      }, 5000); // Refresh every 5 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [backfillStatus?.active, router]);
+
   const statusLabel = useMemo(() => {
     // If status is connected but verification shows errors, show error
     const effectiveStatus = status === 'connected' && verifiedStatus === 'error' ? 'error' : status;
@@ -107,6 +127,61 @@ export function ShopifyConnect({
       return lastSyncedAt;
     }
   }, [lastSyncedAt]);
+
+  const backfillStatus = useMemo(() => {
+    if (!backfillSince && !latestJob) {
+      return null;
+    }
+
+    const isBackfilling = backfillSince !== null && latestJob?.status === 'running';
+    const backfillJustFinished = backfillSince === null && latestJob?.status === 'succeeded' && latestJob.startedAt;
+
+    if (isBackfilling && latestJob?.startedAt) {
+      const startTime = new Date(latestJob.startedAt);
+      const now = new Date();
+      const durationMs = now.getTime() - startTime.getTime();
+      const durationSeconds = Math.floor(durationMs / 1000);
+      const minutes = Math.floor(durationSeconds / 60);
+      const seconds = durationSeconds % 60;
+      const hours = Math.floor(minutes / 60);
+      const mins = minutes % 60;
+
+      let durationText = '';
+      if (hours > 0) {
+        durationText = `${hours}h ${mins}m`;
+      } else if (minutes > 0) {
+        durationText = `${minutes}m ${seconds}s`;
+      } else {
+        durationText = `${seconds}s`;
+      }
+
+      return {
+        active: true,
+        since: backfillSince,
+        duration: durationText,
+        status: 'running' as const,
+      };
+    }
+
+    if (backfillJustFinished) {
+      return {
+        active: false,
+        finished: true,
+        status: 'succeeded' as const,
+      };
+    }
+
+    if (latestJob?.status === 'failed' && backfillSince) {
+      return {
+        active: false,
+        failed: true,
+        error: latestJob.error,
+        status: 'failed' as const,
+      };
+    }
+
+    return null;
+  }, [backfillSince, latestJob]);
 
   const handleConnect = () => {
     startTransition(async () => {
@@ -297,6 +372,43 @@ export function ShopifyConnect({
                   <li key={idx} className="text-sm">{error}</li>
                 ))}
               </ul>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {backfillStatus?.active && (
+        <Alert>
+          <AlertDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="font-medium">Backfill running</p>
+                <p className="text-sm text-muted-foreground">
+                  Syncing orders from {backfillStatus.since} • Running for {backfillStatus.duration}
+                </p>
+              </div>
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-foreground"></div>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {backfillStatus?.finished && (
+        <Alert variant="default">
+          <AlertDescription>
+            <p className="font-medium">Backfill completed successfully</p>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {backfillStatus?.failed && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            <div>
+              <p className="font-medium">Backfill failed</p>
+              {backfillStatus.error && (
+                <p className="text-sm mt-1">{backfillStatus.error}</p>
+              )}
             </div>
           </AlertDescription>
         </Alert>
