@@ -466,7 +466,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           lastSyncedAt={shopify.updatedAt ?? undefined}
           tenantId={tenant.id}
           backfillSince={shopifyBackfillSince ?? undefined}
-          latestJob={latestShopifyJob ? {
+          latestJob={latestShopifyJob && latestShopifyJob.status ? {
             status: latestShopifyJob.status as 'pending' | 'running' | 'succeeded' | 'failed',
             startedAt: latestShopifyJob.started_at || null,
             finishedAt: latestShopifyJob.finished_at || null,

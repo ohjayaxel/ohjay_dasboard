@@ -91,7 +91,11 @@ export function ShopifyConnect({
   useEffect(() => {
     if (backfillStatus?.active) {
       const interval = setInterval(() => {
-        router.refresh();
+        try {
+          router.refresh();
+        } catch (error) {
+          console.error('Error refreshing router:', error);
+        }
       }, 5000); // Refresh every 5 seconds
 
       return () => clearInterval(interval);
@@ -129,58 +133,79 @@ export function ShopifyConnect({
   }, [lastSyncedAt]);
 
   const backfillStatus = useMemo(() => {
-    if (!backfillSince && !latestJob) {
-      return null;
-    }
-
-    const isBackfilling = backfillSince !== null && latestJob?.status === 'running';
-    const backfillJustFinished = backfillSince === null && latestJob?.status === 'succeeded' && latestJob.startedAt;
-
-    if (isBackfilling && latestJob?.startedAt) {
-      const startTime = new Date(latestJob.startedAt);
-      const now = new Date();
-      const durationMs = now.getTime() - startTime.getTime();
-      const durationSeconds = Math.floor(durationMs / 1000);
-      const minutes = Math.floor(durationSeconds / 60);
-      const seconds = durationSeconds % 60;
-      const hours = Math.floor(minutes / 60);
-      const mins = minutes % 60;
-
-      let durationText = '';
-      if (hours > 0) {
-        durationText = `${hours}h ${mins}m`;
-      } else if (minutes > 0) {
-        durationText = `${minutes}m ${seconds}s`;
-      } else {
-        durationText = `${seconds}s`;
+    try {
+      if ((!backfillSince || backfillSince === null || backfillSince === undefined) && (!latestJob || !latestJob.status)) {
+        return null;
       }
 
-      return {
-        active: true,
-        since: backfillSince,
-        duration: durationText,
-        status: 'running' as const,
-      };
-    }
+      const hasBackfillSince = backfillSince !== null && backfillSince !== undefined && backfillSince !== '';
+      const hasLatestJob = latestJob && latestJob.status;
+      const isBackfilling = hasBackfillSince && hasLatestJob && latestJob.status === 'running';
+      const backfillJustFinished = !hasBackfillSince && hasLatestJob && latestJob.status === 'succeeded' && latestJob.startedAt;
 
-    if (backfillJustFinished) {
-      return {
-        active: false,
-        finished: true,
-        status: 'succeeded' as const,
-      };
-    }
+      if (isBackfilling && latestJob?.startedAt) {
+        try {
+          const startTime = new Date(latestJob.startedAt);
+          if (isNaN(startTime.getTime())) {
+            return null;
+          }
 
-    if (latestJob?.status === 'failed' && backfillSince) {
-      return {
-        active: false,
-        failed: true,
-        error: latestJob.error,
-        status: 'failed' as const,
-      };
-    }
+          const now = new Date();
+          const durationMs = now.getTime() - startTime.getTime();
+          
+          if (isNaN(durationMs) || durationMs < 0) {
+            return null;
+          }
 
-    return null;
+          const durationSeconds = Math.floor(durationMs / 1000);
+          const minutes = Math.floor(durationSeconds / 60);
+          const seconds = durationSeconds % 60;
+          const hours = Math.floor(minutes / 60);
+          const mins = minutes % 60;
+
+          let durationText = '';
+          if (hours > 0) {
+            durationText = `${hours}h ${mins}m`;
+          } else if (minutes > 0) {
+            durationText = `${minutes}m ${seconds}s`;
+          } else {
+            durationText = `${seconds}s`;
+          }
+
+          return {
+            active: true,
+            since: backfillSince || '',
+            duration: durationText,
+            status: 'running' as const,
+          };
+        } catch (error) {
+          console.error('Error calculating backfill duration:', error);
+          return null;
+        }
+      }
+
+      if (backfillJustFinished) {
+        return {
+          active: false,
+          finished: true,
+          status: 'succeeded' as const,
+        };
+      }
+
+      if (hasLatestJob && latestJob.status === 'failed' && hasBackfillSince) {
+        return {
+          active: false,
+          failed: true,
+          error: latestJob.error || null,
+          status: 'failed' as const,
+        };
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Error calculating backfill status:', error);
+      return null;
+    }
   }, [backfillSince, latestJob]);
 
   const handleConnect = () => {
@@ -377,7 +402,7 @@ export function ShopifyConnect({
         </Alert>
       )}
 
-      {backfillStatus?.active && (
+      {backfillStatus?.active && backfillStatus.since && backfillStatus.duration && (
         <Alert>
           <AlertDescription>
             <div className="flex items-center justify-between">
