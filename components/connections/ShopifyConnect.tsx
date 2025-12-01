@@ -182,13 +182,6 @@ export function ShopifyConnect({
     }
   };
 
-  const handleCustomAppConnect = async (formData: FormData) => {
-    formData.set('tenantId', tenantId);
-    if (tenantSlug) {
-      formData.set('tenantSlug', tenantSlug);
-    }
-    await connectShopifyCustomAppAction(formData);
-  };
 
   return (
     <div className="space-y-4">
@@ -247,7 +240,9 @@ export function ShopifyConnect({
               <p className="text-sm text-muted-foreground">
                 Connect using a Custom App access token from your Shopify Admin.
               </p>
-              <form action={handleCustomAppConnect} className="space-y-4">
+              <form action={connectShopifyCustomAppAction} className="space-y-4">
+                <input type="hidden" name="tenantId" value={tenantId} />
+                <input type="hidden" name="tenantSlug" value={tenantSlug || ''} />
                 <div className="space-y-2">
                   <Label htmlFor="shop-domain">Shop Domain</Label>
                   <Input
