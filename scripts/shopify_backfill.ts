@@ -668,6 +668,8 @@ async function main() {
   
   // Filter orders to target date range based on processed_at (not created_at)
   // This is important because orders can be created earlier but processed later
+  // ALSO: Include orders with refunds created on target date, even if processed_at is different
+  // (This matches how files group orders by refund date)
   const targetSinceDate = new Date(`${since}T00:00:00`);
   const targetUntilDate = new Date(`${until}T23:59:59`);
   
@@ -682,7 +684,24 @@ async function main() {
     }
     
     // Order matches if processed_at (or created_at) is in target range
-    return dateToUse >= targetSinceDate && dateToUse <= targetUntilDate;
+    const matchesProcessedDate = dateToUse >= targetSinceDate && dateToUse <= targetUntilDate;
+    
+    // ALSO: Include if order has refunds created on target date
+    // This matches file behavior where refunds are grouped by refund creation date
+    let hasRefundOnTargetDate = false;
+    if (order.refunds && Array.isArray(order.refunds) && order.refunds.length > 0) {
+      for (const refund of order.refunds) {
+        if (refund.created_at) {
+          const refundDate = new Date(refund.created_at);
+          if (refundDate >= targetSinceDate && refundDate <= targetUntilDate) {
+            hasRefundOnTargetDate = true;
+            break;
+          }
+        }
+      }
+    }
+    
+    return matchesProcessedDate || hasRefundOnTargetDate;
   });
   
   console.log(`[shopify_backfill] Filtered to ${allOrdersWithDateFilter.length} orders with processed_at in range ${since} to ${until}\n`);
@@ -705,7 +724,40 @@ async function main() {
 
 
   // Map to database rows
-  let orderRows = shopifyOrders.map((order) => mapShopifyOrderToRow(tenant.id, order));
+  // For orders with refunds created on target date but processed_at on different date,
+  // update processed_at to refund.created_at to match file behavior
+  // (File groups refunds by refund creation date, not original order processed_at)
+  let orderRows: ShopifyOrderRow[] = [];
+  
+  for (const order of shopifyOrders) {
+    let row = mapShopifyOrderToRow(tenant.id, order);
+    
+    // Check if order has refunds created on target date but processed_at is different
+    // If so, update processed_at to refund.created_at to match file grouping
+    if (order.refunds && Array.isArray(order.refunds) && order.refunds.length > 0) {
+      const originalProcessedAt = row.processed_at;
+      
+      // Find refund created on target date
+      for (const refund of order.refunds) {
+        if (refund.created_at) {
+          const refundDate = new Date(refund.created_at).toISOString().slice(0, 10);
+          
+          // If refund was created on target date but order processed_at is different
+          // Update processed_at to refund date to match file behavior
+          if (refundDate >= since && refundDate <= until && originalProcessedAt !== refundDate) {
+            row = {
+              ...row,
+              processed_at: refundDate,
+            };
+            console.log(`[shopify_backfill] Updating order ${order.id} processed_at from ${originalProcessedAt} to ${refundDate} (refund date)`);
+            break; // Use first refund on target date
+          }
+        }
+      }
+    }
+    
+    orderRows.push(row);
+  }
 
   // Determine if customers are new or returning
   // Sort orders by processed_at (oldest first) to process chronologically
