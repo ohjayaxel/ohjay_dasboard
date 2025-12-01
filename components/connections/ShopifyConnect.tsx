@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useTransition } from 'react';
+import { useState, useMemo, useTransition, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 
 import { Badge } from '@/components/ui/badge';
@@ -8,8 +8,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useToast } from '@/hooks/use-toast';
-import { connectShopifyCustomAppAction, testShopifyCustomAppToken } from '@/app/(dashboard)/admin/actions';
+import { connectShopifyCustomAppAction, testShopifyCustomAppToken, verifyShopifyConnection } from '@/app/(dashboard)/admin/actions';
 
 type ConnectActionResult = {
   redirectUrl: string;
@@ -42,21 +43,54 @@ export function ShopifyConnect({
   const [customAppShopDomain, setCustomAppShopDomain] = useState('');
   const [customAppToken, setCustomAppToken] = useState('');
   const [isTestingToken, setIsTestingToken] = useState(false);
+  const [connectionErrors, setConnectionErrors] = useState<string[]>([]);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifiedStatus, setVerifiedStatus] = useState<'connected' | 'error' | null>(null);
   
   // Extract tenantSlug from pathname (/admin/tenants/[tenantSlug]/integrations)
   const tenantSlugMatch = pathname.match(/\/admin\/tenants\/([^/]+)/);
   const tenantSlug = tenantSlugMatch ? tenantSlugMatch[1] : null;
 
+  // Verify connection when status is connected
+  useEffect(() => {
+    if (status === 'connected') {
+      setIsVerifying(true);
+      verifyShopifyConnection(tenantId)
+        .then((result) => {
+          if (result.connected) {
+            setVerifiedStatus('connected');
+            setConnectionErrors([]);
+          } else {
+            setVerifiedStatus('error');
+            setConnectionErrors(result.errors || []);
+          }
+        })
+        .catch((error) => {
+          setVerifiedStatus('error');
+          setConnectionErrors([`Verification failed: ${error instanceof Error ? error.message : String(error)}`]);
+        })
+        .finally(() => {
+          setIsVerifying(false);
+        });
+    } else {
+      setVerifiedStatus(null);
+      setConnectionErrors([]);
+    }
+  }, [status, tenantId]);
+
   const statusLabel = useMemo(() => {
-    switch (status) {
+    // If status is connected but verification shows errors, show error
+    const effectiveStatus = status === 'connected' && verifiedStatus === 'error' ? 'error' : status;
+    
+    switch (effectiveStatus) {
       case 'connected':
-        return { label: 'Connected', variant: 'default' as const };
+        return { label: isVerifying ? 'Verifying...' : 'Connected', variant: 'default' as const };
       case 'error':
         return { label: 'Error', variant: 'destructive' as const };
       default:
         return { label: 'Disconnected', variant: 'secondary' as const };
     }
-  }, [status]);
+  }, [status, verifiedStatus, isVerifying]);
 
   const formattedSync = useMemo(() => {
     if (!lastSyncedAt) {
@@ -252,6 +286,21 @@ export function ShopifyConnect({
           <dd>{formattedSync}</dd>
         </div>
       </dl>
+
+      {status === 'connected' && connectionErrors.length > 0 && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            <div className="space-y-1">
+              <p className="font-medium">Connection verification failed:</p>
+              <ul className="list-disc list-inside space-y-0.5">
+                {connectionErrors.map((error, idx) => (
+                  <li key={idx} className="text-sm">{error}</li>
+                ))}
+              </ul>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {status === 'connected' ? (
         <div className="flex flex-wrap items-center gap-2">

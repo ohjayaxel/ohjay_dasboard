@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { requirePlatformAdmin, getCurrentUser } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
-import { getShopifyAuthorizeUrl, connectShopifyCustomApp, validateCustomAppToken } from '@/lib/integrations/shopify'
+import { getShopifyAuthorizeUrl, connectShopifyCustomApp, validateCustomAppToken, getShopifyAccessToken } from '@/lib/integrations/shopify'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { logger, withRequestContext } from '@/lib/logger'
 import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
@@ -1447,6 +1447,109 @@ export async function testShopifyCustomAppToken(payload: {
 
   return {
     valid: true,
+  };
+}
+
+export async function verifyShopifyConnection(tenantId: string) {
+  const client = getSupabaseServiceClient();
+  
+  // Get connection
+  const { data: connection, error: connError } = await client
+    .from('connections')
+    .select('id, status, meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', 'shopify')
+    .maybeSingle();
+
+  if (connError) {
+    return {
+      connected: false,
+      errors: [`Failed to fetch connection: ${connError.message}`],
+    };
+  }
+
+  if (!connection || connection.status !== 'connected') {
+    return {
+      connected: false,
+      errors: ['Connection not found or not connected'],
+    };
+  }
+
+  const meta = connection.meta as Record<string, unknown> | null;
+  const shopDomain = (meta?.store_domain || meta?.shop) as string | undefined;
+
+  if (!shopDomain) {
+    return {
+      connected: false,
+      errors: ['Shop domain not found in connection metadata'],
+    };
+  }
+
+  const errors: string[] = [];
+
+  // Get access token
+  const accessToken = await getShopifyAccessToken(tenantId);
+  if (!accessToken) {
+    return {
+      connected: false,
+      errors: ['Access token not found or cannot be decrypted'],
+    };
+  }
+
+  // Validate token
+  const validation = await validateCustomAppToken(shopDomain, accessToken);
+  if (!validation.valid) {
+    errors.push(`Token validation failed: ${validation.error || 'Invalid token'}`);
+  }
+
+  // Test orders API
+  try {
+    const ordersUrl = `https://${shopDomain}/admin/api/2023-10/orders.json?limit=1&status=any`;
+    const ordersRes = await fetch(ordersUrl, {
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+      },
+    });
+
+    if (!ordersRes.ok) {
+      errors.push(`Orders API returned ${ordersRes.status}`);
+    }
+  } catch (error) {
+    errors.push(`Failed to access orders API: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // Check webhooks (optional, don't fail if this fails)
+  let webhooksOk = false;
+  try {
+    const webhooksUrl = `https://${shopDomain}/admin/api/2023-10/webhooks.json`;
+    const webhooksRes = await fetch(webhooksUrl, {
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+      },
+    });
+
+    if (webhooksRes.ok) {
+      const webhooksData = await webhooksRes.json();
+      const webhooks = webhooksData.webhooks || [];
+      const ourWebhooks = webhooks.filter((wh: any) => 
+        wh.topic === 'orders/create' || wh.topic === 'orders/updated'
+      );
+      webhooksOk = ourWebhooks.length > 0;
+      
+      if (!webhooksOk) {
+        errors.push('No order webhooks registered (orders/create or orders/updated)');
+      }
+    }
+  } catch (error) {
+    // Don't fail connection if webhook check fails
+    errors.push(`Could not verify webhooks: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return {
+    connected: errors.length === 0,
+    errors,
+    shopDomain,
+    webhooksOk,
   };
 }
 
