@@ -142,6 +142,7 @@ export async function getShopifyAuthorizeUrl(options: {
 
 function normalizeShopDomain(domain: string): string {
   return domain
+    .trim()
     .replace(/^https?:\/\//, '')
     .replace(/^www\./, '')
     .replace(/\/$/, '')
@@ -306,12 +307,13 @@ export async function registerShopifyWebhooks(shopDomain: string, accessToken: s
 
 export async function validateCustomAppToken(shopDomain: string, accessToken: string): Promise<{ valid: boolean; error?: string }> {
   const normalizedShop = normalizeShopDomain(shopDomain);
+  const trimmedToken = accessToken.trim();
   const testUrl = `https://${normalizedShop}/admin/api/2023-10/shop.json`;
 
   try {
     const res = await fetch(testUrl, {
       headers: {
-        'X-Shopify-Access-Token': accessToken,
+        'X-Shopify-Access-Token': trimmedToken,
       },
     });
 
@@ -350,9 +352,10 @@ export async function connectShopifyCustomApp(options: {
   accessToken: string;
 }): Promise<void> {
   const normalizedShop = normalizeShopDomain(options.shopDomain);
+  const trimmedToken = options.accessToken.trim();
 
   // Validate token first
-  const validation = await validateCustomAppToken(normalizedShop, options.accessToken);
+  const validation = await validateCustomAppToken(normalizedShop, trimmedToken);
   if (!validation.valid) {
     throw new Error(validation.error || 'Invalid Shopify access token');
   }
@@ -360,7 +363,7 @@ export async function connectShopifyCustomApp(options: {
   // Save connection
   await upsertConnection(options.tenantId, {
     status: 'connected',
-    accessToken: options.accessToken,
+    accessToken: trimmedToken,
     meta: {
       shop: normalizedShop,
       store_domain: normalizedShop,
@@ -370,7 +373,7 @@ export async function connectShopifyCustomApp(options: {
 
   // Register webhooks automatically
   try {
-    await registerShopifyWebhooks(normalizedShop, options.accessToken);
+    await registerShopifyWebhooks(normalizedShop, trimmedToken);
   } catch (error) {
     console.error(`Failed to register Shopify webhooks for ${normalizedShop}:`, error);
     // Don't fail connection if webhook registration fails - can be done manually later

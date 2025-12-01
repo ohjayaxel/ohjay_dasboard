@@ -69,9 +69,11 @@ const connectShopifyCustomAppSchema = z.object({
     .min(1, { message: 'Tenant slug is required.' }),
   shopDomain: z
     .string({ required_error: 'Shop domain is required.' })
+    .trim()
     .min(1, { message: 'Shop domain is required.' }),
   accessToken: z
     .string({ required_error: 'Access token is required.' })
+    .trim()
     .min(1, { message: 'Access token is required.' }),
 })
 
