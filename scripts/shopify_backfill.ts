@@ -197,9 +197,10 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
         const quantity = lineItem.quantity || 0;
         calculatedGrossSales += price * quantity;
       }
-      // Gross Sales = SUM(line_item.price × line_item.quantity) - Tax
+      // Gross Sales = SUM(line_item.price × line_item.quantity) / 1.25
       // This is EXCLUDING tax to match file definition (Bruttoförsäljning exklusive moms)
-      const grossExcludingTax = roundTo2Decimals(calculatedGrossSales - totalTax);
+      // File divides by 1.25 instead of subtracting tax, as line_item.price includes 25% VAT
+      const grossExcludingTax = roundTo2Decimals(calculatedGrossSales / 1.25);
       grossSales = grossExcludingTax; // Store gross_sales excluding tax
 
       // Net Sales = (Gross Sales - Tax) - (discounts + returns)

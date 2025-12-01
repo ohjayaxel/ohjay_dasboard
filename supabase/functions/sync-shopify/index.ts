@@ -434,8 +434,9 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     const hasLineItems = order.line_items && order.line_items.length > 0;
     if (hasLineItems) {
       // Gross Sales should EXCLUDE tax to match file definition (Bruttoförsäljning exklusive moms)
-      // sales.grossSales includes tax, so we subtract tax to get gross excluding tax
-      const grossExcludingTax = sales.grossSales - totalTax;
+      // sales.grossSales includes tax (25% VAT), so we divide by 1.25 to get gross excluding tax
+      // This matches the file calculation method
+      const grossExcludingTax = sales.grossSales / 1.25;
       grossSales = Math.round(grossExcludingTax * 100) / 100; // Store gross_sales excluding tax
       netSales = sales.netSales; // Can be negative if discounts exceed gross sales
     }
