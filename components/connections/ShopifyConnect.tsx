@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useToast } from '@/hooks/use-toast';
-import { connectShopifyCustomAppAction, testShopifyCustomAppToken, verifyShopifyConnection } from '@/app/(dashboard)/admin/actions';
+import { connectShopifyCustomAppAction, testShopifyCustomAppToken } from '@/app/(dashboard)/admin/actions';
 
 type ConnectActionResult = {
   redirectUrl: string;
@@ -30,6 +30,7 @@ export type ShopifyConnectProps = {
     finishedAt: string | null;
     error: string | null;
   };
+  connectionErrors?: string[] | null;
   onConnect?: AsyncAction<ConnectActionResult>;
   onDisconnect?: AsyncAction;
 };
@@ -41,6 +42,7 @@ export function ShopifyConnect({
   tenantId,
   backfillSince,
   latestJob,
+  connectionErrors: initialConnectionErrors,
   onConnect,
   onDisconnect,
 }: ShopifyConnectProps) {
@@ -52,40 +54,13 @@ export function ShopifyConnect({
   const [customAppShopDomain, setCustomAppShopDomain] = useState('');
   const [customAppToken, setCustomAppToken] = useState('');
   const [isTestingToken, setIsTestingToken] = useState(false);
-  const [connectionErrors, setConnectionErrors] = useState<string[]>([]);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verifiedStatus, setVerifiedStatus] = useState<'connected' | 'error' | null>(null);
   
   // Extract tenantSlug from pathname (/admin/tenants/[tenantSlug]/integrations)
   const tenantSlugMatch = pathname.match(/\/admin\/tenants\/([^/]+)/);
   const tenantSlug = tenantSlugMatch ? tenantSlugMatch[1] : null;
 
-  // Verify connection when status is connected
-  useEffect(() => {
-    if (status === 'connected') {
-      setIsVerifying(true);
-      verifyShopifyConnection(tenantId)
-        .then((result) => {
-          if (result.connected) {
-            setVerifiedStatus('connected');
-            setConnectionErrors([]);
-          } else {
-            setVerifiedStatus('error');
-            setConnectionErrors(result.errors || []);
-          }
-        })
-        .catch((error) => {
-          setVerifiedStatus('error');
-          setConnectionErrors([`Verification failed: ${error instanceof Error ? error.message : String(error)}`]);
-        })
-        .finally(() => {
-          setIsVerifying(false);
-        });
-    } else {
-      setVerifiedStatus(null);
-      setConnectionErrors([]);
-    }
-  }, [status, tenantId]);
+  const connectionErrors = initialConnectionErrors || [];
+  const verifiedStatus = connectionErrors.length > 0 && status === 'connected' ? 'error' : status;
 
   // Auto-refresh page when backfill is running
   useEffect(() => {
@@ -103,18 +78,15 @@ export function ShopifyConnect({
   }, [backfillStatus?.active, router]);
 
   const statusLabel = useMemo(() => {
-    // If status is connected but verification shows errors, show error
-    const effectiveStatus = status === 'connected' && verifiedStatus === 'error' ? 'error' : status;
-    
-    switch (effectiveStatus) {
+    switch (verifiedStatus) {
       case 'connected':
-        return { label: isVerifying ? 'Verifying...' : 'Connected', variant: 'default' as const };
+        return { label: 'Connected', variant: 'default' as const };
       case 'error':
         return { label: 'Error', variant: 'destructive' as const };
       default:
         return { label: 'Disconnected', variant: 'secondary' as const };
     }
-  }, [status, verifiedStatus, isVerifying]);
+  }, [verifiedStatus]);
 
   const formattedSync = useMemo(() => {
     if (!lastSyncedAt) {

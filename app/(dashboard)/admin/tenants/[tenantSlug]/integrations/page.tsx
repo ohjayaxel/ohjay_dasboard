@@ -13,6 +13,7 @@ import {
   updateMetaSelectedAccount,
   updateIntegrationSettings,
   triggerShopifyBackfill,
+  verifyShopifyConnection,
 } from '@/app/(dashboard)/admin/actions'
 import { getAdminTenantBySlug } from '@/lib/admin/tenants'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
@@ -170,6 +171,20 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
   }
 
   const latestShopifyJob = shopifyJobs && shopifyJobs.length > 0 ? shopifyJobs[0] : null
+
+  // Verify connection if connected
+  let shopifyConnectionErrors: string[] | null = null
+  if (shopify.status === 'connected') {
+    try {
+      const verification = await verifyShopifyConnection(tenant.id)
+      if (!verification.connected) {
+        shopifyConnectionErrors = verification.errors || []
+      }
+    } catch (error) {
+      console.error('Failed to verify Shopify connection:', error)
+      shopifyConnectionErrors = [`Verification failed: ${error instanceof Error ? error.message : String(error)}`]
+    }
+  }
 
   const formatTimestamp = (value?: string | null) => {
     if (!value) return null
@@ -472,6 +487,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             finishedAt: latestShopifyJob.finished_at || null,
             error: latestShopifyJob.error || null,
           } : undefined}
+          connectionErrors={shopifyConnectionErrors}
           onConnect={shopifyConnectAction}
           onDisconnect={shopifyDisconnectAction}
         />
