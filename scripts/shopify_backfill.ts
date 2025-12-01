@@ -674,17 +674,14 @@ async function main() {
   const targetUntilDate = new Date(`${until}T23:59:59`);
   
   const allOrdersWithDateFilter = allOrdersFetched.filter((order) => {
-    // Use processed_at for filtering, fallback to created_at if processed_at is null
+    // Match file behavior: Include orders based on created_at OR processed_at OR refund.created_at
+    // File seems to use created_at when grouping orders, not just processed_at
     const processed = order.processed_at ? new Date(order.processed_at) : null;
     const created = order.created_at ? new Date(order.created_at) : null;
-    const dateToUse = processed || created;
     
-    if (!dateToUse) {
-      return false; // Skip orders with no date
-    }
-    
-    // Order matches if processed_at (or created_at) is in target range
-    const matchesProcessedDate = dateToUse >= targetSinceDate && dateToUse <= targetUntilDate;
+    // Order matches if created_at OR processed_at is in target range
+    const matchesCreatedDate = created ? created >= targetSinceDate && created <= targetUntilDate : false;
+    const matchesProcessedDate = processed ? processed >= targetSinceDate && processed <= targetUntilDate : false;
     
     // ALSO: Include if order has refunds created on target date
     // This matches file behavior where refunds are grouped by refund creation date
@@ -701,7 +698,7 @@ async function main() {
       }
     }
     
-    return matchesProcessedDate || hasRefundOnTargetDate;
+    return matchesCreatedDate || matchesProcessedDate || hasRefundOnTargetDate;
   });
   
   console.log(`[shopify_backfill] Filtered to ${allOrdersWithDateFilter.length} orders with processed_at in range ${since} to ${until}\n`);
@@ -731,32 +728,61 @@ async function main() {
   
   for (const order of shopifyOrders) {
     let row = mapShopifyOrderToRow(tenant.id, order);
+    const originalProcessedAt = row.processed_at;
     
-    // Check if order has refunds created on target date but processed_at is different
-    // If so, update processed_at to refund.created_at to match file grouping
+    // Match file behavior for date assignment:
+    // 1. If order has refunds created on target date, use refund.created_at as processed_at
+    // 2. If order was created on target date (but processed_at is different), use created_at as processed_at
+    // 3. Otherwise, use processed_at as-is
+    
+    const orderCreatedAt = order.created_at ? new Date(order.created_at).toISOString().slice(0, 10) : null;
+    const orderProcessedAt = originalProcessedAt;
+    
+    let targetDate: string | null = null;
+    
+    // Priority 1: Check for refunds created on target date
     if (order.refunds && Array.isArray(order.refunds) && order.refunds.length > 0) {
-      const originalProcessedAt = row.processed_at;
-      
-      // Find refund created on target date
       for (const refund of order.refunds) {
         if (refund.created_at) {
           const refundDate = new Date(refund.created_at).toISOString().slice(0, 10);
-          
-          // If refund was created on target date but order processed_at is different
-          // Update processed_at to refund date to match file behavior
-          if (refundDate >= since && refundDate <= until && originalProcessedAt !== refundDate) {
-            row = {
-              ...row,
-              processed_at: refundDate,
-            };
-            console.log(`[shopify_backfill] Updating order ${order.id} processed_at from ${originalProcessedAt} to ${refundDate} (refund date)`);
+          if (refundDate >= since && refundDate <= until) {
+            targetDate = refundDate;
+            console.log(`[shopify_backfill] Order ${order.id}: Using refund.created_at=${refundDate} (was processed_at=${orderProcessedAt})`);
             break; // Use first refund on target date
           }
         }
       }
     }
     
-    orderRows.push(row);
+    // Priority 2: If created_at is on target date, use created_at (file behavior)
+    // File groups orders by created_at when it differs from processed_at
+    if (!targetDate && orderCreatedAt && orderCreatedAt >= since && orderCreatedAt <= until) {
+      targetDate = orderCreatedAt;
+      if (orderProcessedAt !== orderCreatedAt) {
+        console.log(`[shopify_backfill] Order ${order.id}: Using created_at=${orderCreatedAt} (was processed_at=${orderProcessedAt})`);
+      }
+    }
+    
+    // Priority 3: Use processed_at if it's on target date AND created_at is NOT on target date
+    // (If created_at is on target date, we already used it above)
+    if (!targetDate && orderProcessedAt && orderProcessedAt >= since && orderProcessedAt <= until) {
+      // Only use processed_at if created_at is not on target date
+      if (!orderCreatedAt || (orderCreatedAt < since || orderCreatedAt > until)) {
+        targetDate = orderProcessedAt;
+      }
+    }
+    
+    // Only include orders that matched target date (via refund, created_at, or processed_at)
+    if (targetDate) {
+      // Update processed_at if we found a different date
+      if (targetDate !== originalProcessedAt) {
+        row = {
+          ...row,
+          processed_at: targetDate,
+        };
+      }
+      orderRows.push(row);
+    }
   }
 
   // Determine if customers are new or returning
