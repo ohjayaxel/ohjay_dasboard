@@ -197,11 +197,10 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
         const quantity = lineItem.quantity || 0;
         calculatedGrossSales += price * quantity;
       }
-      // Set grossSales even if calculatedGrossSales is 0 or negative
-      // (as long as there are line_items, it's a valid sale)
-      grossSales = roundTo2Decimals(calculatedGrossSales);
-
+      // Gross Sales = SUM(line_item.price × line_item.quantity) - Tax
+      // This is EXCLUDING tax to match file definition (Bruttoförsäljning exklusive moms)
       const grossExcludingTax = roundTo2Decimals(calculatedGrossSales - totalTax);
+      grossSales = grossExcludingTax; // Store gross_sales excluding tax
 
       // Net Sales = (Gross Sales - Tax) - (discounts + returns)
       // Net Sales can be negative if discounts exceed gross sales
@@ -324,8 +323,9 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
       }
     }
     
-    // Calculate Gross Sales as Total Sales - Tax (to match Orders page)
-    const grossSales = values.total_sales - values.total_tax;
+    // Gross Sales is already stored excluding tax in shopify_orders table
+    // So we just sum it up directly (no need to subtract tax again)
+    const grossSales = values.total_sales;
     
     return {
       date,
