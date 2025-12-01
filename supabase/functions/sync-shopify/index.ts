@@ -380,8 +380,11 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
 
   const grossExcludingTax = Math.round((grossSales - totalTax) * 100) / 100;
 
-  // Net Sales = (Gross Sales - Tax) - (discounts + returns)
-  const netSales = Math.round((grossExcludingTax - discounts - returns) * 100) / 100;
+  // Net Sales = Gross Sales + Discounts - Returns (to match file definition)
+  // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
+  // Note: discounts are negative, so adding negative = subtracting
+  // File does NOT subtract tax from net sales
+  const netSales = Math.round((grossExcludingTax + discounts - returns) * 100) / 100;
 
   return { grossSales, discounts, returns, netSales };
 }
