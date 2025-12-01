@@ -441,7 +441,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
       // This matches the file calculation method
       const grossExcludingTax = sales.grossSales / 1.25;
       grossSales = Math.round(grossExcludingTax * 100) / 100; // Store gross_sales excluding tax
-      netSales = sales.netSales; // Can be negative if discounts exceed gross sales
+      
+      // Net Sales = Gross Sales + Discounts - Returns (to match file definition)
+      // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
+      // Note: discounts are negative in file, so adding negative = subtracting
+      // File does NOT subtract tax from net sales
+      netSales = Math.round((grossExcludingTax + sales.discounts - sales.returns) * 100) / 100;
     }
   }
 
