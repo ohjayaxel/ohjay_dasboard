@@ -353,6 +353,7 @@ async function fetchShopifyOrdersWithPagination(params: {
   since?: string;
   until?: string;
   sinceId?: number; // For continuing after API limit
+  skipLocalFilter?: boolean; // Skip local date filtering (for wider fetches)
 }): Promise<ShopifyOrder[]> {
   const normalizedShop = normalizeShopDomain(params.shopDomain);
   const allOrders: ShopifyOrder[] = [];
@@ -362,9 +363,9 @@ async function fetchShopifyOrdersWithPagination(params: {
 
   console.log(`\n[shopify_backfill] Fetching orders from ${params.since || 'all time'} to ${params.until || 'now'}...`);
   
-  // Store date objects for local filtering if needed
-  const sinceDateObj = params.since ? new Date(`${params.since}T00:00:00`) : null;
-  const untilDateObj = params.until ? new Date(`${params.until}T23:59:59`) : null;
+  // Store date objects for local filtering if needed (only if not skipping filter)
+  const sinceDateObj = params.skipLocalFilter ? null : (params.since ? new Date(`${params.since}T00:00:00`) : null);
+  const untilDateObj = params.skipLocalFilter ? null : (params.until ? new Date(`${params.until}T23:59:59`) : null);
 
   while (true) {
     const url = new URL(`https://${normalizedShop}/admin/api/2023-10/orders.json`);
@@ -586,28 +587,46 @@ async function main() {
   const startDate = new Date(since);
   const endDate = new Date(until);
   
-  // Always use date-based chunks to avoid API limits and ensure we get all orders
-  // This also avoids fetching orders outside the date range unnecessarily
-  console.log(`[shopify_backfill] Using monthly date chunks to fetch orders...\n`);
+  // Calculate number of days in range
+  const daysDiff = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
   
-  // Create monthly chunks for the date range
-  const dateChunks: Array<{ since: string; until: string }> = [];
-  let currentStart = new Date(startDate);
-  while (currentStart <= endDate) {
+  // For small date ranges (< 7 days), we need to fetch a wider range because Shopify API
+  // filters on created_at, but we need orders with processed_at in the target range.
+  // Orders can be created earlier but processed later, so we fetch from 30 days before
+  // to ensure we get all orders that might have processed_at in our target range.
+  const fetchDaysBefore = daysDiff <= 7 ? 30 : 0;
+  const fetchStartDate = new Date(startDate);
+  fetchStartDate.setDate(fetchStartDate.getDate() - fetchDaysBefore);
+  
+  if (fetchDaysBefore > 0) {
+    console.log(`[shopify_backfill] Small date range detected (${daysDiff} days).`);
+    console.log(`[shopify_backfill] Fetching from ${fetchStartDate.toISOString().slice(0, 10)} to ${until} to capture orders created earlier but processed in target range.\n`);
+  } else {
+    console.log(`[shopify_backfill] Using monthly date chunks to fetch orders...\n`);
+  }
+  
+  // Create monthly chunks for the fetch range (may be wider than target range)
+  const dateChunks: Array<{ since: string; until: string; targetSince: string; targetUntil: string }> = [];
+  let currentStart = new Date(fetchStartDate);
+  const actualEndDate = new Date(endDate);
+  
+  while (currentStart <= actualEndDate) {
     const currentEnd = new Date(currentStart);
     currentEnd.setMonth(currentEnd.getMonth() + 1);
     currentEnd.setDate(0); // Last day of currentStart month
     
-    if (currentEnd > endDate) {
-      currentEnd.setTime(endDate.getTime());
+    if (currentEnd > actualEndDate) {
+      currentEnd.setTime(actualEndDate.getTime());
     }
     
     const sinceStr = currentStart.toISOString().slice(0, 10);
     const untilStr = currentEnd.toISOString().slice(0, 10);
     
     dateChunks.push({
-      since: sinceStr,
+      since: sinceStr, // Fetch range (may be wider)
       until: untilStr,
+      targetSince: since, // Target range (what we actually want)
+      targetUntil: until,
     });
     
     currentStart = new Date(currentEnd);
@@ -617,20 +636,23 @@ async function main() {
   console.log(`[shopify_backfill] Processing ${dateChunks.length} monthly chunks...\n`);
 
   // Fetch orders in chunks
-  const allOrdersWithDateFilter: ShopifyOrder[] = [];
+  const allOrdersFetched: ShopifyOrder[] = [];
   for (let i = 0; i < dateChunks.length; i++) {
     const chunk = dateChunks[i];
     console.log(`[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
     
+    // For small ranges, skip local filtering in fetch function since we'll filter after
+    const skipLocalFilter = fetchDaysBefore > 0;
     const chunkOrders = await fetchShopifyOrdersWithPagination({
       shopDomain,
       accessToken,
       since: chunk.since,
       until: chunk.until,
+      skipLocalFilter,
     });
     
     console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
-    allOrdersWithDateFilter.push(...chunkOrders);
+    allOrdersFetched.push(...chunkOrders);
     
     // Add small delay to avoid rate limiting
     if (i < dateChunks.length - 1) {
@@ -638,7 +660,28 @@ async function main() {
     }
   }
   
-  console.log(`[shopify_backfill] Fetched ${allOrdersWithDateFilter.length} total orders in date range ${since} to ${until}\n`);
+  console.log(`[shopify_backfill] Fetched ${allOrdersFetched.length} total orders from API\n`);
+  
+  // Filter orders to target date range based on processed_at (not created_at)
+  // This is important because orders can be created earlier but processed later
+  const targetSinceDate = new Date(`${since}T00:00:00`);
+  const targetUntilDate = new Date(`${until}T23:59:59`);
+  
+  const allOrdersWithDateFilter = allOrdersFetched.filter((order) => {
+    // Use processed_at for filtering, fallback to created_at if processed_at is null
+    const processed = order.processed_at ? new Date(order.processed_at) : null;
+    const created = order.created_at ? new Date(order.created_at) : null;
+    const dateToUse = processed || created;
+    
+    if (!dateToUse) {
+      return false; // Skip orders with no date
+    }
+    
+    // Order matches if processed_at (or created_at) is in target range
+    return dateToUse >= targetSinceDate && dateToUse <= targetUntilDate;
+  });
+  
+  console.log(`[shopify_backfill] Filtered to ${allOrdersWithDateFilter.length} orders with processed_at in range ${since} to ${until}\n`);
   
   // Deduplicate orders by order_id (in case chunks overlap)
   const uniqueOrdersMap = new Map<string, ShopifyOrder>();
