@@ -586,109 +586,61 @@ async function main() {
   const startDate = new Date(since);
   const endDate = new Date(until);
   
-  // Try fetching without date filter first to see if Shopify API limits results
-  // If we get fewer orders than expected, we'll split into smaller chunks
-  console.log(`[shopify_backfill] Attempting to fetch orders without date filter first...`);
+  // Always use date-based chunks to avoid API limits and ensure we get all orders
+  // This also avoids fetching orders outside the date range unnecessarily
+  console.log(`[shopify_backfill] Using monthly date chunks to fetch orders...\n`);
   
-  const allOrdersWithoutFilter = await fetchShopifyOrdersWithPagination({
-    shopDomain,
-    accessToken,
-    // No date filter - fetch all orders
-  });
-  
-  console.log(`[shopify_backfill] Fetched ${allOrdersWithoutFilter.length} total orders without date filter`);
-  
-  // Shopify API has a limit of ~50 pages (12,500 orders) per query
-  // If we got close to this limit, use date-based chunks instead of since_id
-  // since_id doesn't work well when Shopify returns orders in reverse chronological order
-  const SHOPIFY_API_MAX_ORDERS = 12500;
-  const mightBeLimited = allOrdersWithoutFilter.length >= SHOPIFY_API_MAX_ORDERS - 1000; // Close to limit
-  
-  let allOrdersWithDateFilter: ShopifyOrder[] = [];
-  
-  if (mightBeLimited) {
-    console.log(`[shopify_backfill] ⚠️  API limit reached (${allOrdersWithoutFilter.length} orders). Using monthly date chunks instead...\n`);
+  // Create monthly chunks for the date range
+  const dateChunks: Array<{ since: string; until: string }> = [];
+  let currentStart = new Date(startDate);
+  while (currentStart <= endDate) {
+    const currentEnd = new Date(currentStart);
+    currentEnd.setMonth(currentEnd.getMonth() + 1);
+    currentEnd.setDate(0); // Last day of currentStart month
     
-    // Filter initial batch
-    const filterSinceDate = new Date(`${since}T00:00:00`);
-    const filterUntilDate = new Date(`${until}T23:59:59`);
-    
-    const initialFiltered = allOrdersWithoutFilter.filter((order) => {
-      const created = order.created_at ? new Date(order.created_at) : null;
-      const processed = order.processed_at ? new Date(order.processed_at) : null;
-      const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
-      const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
-      return matchesSince && matchesUntil;
-    });
-    
-    allOrdersWithDateFilter.push(...initialFiltered);
-    console.log(`[shopify_backfill] Initial batch filtered: ${initialFiltered.length} orders in date range`);
-    
-    // Use monthly chunks for remaining date range
-    const dateChunks: Array<{ since: string; until: string }> = [];
-    let currentStart = new Date(startDate);
-    while (currentStart <= endDate) {
-      const currentEnd = new Date(currentStart);
-      currentEnd.setMonth(currentEnd.getMonth() + 1);
-      currentEnd.setDate(0); // Last day of currentStart month
-      
-      if (currentEnd > endDate) {
-        currentEnd.setTime(endDate.getTime());
-      }
-      
-      const sinceStr = currentStart.toISOString().slice(0, 10);
-      const untilStr = currentEnd.toISOString().slice(0, 10);
-      
-      dateChunks.push({
-        since: sinceStr,
-        until: untilStr,
-      });
-      
-      currentStart = new Date(currentEnd);
-      currentStart.setDate(currentStart.getDate() + 1); // Start of next month
-    }
-
-    console.log(`[shopify_backfill] Processing ${dateChunks.length} monthly chunks...\n`);
-
-    // Fetch orders in chunks
-    for (let i = 0; i < dateChunks.length; i++) {
-      const chunk = dateChunks[i];
-      console.log(`[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
-      
-      const chunkOrders = await fetchShopifyOrdersWithPagination({
-        shopDomain,
-        accessToken,
-        since: chunk.since,
-        until: chunk.until,
-      });
-      
-      console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
-      allOrdersWithDateFilter.push(...chunkOrders);
-      
-      // Add small delay to avoid rate limiting
-      if (i < dateChunks.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1500));
-      }
+    if (currentEnd > endDate) {
+      currentEnd.setTime(endDate.getTime());
     }
     
-    console.log(`[shopify_backfill] Fetched ${allOrdersWithDateFilter.length} total orders in date range ${since} to ${until}\n`);
-  } else {
-    // Filter orders locally by date range
-    const filterSinceDate = new Date(`${since}T00:00:00`);
-    const filterUntilDate = new Date(`${until}T23:59:59`);
+    const sinceStr = currentStart.toISOString().slice(0, 10);
+    const untilStr = currentEnd.toISOString().slice(0, 10);
     
-    allOrdersWithDateFilter = allOrdersWithoutFilter.filter((order) => {
-      const created = order.created_at ? new Date(order.created_at) : null;
-      const processed = order.processed_at ? new Date(order.processed_at) : null;
-      const matchesSince = created && created >= filterSinceDate || processed && processed >= filterSinceDate;
-      const matchesUntil = created && created <= filterUntilDate || processed && processed <= filterUntilDate;
-      return matchesSince && matchesUntil;
+    dateChunks.push({
+      since: sinceStr,
+      until: untilStr,
     });
     
-    console.log(`[shopify_backfill] Filtered to ${allOrdersWithDateFilter.length} orders in date range ${since} to ${until}\n`);
+    currentStart = new Date(currentEnd);
+    currentStart.setDate(currentStart.getDate() + 1); // Start of next month
+  }
+
+  console.log(`[shopify_backfill] Processing ${dateChunks.length} monthly chunks...\n`);
+
+  // Fetch orders in chunks
+  const allOrdersWithDateFilter: ShopifyOrder[] = [];
+  for (let i = 0; i < dateChunks.length; i++) {
+    const chunk = dateChunks[i];
+    console.log(`[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
+    
+    const chunkOrders = await fetchShopifyOrdersWithPagination({
+      shopDomain,
+      accessToken,
+      since: chunk.since,
+      until: chunk.until,
+    });
+    
+    console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
+    allOrdersWithDateFilter.push(...chunkOrders);
+    
+    // Add small delay to avoid rate limiting
+    if (i < dateChunks.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
   }
   
-  // Deduplicate orders by order_id before using them
+  console.log(`[shopify_backfill] Fetched ${allOrdersWithDateFilter.length} total orders in date range ${since} to ${until}\n`);
+  
+  // Deduplicate orders by order_id (in case chunks overlap)
   const uniqueOrdersMap = new Map<string, ShopifyOrder>();
   for (const order of allOrdersWithDateFilter) {
     const orderId = order.id.toString();
@@ -699,77 +651,10 @@ async function main() {
   const shopifyOrders = Array.from(uniqueOrdersMap.values());
   
   if (shopifyOrders.length < allOrdersWithDateFilter.length) {
-    console.log(`[shopify_backfill] Removed ${allOrdersWithDateFilter.length - shopifyOrders.length} duplicate orders`);
+    console.log(`[shopify_backfill] Removed ${allOrdersWithDateFilter.length - shopifyOrders.length} duplicate orders from chunk overlap`);
   }
   
-  if (shopifyOrders.length > 0) {
-    console.log(`[shopify_backfill] Using ${shopifyOrders.length} unique orders\n`);
-  } else {
-    // Fallback to weekly chunks if single request didn't work
-    console.log(`[shopify_backfill] No orders found in single request, trying weekly chunks...\n`);
-    
-    const dateChunks: Array<{ since: string; until: string }> = [];
-    let currentStart = new Date(startDate);
-    while (currentStart <= endDate) {
-      const currentEnd = new Date(currentStart);
-      currentEnd.setDate(currentEnd.getDate() + 6); // 7 days (week)
-      
-      if (currentEnd > endDate) {
-        currentEnd.setTime(endDate.getTime());
-      }
-      
-      const sinceStr = currentStart.toISOString().slice(0, 10);
-      const untilStr = currentEnd.toISOString().slice(0, 10);
-      
-      dateChunks.push({
-        since: sinceStr,
-        until: untilStr,
-      });
-      
-      currentStart = new Date(currentEnd);
-      currentStart.setDate(currentStart.getDate() + 1); // Start of next week
-    }
-
-    console.log(`[shopify_backfill] Split into ${dateChunks.length} weekly chunks for better API reliability\n`);
-
-    // Fetch orders in chunks
-    let allShopifyOrders: ShopifyOrder[] = [];
-    for (let i = 0; i < dateChunks.length; i++) {
-      const chunk = dateChunks[i];
-      console.log(`\n[shopify_backfill] Processing chunk ${i + 1}/${dateChunks.length}: ${chunk.since} to ${chunk.until}`);
-      
-      const chunkOrders = await fetchShopifyOrdersWithPagination({
-        shopDomain,
-        accessToken,
-        since: chunk.since,
-        until: chunk.until,
-      });
-      
-      console.log(`[shopify_backfill] Chunk ${i + 1} completed: ${chunkOrders.length} orders`);
-      allShopifyOrders.push(...chunkOrders);
-      
-      // Add small delay to avoid rate limiting (Shopify allows 40 requests per app per store per minute)
-      if (i < dateChunks.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay between chunks
-      }
-    }
-
-    console.log(`\n[shopify_backfill] Total orders fetched across all chunks: ${allShopifyOrders.length}`);
-
-    // Deduplicate orders by order_id (in case of overlap)
-    const uniqueOrders = new Map<string, ShopifyOrder>();
-    for (const order of allShopifyOrders) {
-      const orderId = order.id.toString();
-      if (!uniqueOrders.has(orderId)) {
-        uniqueOrders.set(orderId, order);
-      }
-    }
-    shopifyOrders = Array.from(uniqueOrders.values());
-    
-    if (shopifyOrders.length < allShopifyOrders.length) {
-      console.log(`[shopify_backfill] Removed ${allShopifyOrders.length - shopifyOrders.length} duplicate orders`);
-    }
-  }
+  console.log(`[shopify_backfill] Using ${shopifyOrders.length} unique orders after deduplication\n`);
 
 
   // Map to database rows
