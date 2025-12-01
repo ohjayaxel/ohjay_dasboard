@@ -203,11 +203,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
       const grossExcludingTax = roundTo2Decimals(calculatedGrossSales / 1.25);
       grossSales = grossExcludingTax; // Store gross_sales excluding tax
 
-      // Net Sales = Gross Sales + Discounts (to match file definition: Nettoförsäljning = Bruttoförsäljning + Rabatter)
-      // Note: discounts are negative in file, so adding negative = subtracting
-      // This matches file: Nettoförsäljning = Bruttoförsäljning + Rabatter
+      // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
+      // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
+      // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
+      // In our system, discount_total is POSITIVE (1980.51), so we subtract it
       // File does NOT subtract tax from net sales
-      netSales = roundTo2Decimals(grossExcludingTax + totalDiscounts - totalRefunds);
+      netSales = roundTo2Decimals(grossExcludingTax - totalDiscounts - totalRefunds);
     }
   }
 

@@ -380,11 +380,12 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
 
   const grossExcludingTax = Math.round((grossSales - totalTax) * 100) / 100;
 
-  // Net Sales = Gross Sales + Discounts - Returns (to match file definition)
+  // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
   // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
-  // Note: discounts are negative, so adding negative = subtracting
+  // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
+  // In our system, discounts is POSITIVE, so we subtract it
   // File does NOT subtract tax from net sales
-  const netSales = Math.round((grossExcludingTax + discounts - returns) * 100) / 100;
+  const netSales = Math.round((grossExcludingTax - discounts - returns) * 100) / 100;
 
   return { grossSales, discounts, returns, netSales };
 }
@@ -442,11 +443,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
       const grossExcludingTax = sales.grossSales / 1.25;
       grossSales = Math.round(grossExcludingTax * 100) / 100; // Store gross_sales excluding tax
       
-      // Net Sales = Gross Sales + Discounts - Returns (to match file definition)
+      // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
       // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
-      // Note: discounts are negative in file, so adding negative = subtracting
+      // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
+      // In our system, sales.discounts is POSITIVE, so we subtract it
       // File does NOT subtract tax from net sales
-      netSales = Math.round((grossExcludingTax + sales.discounts - sales.returns) * 100) / 100;
+      netSales = Math.round((grossExcludingTax - sales.discounts - sales.returns) * 100) / 100;
     }
   }
 
