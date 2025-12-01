@@ -14,6 +14,8 @@ import {
   updateIntegrationSettings,
   triggerShopifyBackfill,
   verifyShopifyConnection,
+  testShopifyCustomAppToken,
+  connectShopifyCustomAppAction,
 } from '@/app/(dashboard)/admin/actions'
 import { getAdminTenantBySlug } from '@/lib/admin/tenants'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
@@ -490,6 +492,8 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           connectionErrors={shopifyConnectionErrors}
           onConnect={shopifyConnectAction}
           onDisconnect={shopifyDisconnectAction}
+          onTestCustomAppToken={testShopifyCustomAppToken}
+          onConnectCustomApp={connectShopifyCustomAppAction}
         />
       ),
       syncStartDate: shopifySyncStartDate,

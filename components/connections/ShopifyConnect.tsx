@@ -10,7 +10,6 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useToast } from '@/hooks/use-toast';
-import { connectShopifyCustomAppAction, testShopifyCustomAppToken } from '@/app/(dashboard)/admin/actions';
 
 type ConnectActionResult = {
   redirectUrl: string;
@@ -33,6 +32,8 @@ export type ShopifyConnectProps = {
   connectionErrors?: string[] | null;
   onConnect?: AsyncAction<ConnectActionResult>;
   onDisconnect?: AsyncAction;
+  onTestCustomAppToken?: (payload: { shopDomain: string; accessToken: string }) => Promise<{ valid: boolean; error?: string }>;
+  onConnectCustomApp?: (formData: FormData) => Promise<void>;
 };
 
 export function ShopifyConnect({
@@ -45,6 +46,8 @@ export function ShopifyConnect({
   connectionErrors: initialConnectionErrors,
   onConnect,
   onDisconnect,
+  onTestCustomAppToken,
+  onConnectCustomApp,
 }: ShopifyConnectProps) {
   const { toast } = useToast();
   const router = useRouter();
@@ -61,32 +64,6 @@ export function ShopifyConnect({
 
   const connectionErrors = initialConnectionErrors || [];
   const verifiedStatus = connectionErrors.length > 0 && status === 'connected' ? 'error' : status;
-
-  // Auto-refresh page when backfill is running
-  useEffect(() => {
-    if (backfillStatus?.active) {
-      const interval = setInterval(() => {
-        try {
-          router.refresh();
-        } catch (error) {
-          console.error('Error refreshing router:', error);
-        }
-      }, 5000); // Refresh every 5 seconds
-
-      return () => clearInterval(interval);
-    }
-  }, [backfillStatus?.active, router]);
-
-  const statusLabel = useMemo(() => {
-    switch (verifiedStatus) {
-      case 'connected':
-        return { label: 'Connected', variant: 'default' as const };
-      case 'error':
-        return { label: 'Error', variant: 'destructive' as const };
-      default:
-        return { label: 'Disconnected', variant: 'secondary' as const };
-    }
-  }, [verifiedStatus]);
 
   const formattedSync = useMemo(() => {
     if (!lastSyncedAt) {
@@ -180,6 +157,32 @@ export function ShopifyConnect({
     }
   }, [backfillSince, latestJob]);
 
+  const statusLabel = useMemo(() => {
+    switch (verifiedStatus) {
+      case 'connected':
+        return { label: 'Connected', variant: 'default' as const };
+      case 'error':
+        return { label: 'Error', variant: 'destructive' as const };
+      default:
+        return { label: 'Disconnected', variant: 'secondary' as const };
+    }
+  }, [verifiedStatus]);
+
+  // Auto-refresh page when backfill is running
+  useEffect(() => {
+    if (backfillStatus?.active) {
+      const interval = setInterval(() => {
+        try {
+          router.refresh();
+        } catch (error) {
+          console.error('Error refreshing router:', error);
+        }
+      }, 5000); // Refresh every 5 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [backfillStatus?.active, router]);
+
   const handleConnect = () => {
     startTransition(async () => {
       if (!onConnect) {
@@ -257,9 +260,18 @@ export function ShopifyConnect({
       return;
     }
 
+    if (!onTestCustomAppToken) {
+      toast({
+        title: 'Test action missing',
+        description: 'Test token functionality is not available.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setIsTestingToken(true);
     try {
-      const result = await testShopifyCustomAppToken({
+      const result = await onTestCustomAppToken({
         shopDomain: customAppShopDomain.trim(),
         accessToken: customAppToken.trim(),
       });
@@ -299,6 +311,15 @@ export function ShopifyConnect({
         return;
       }
 
+      if (!onConnectCustomApp) {
+        toast({
+          title: 'Connect action missing',
+          description: 'Custom App connection functionality is not available.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
       try {
         const formData = new FormData();
         formData.set('tenantId', tenantId);
@@ -308,7 +329,7 @@ export function ShopifyConnect({
         formData.set('shopDomain', customAppShopDomain.trim());
         formData.set('accessToken', customAppToken.trim());
 
-        await connectShopifyCustomAppAction(formData);
+        await onConnectCustomApp(formData);
         
         // Success - redirect will happen in server action
         toast({
