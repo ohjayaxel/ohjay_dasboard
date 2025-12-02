@@ -484,12 +484,11 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   let netSales: number | null = null;
 
   if (!shouldExclude) {
-    // Always set grossSales if there are line_items, even if the sum is 0
-    // (discounts will be subtracted in Net Sales, not excluded from Gross Sales)
-    const hasLineItems = order.line_items && order.line_items.length > 0;
-    if (hasLineItems) {
-      // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
-      // This matches what user expects: gross_sales should be the same as total_price
+    // Gross Sales should ALWAYS be set if order has total_price > 0
+    // Don't require line_items - orders can have total_price without line_items being fetched
+    // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
+    // This matches what user expects: gross_sales should be the same as total_price
+    if (totalPrice > 0) {
       grossSales = Math.round(totalPrice * 100) / 100;
       
       // Net Sales = Gross Sales - Discounts - Returns (to match file definition)

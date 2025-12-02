@@ -191,14 +191,11 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     let calculatedGrossSales = 0;
     const hasLineItems = order.line_items && order.line_items.length > 0;
     
-    if (hasLineItems) {
-      for (const lineItem of order.line_items) {
-        const price = parseFloat(lineItem.price || '0');
-        const quantity = lineItem.quantity || 0;
-        calculatedGrossSales += price * quantity;
-      }
-      // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
-      // This matches what user expects: gross_sales should be the same as total_price
+    // Gross Sales should ALWAYS be set if order has total_price > 0
+    // Don't require line_items - orders can have total_price without line_items being fetched
+    // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
+    // This matches what user expects: gross_sales should be the same as total_price
+    if (totalPrice > 0) {
       grossSales = roundTo2Decimals(totalPrice);
 
       // Net Sales = Gross Sales - Discounts - Returns (to match file definition)

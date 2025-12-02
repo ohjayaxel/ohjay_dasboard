@@ -186,27 +186,19 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
   if (!shouldExclude) {
     const roundTo2Decimals = (num: number) => Math.round(num * 100) / 100;
     
-    // Gross Sales = sum of (line_item.price × quantity)
-    // Always calculate if there are line_items, even if the sum is 0
-    // (discounts will be subtracted in Net Sales, not excluded from Gross Sales)
-    let calculatedGrossSales = 0;
-    const hasLineItems = order.line_items && order.line_items.length > 0;
-    
-    if (hasLineItems) {
-      for (const lineItem of order.line_items) {
-        const price = parseFloat(lineItem.price || '0');
-        const quantity = lineItem.quantity || 0;
-        calculatedGrossSales += price * quantity;
-      }
-      // Set grossSales even if calculatedGrossSales is 0 or negative
-      // (as long as there are line_items, it's a valid sale)
-      grossSales = roundTo2Decimals(calculatedGrossSales);
+    // Gross Sales should ALWAYS be set if order has total_price
+    // Even if line_items are missing (they might not have been fetched in older data)
+    // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
+    // This matches what user expects: gross_sales should be the same as total_price
+    if (totalPrice > 0) {
+      grossSales = roundTo2Decimals(totalPrice);
 
-      const grossExcludingTax = roundTo2Decimals(calculatedGrossSales - totalTax);
-
-      // Net Sales = (Gross Sales - Tax) - (discounts + returns)
-      // Net Sales can be negative if discounts exceed gross sales
-      netSales = roundTo2Decimals(grossExcludingTax - totalDiscounts - totalRefunds);
+      // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
+      // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
+      // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
+      // In our system, discount_total is POSITIVE (1980.51), so we subtract it
+      // File does NOT subtract tax from net sales
+      netSales = roundTo2Decimals(grossSales - totalDiscounts - totalRefunds);
     }
   }
 
