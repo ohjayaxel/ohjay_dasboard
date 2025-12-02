@@ -187,13 +187,18 @@ export async function getOverviewData(params: {
   to?: string;
 }): Promise<OverviewResult> {
   // Fetch data from all sources
-  const [shopifyRows, metaRows, googleRows] = await Promise.all([
-    fetchKpiDaily({
-      tenantId: params.tenantId,
-      from: params.from,
-      to: params.to,
-      source: 'shopify',
-    }),
+  // Use transactions-based aggregation for Shopify (100% match with Shopify Sales reports)
+  // Use kpi_daily for Meta and Google Ads
+  const [{ aggregateDailySales }] = await Promise.all([
+    import('./shopify-aggregations'),
+  ]);
+
+  const [shopifyAggregations, metaRows, googleRows] = await Promise.all([
+    aggregateDailySales(
+      params.tenantId,
+      params.from ?? '1970-01-01',
+      params.to ?? '2100-01-01',
+    ),
     fetchKpiDaily({
       tenantId: params.tenantId,
       from: params.from,
@@ -211,8 +216,8 @@ export async function getOverviewData(params: {
   // Aggregate by date
   const byDate = new Map<string, OverviewDataPoint>();
 
-  // Process Shopify data
-  for (const row of shopifyRows) {
+  // Process Shopify data from transactions
+  for (const row of shopifyAggregations) {
     const existing = byDate.get(row.date) ?? {
       date: row.date,
       gross_sales: 0,
@@ -224,29 +229,10 @@ export async function getOverviewData(params: {
       aov: null,
     };
 
-    // Use gross_sales if available, otherwise fallback to revenue
-    // This handles cases where orders have revenue but gross_sales is null (e.g., test/cancelled orders)
-    const grossSales = row.gross_sales ?? row.revenue ?? 0;
-    const netSales = row.net_sales ?? row.revenue ?? 0;
-    
-    existing.gross_sales += grossSales;
-    existing.net_sales += netSales;
-    existing.orders += row.conversions ?? 0;
-    
-    let newCustomerNet = row.new_customer_net_sales ?? null;
-    if (
-      newCustomerNet === null &&
-      row.new_customer_conversions &&
-      row.conversions &&
-      row.conversions > 0 &&
-      netSales > 0
-    ) {
-      const newCustomerRatio = row.new_customer_conversions / row.conversions;
-      newCustomerNet = netSales * newCustomerRatio;
-    }
-    if (newCustomerNet !== null) {
-      existing.new_customer_net_sales += newCustomerNet;
-    }
+    existing.gross_sales += row.gross_sales;
+    existing.net_sales += row.net_sales;
+    existing.orders += row.orders ?? 0;
+    existing.new_customer_net_sales += row.new_customer_net_sales ?? 0;
 
     byDate.set(row.date, existing);
   }
@@ -302,7 +288,20 @@ export async function getOverviewData(params: {
     aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
   };
 
-  const currency = shopifyRows.find((row) => row.currency)?.currency ?? null;
+  // Get currency from first transaction or shopify_orders
+  let currency: string | null = null;
+  if (shopifyAggregations.length > 0) {
+    const { getSupabaseServiceClient } = await import('@/lib/supabase/server');
+    const client = getSupabaseServiceClient();
+    const { data: firstTransaction } = await client
+      .from('shopify_sales_transactions')
+      .select('currency')
+      .eq('tenant_id', params.tenantId)
+      .not('currency', 'is', null)
+      .limit(1)
+      .single();
+    currency = firstTransaction?.currency ?? null;
+  }
 
   return { series, totals, currency };
 }
@@ -357,55 +356,56 @@ export async function getMarketsData(params: {
   const { getSupabaseServiceClient } = await import('@/lib/supabase/server');
   const supabase = getSupabaseServiceClient();
 
-  // Fetch Shopify orders with country - paginate to get all orders
-  const orders: Array<{
-    country: string;
-    gross_sales: number | null;
-    net_sales: number | null;
+  // Fetch transactions for the date range (using transactions table for 100% Shopify matching)
+  const { data: transactions, error: transactionsError } = await supabase
+    .from('shopify_sales_transactions')
+    .select('event_date, gross_sales, discounts, returns, shopify_order_id, event_type, currency')
+    .eq('tenant_id', params.tenantId)
+    .gte('event_date', params.from ?? '1970-01-01')
+    .lte('event_date', params.to ?? '2100-01-01');
+
+  if (transactionsError) {
+    throw new Error(`Failed to fetch Shopify transactions: ${transactionsError.message}`);
+  }
+
+  // Get unique order IDs from transactions
+  const orderIds = new Set<string>();
+  for (const txn of transactions || []) {
+    if (txn.shopify_order_id) {
+      orderIds.add(txn.shopify_order_id as string);
+    }
+  }
+
+  // Fetch shopify_orders for country and new customer data
+  const ordersMap = new Map<string, {
+    country: string | null;
     is_new_customer: boolean | null;
     is_refund: boolean | null;
     processed_at: string | null;
-    currency: string | null;
-  }> = [];
+  }>();
 
-  let offset = 0;
-  const limit = 1000;
-  let hasMore = true;
+  if (orderIds.size > 0) {
+    // Fetch in batches of 1000
+    const orderIdArray = Array.from(orderIds);
+    for (let i = 0; i < orderIdArray.length; i += 1000) {
+      const batch = orderIdArray.slice(i, i + 1000);
+      const { data: batchOrders, error: ordersError } = await supabase
+        .from('shopify_orders')
+        .select('order_id, country, is_new_customer, is_refund, processed_at')
+        .eq('tenant_id', params.tenantId)
+        .in('order_id', batch);
 
-  while (hasMore) {
-    let ordersQuery = supabase
-      .from('shopify_orders')
-      .select('country, gross_sales, net_sales, is_new_customer, is_refund, processed_at, currency')
-      .eq('tenant_id', params.tenantId)
-      .not('country', 'is', null)
-      .not('gross_sales', 'is', null)
-      .gt('gross_sales', 0)
-      .range(offset, offset + limit - 1)
-      .order('processed_at', { ascending: false });
-
-    if (params.from) {
-      ordersQuery = ordersQuery.gte('processed_at', params.from);
-    }
-
-    if (params.to) {
-      ordersQuery = ordersQuery.lte('processed_at', params.to);
-    }
-
-    const { data: batch, error: ordersError } = await ordersQuery;
-
-    if (ordersError) {
-      throw new Error(`Failed to fetch Shopify orders: ${ordersError.message}`);
-    }
-
-    if (!batch || batch.length === 0) {
-      hasMore = false;
-    } else {
-      orders.push(...batch);
-      offset += limit;
-      
-      // If we got fewer than limit, we've reached the end
-      if (batch.length < limit) {
-        hasMore = false;
+      if (ordersError) {
+        console.warn(`Failed to fetch orders batch: ${ordersError.message}`);
+      } else if (batchOrders) {
+        for (const order of batchOrders) {
+          ordersMap.set(order.order_id as string, {
+            country: order.country as string | null,
+            is_new_customer: order.is_new_customer as boolean | null,
+            is_refund: order.is_refund as boolean | null,
+            processed_at: order.processed_at as string | null,
+          });
+        }
       }
     }
   }
@@ -485,15 +485,17 @@ export async function getMarketsData(params: {
     totalMetaSpend = sum(metaRows.map((row) => row.spend ?? 0));
   }
 
-  // Aggregate Shopify orders by country (normalized to country_priority format)
+  // Aggregate transactions by country (normalized to country_priority format)
   const byCountry = new Map<string, MarketsDataPoint>();
+  const ordersByCountry = new Map<string, Set<string>>(); // Track unique order IDs per country
 
-  for (const order of orders ?? []) {
-    const rawCountry = order.country as string;
-    if (!rawCountry) continue;
+  for (const transaction of transactions || []) {
+    const orderId = transaction.shopify_order_id as string;
+    const order = ordersMap.get(orderId);
+    if (!order || !order.country) continue;
 
     // Normalize country to country_priority format (DE, SE, NO, FI, or OTHER)
-    const country = normalizeCountryToPriority(rawCountry);
+    const country = normalizeCountryToPriority(order.country);
 
     const existing = byCountry.get(country) ?? {
       country,
@@ -506,25 +508,36 @@ export async function getMarketsData(params: {
       aov: null,
     };
 
-    const grossSales = Number(order.gross_sales) || 0;
-    const netSales = Number(order.net_sales) || 0;
-    const isNewCustomer = order.is_new_customer === true;
-    const isRefund = order.is_refund === true;
+    const grossSales = parseFloat((transaction.gross_sales || 0).toString());
+    const discounts = parseFloat((transaction.discounts || 0).toString());
+    const returns = parseFloat((transaction.returns || 0).toString());
+    const netSales = grossSales - discounts - returns;
 
     existing.gross_sales += grossSales;
     existing.net_sales += netSales;
 
-    // Only count orders (not refunds) for order count
-    if (!isRefund) {
-      existing.orders += 1;
-    }
+    // Track orders per country (only SALE events, not refunds)
+    if (transaction.event_type === 'SALE' && !order.is_refund) {
+      if (!ordersByCountry.has(country)) {
+        ordersByCountry.set(country, new Set());
+      }
+      ordersByCountry.get(country)!.add(orderId);
 
-    // Calculate new customer net sales
-    if (isNewCustomer && !isRefund) {
-      existing.new_customer_net_sales += netSales;
+      // Calculate new customer net sales (only for SALE events)
+      if (order.is_new_customer === true) {
+        existing.new_customer_net_sales += netSales;
+      }
     }
 
     byCountry.set(country, existing);
+  }
+
+  // Set order counts
+  for (const [country, orderSet] of ordersByCountry.entries()) {
+    const existing = byCountry.get(country);
+    if (existing) {
+      existing.orders = orderSet.size;
+    }
   }
 
   // Assign marketing spend per country
@@ -597,7 +610,8 @@ export async function getMarketsData(params: {
     aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
   };
 
-  const currency = orders?.find((order) => order.currency)?.currency ?? null;
+  // Get currency from transactions
+  const currency = transactions?.find((txn) => txn.currency)?.currency ?? null;
 
   return { series, totals, currency };
 }

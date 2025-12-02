@@ -14,6 +14,8 @@ export type DailySalesAggregation = {
   returns: number;
   net_sales: number;
   transaction_count: number;
+  orders?: number;
+  new_customer_net_sales?: number;
 };
 
 export type MonthlySalesAggregation = {
@@ -28,6 +30,7 @@ export type MonthlySalesAggregation = {
 
 /**
  * Aggregates daily sales from shopify_sales_transactions table
+ * Includes orders count and new customer metrics by joining with shopify_orders
  */
 export async function aggregateDailySales(
   tenantId: string,
@@ -36,85 +39,129 @@ export async function aggregateDailySales(
 ): Promise<DailySalesAggregation[]> {
   const client = getSupabaseServiceClient();
 
-  const { data, error } = await client.rpc('aggregate_shopify_daily_sales', {
-    p_tenant_id: tenantId,
-    p_from_date: from,
-    p_to_date: to,
-  });
+  // Fetch all transactions for the date range
+  const { data: transactions, error: transactionsError } = await client
+    .from('shopify_sales_transactions')
+    .select('event_date, gross_sales, discounts, returns, shopify_order_id, event_type')
+    .eq('tenant_id', tenantId)
+    .gte('event_date', from)
+    .lte('event_date', to);
 
-  if (error) {
-    // If RPC function doesn't exist, fall back to direct query
-    const { data: directData, error: directError } = await client
-      .from('shopify_sales_transactions')
-      .select('event_date')
-      .eq('tenant_id', tenantId)
-      .gte('event_date', from)
-      .lte('event_date', to);
-
-    if (directError) {
-      throw new Error(`Failed to aggregate daily sales: ${directError.message}`);
-    }
-
-    // Group by date manually
-    const byDate = new Map<string, DailySalesAggregation>();
-
-    if (directData) {
-      for (const row of directData) {
-        const date = row.event_date as string;
-        if (!byDate.has(date)) {
-          byDate.set(date, {
-            date,
-            gross_sales: 0,
-            discounts: 0,
-            returns: 0,
-            net_sales: 0,
-            transaction_count: 0,
-          });
-        }
-      }
-    }
-
-    // Fetch all transactions for aggregation
-    const { data: transactions, error: transactionsError } = await client
-      .from('shopify_sales_transactions')
-      .select('event_date, gross_sales, discounts, returns')
-      .eq('tenant_id', tenantId)
-      .gte('event_date', from)
-      .lte('event_date', to);
-
-    if (transactionsError) {
-      throw new Error(`Failed to fetch transactions: ${transactionsError.message}`);
-    }
-
-    // Aggregate manually
-    for (const transaction of transactions || []) {
-      const date = transaction.event_date as string;
-      const grossSales = parseFloat((transaction.gross_sales || 0).toString());
-      const discounts = parseFloat((transaction.discounts || 0).toString());
-      const returns = parseFloat((transaction.returns || 0).toString());
-
-      const existing = byDate.get(date) || {
-        date,
-        gross_sales: 0,
-        discounts: 0,
-        returns: 0,
-        net_sales: 0,
-        transaction_count: 0,
-      };
-
-      existing.gross_sales += grossSales;
-      existing.discounts += discounts;
-      existing.returns += returns;
-      existing.net_sales += grossSales - discounts - returns;
-      existing.transaction_count += 1;
-
-      byDate.set(date, existing);
-    }
-
-    return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+  if (transactionsError) {
+    throw new Error(`Failed to fetch transactions: ${transactionsError.message}`);
   }
 
-  return (data || []) as DailySalesAggregation[];
+  // Get unique order IDs per date (only SALE events count as orders)
+  const orderIdsByDate = new Map<string, Set<string>>();
+  for (const txn of transactions || []) {
+    if (txn.event_type === 'SALE') {
+      const date = txn.event_date as string;
+      const orderId = txn.shopify_order_id as string;
+      if (!orderIdsByDate.has(date)) {
+        orderIdsByDate.set(date, new Set());
+      }
+      orderIdsByDate.get(date)!.add(orderId);
+    }
+  }
+
+  // Fetch shopify_orders for new customer data
+  const orderIds = new Set<string>();
+  for (const orderSet of orderIdsByDate.values()) {
+    for (const orderId of orderSet) {
+      orderIds.add(orderId);
+    }
+  }
+
+  let ordersData: Array<{
+    order_id: string;
+    processed_at: string | null;
+    is_new_customer: boolean | null;
+    net_sales: number | null;
+  }> = [];
+
+  if (orderIds.size > 0) {
+    // Fetch in batches of 1000
+    const orderIdArray = Array.from(orderIds);
+    for (let i = 0; i < orderIdArray.length; i += 1000) {
+      const batch = orderIdArray.slice(i, i + 1000);
+      const { data: batchData, error: ordersError } = await client
+        .from('shopify_orders')
+        .select('order_id, processed_at, is_new_customer, net_sales')
+        .eq('tenant_id', tenantId)
+        .in('order_id', batch);
+
+      if (ordersError) {
+        console.warn(`Failed to fetch orders batch: ${ordersError.message}`);
+      } else if (batchData) {
+        ordersData.push(...batchData);
+      }
+    }
+  }
+
+  // Create a map of order_id -> order data
+  const ordersMap = new Map(
+    ordersData.map((o) => [o.order_id, o])
+  );
+
+  // Aggregate by date
+  const byDate = new Map<string, DailySalesAggregation>();
+
+  for (const transaction of transactions || []) {
+    const date = transaction.event_date as string;
+    const grossSales = parseFloat((transaction.gross_sales || 0).toString());
+    const discounts = parseFloat((transaction.discounts || 0).toString());
+    const returns = parseFloat((transaction.returns || 0).toString());
+
+    const existing = byDate.get(date) || {
+      date,
+      gross_sales: 0,
+      discounts: 0,
+      returns: 0,
+      net_sales: 0,
+      transaction_count: 0,
+      orders: 0,
+      new_customer_net_sales: 0,
+    };
+
+    existing.gross_sales += grossSales;
+    existing.discounts += discounts;
+    existing.returns += returns;
+    existing.net_sales += grossSales - discounts - returns;
+    existing.transaction_count += 1;
+
+    byDate.set(date, existing);
+  }
+
+  // Add orders count and new customer net sales
+  for (const [date, orderSet] of orderIdsByDate.entries()) {
+    const existing = byDate.get(date);
+    if (existing) {
+      existing.orders = orderSet.size;
+
+      // Calculate new customer net sales for this date
+      // Use transactions on this date that belong to new customer orders
+      let newCustomerNetSales = 0;
+      for (const orderId of orderSet) {
+        const order = ordersMap.get(orderId);
+        if (order && order.is_new_customer === true) {
+          // Get net sales from transactions for this order on this date (SALE events only)
+          const orderTransactions = (transactions || []).filter(
+            (t) => t.shopify_order_id === orderId && t.event_date === date && t.event_type === 'SALE'
+          );
+          const orderNetSales = orderTransactions.reduce((sum, t) => {
+            const gross = parseFloat((t.gross_sales || 0).toString());
+            const disc = parseFloat((t.discounts || 0).toString());
+            const ret = parseFloat((t.returns || 0).toString());
+            return sum + (gross - disc - ret);
+          }, 0);
+          newCustomerNetSales += orderNetSales;
+        }
+      }
+      existing.new_customer_net_sales = newCustomerNetSales;
+    }
+  }
+
+  return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 /**
