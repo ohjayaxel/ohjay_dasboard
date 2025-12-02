@@ -910,7 +910,7 @@ async function main() {
     console.log(`[shopify_backfill] Mapped to ${allTransactions.length} transactions`);
 
     // Convert transactions to database format
-    const transactionRows = allTransactions.map((t) => ({
+    const transactionRowsRaw = allTransactions.map((t) => ({
       tenant_id: tenant.id,
       shopify_order_id: t.shopify_order_id,
       shopify_order_name: t.shopify_order_name,
@@ -931,13 +931,43 @@ async function main() {
       tax: t.tax,
     }));
 
-    // Save transactions to database
+    // Deduplicate transactions based on unique constraint key
+    // Unique constraint: tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id
+    const transactionMap = new Map<string, typeof transactionRowsRaw[0]>();
+    for (const row of transactionRowsRaw) {
+      const key = `${row.tenant_id}|${row.shopify_order_id}|${row.shopify_line_item_id}|${row.event_type}|${row.event_date}|${row.shopify_refund_id || ''}`;
+      if (!transactionMap.has(key)) {
+        transactionMap.set(key, row);
+      }
+    }
+    const transactionRows = Array.from(transactionMap.values());
+
+    if (transactionRows.length < transactionRowsRaw.length) {
+      console.log(`[shopify_backfill] Removed ${transactionRowsRaw.length - transactionRows.length} duplicate transactions`);
+    }
+
+    // Save transactions to database in batches to avoid conflicts
     console.log(`[shopify_backfill] Upserting ${transactionRows.length} transactions to shopify_sales_transactions table...`);
-    const { error: transactionError } = await supabase
-      .from('shopify_sales_transactions')
-      .upsert(transactionRows, {
-        onConflict: 'tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id',
-      });
+    const BATCH_SIZE = 1000;
+    let savedCount = 0;
+    for (let i = 0; i < transactionRows.length; i += BATCH_SIZE) {
+      const batch = transactionRows.slice(i, i + BATCH_SIZE);
+      const { error: transactionError } = await supabase
+        .from('shopify_sales_transactions')
+        .upsert(batch, {
+          onConflict: 'tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id',
+        });
+
+      if (transactionError) {
+        console.warn(`[shopify_backfill] Failed to upsert transaction batch ${Math.floor(i / BATCH_SIZE) + 1}: ${transactionError.message}`);
+      } else {
+        savedCount += batch.length;
+      }
+    }
+
+    if (savedCount > 0) {
+      console.log(`[shopify_backfill] Successfully saved ${savedCount} transactions`);
+    }
 
     if (transactionError) {
       console.warn(`[shopify_backfill] Failed to upsert transactions: ${transactionError.message}`);
