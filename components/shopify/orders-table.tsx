@@ -289,6 +289,19 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
     return sum + getNumericValue(order.net_sales)
   }, 0)
 
+  // Calculate totals for Tax, Discounts, and Returns
+  const totalTax = includedOrders.reduce((sum, order) => {
+    return sum + getNumericValue(order.total_tax)
+  }, 0)
+
+  const totalDiscounts = includedOrders.reduce((sum, order) => {
+    return sum + getNumericValue(order.discount_total)
+  }, 0)
+
+  const totalReturns = includedOrders.reduce((sum, order) => {
+    return sum + getNumericValue(order.total_refunds)
+  }, 0)
+
   return (
     <div className="space-y-4">
       {/* Date filters */}
@@ -320,7 +333,7 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
       </div>
 
       {/* Summary */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
         <div className="rounded-lg border p-4">
           <div className="text-sm text-muted-foreground">Included Orders</div>
           <div className="text-2xl font-semibold">{includedOrders.length}</div>
@@ -336,6 +349,27 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
           <div className="text-sm font-medium text-muted-foreground">Gross Sales</div>
           <div className="text-2xl font-semibold">{formatCurrency(totalGrossSales)}</div>
           <p className="mt-1 text-xs text-muted-foreground">Shopify's total_price (order total before tax).</p>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Tax</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totalTax)}</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Total tax collected.
+          </p>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Discounts</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totalDiscounts)}</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Total discounts applied.
+          </p>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Returns</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totalReturns)}</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Total refunds/returns.
+          </p>
         </div>
         <div className="rounded-lg border p-4">
           <div className="text-sm font-medium text-muted-foreground">Net Sales</div>

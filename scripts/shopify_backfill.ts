@@ -24,6 +24,8 @@ import {
   calculateShopifyLikeSales,
   type ShopifyOrder as SalesShopifyOrder,
 } from '@/lib/shopify/sales';
+import { fetchShopifyOrdersGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
+import { mapOrderToTransactions, type SalesTransaction } from '@/lib/shopify/transaction-mapper';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -886,6 +888,68 @@ async function main() {
 
   console.log(`[shopify_backfill] Successfully saved ${orderRows.length} orders`);
 
+  // Fetch orders via GraphQL and save transactions for 100% matching
+  console.log(`\n[shopify_backfill] Fetching orders via GraphQL for transaction mapping...`);
+  let graphqlOrders: GraphQLOrder[] = [];
+  try {
+    graphqlOrders = await fetchShopifyOrdersGraphQL({
+      tenantId: tenant.id,
+      shopDomain,
+      since,
+      until,
+      excludeTest: true,
+    });
+    console.log(`[shopify_backfill] Fetched ${graphqlOrders.length} orders via GraphQL`);
+
+    // Map GraphQL orders to transactions
+    const allTransactions: SalesTransaction[] = [];
+    for (const graphqlOrder of graphqlOrders) {
+      const transactions = mapOrderToTransactions(graphqlOrder, 'Europe/Stockholm');
+      allTransactions.push(...transactions);
+    }
+    console.log(`[shopify_backfill] Mapped to ${allTransactions.length} transactions`);
+
+    // Convert transactions to database format
+    const transactionRows = allTransactions.map((t) => ({
+      tenant_id: tenant.id,
+      shopify_order_id: t.shopify_order_id,
+      shopify_order_name: t.shopify_order_name,
+      shopify_order_number: t.shopify_order_number,
+      shopify_refund_id: t.shopify_refund_id,
+      shopify_line_item_id: t.shopify_line_item_id,
+      event_type: t.event_type,
+      event_date: t.event_date,
+      currency: t.currency,
+      product_sku: t.product_sku,
+      product_title: t.product_title,
+      variant_title: t.variant_title,
+      quantity: t.quantity,
+      gross_sales: t.gross_sales,
+      discounts: t.discounts,
+      returns: t.returns,
+      shipping: t.shipping,
+      tax: t.tax,
+    }));
+
+    // Save transactions to database
+    console.log(`[shopify_backfill] Upserting ${transactionRows.length} transactions to shopify_sales_transactions table...`);
+    const { error: transactionError } = await supabase
+      .from('shopify_sales_transactions')
+      .upsert(transactionRows, {
+        onConflict: 'tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id',
+      });
+
+    if (transactionError) {
+      console.warn(`[shopify_backfill] Failed to upsert transactions: ${transactionError.message}`);
+      console.warn(`[shopify_backfill] Continuing with KPI aggregation using shopify_orders...`);
+    } else {
+      console.log(`[shopify_backfill] Successfully saved ${transactionRows.length} transactions`);
+    }
+  } catch (error) {
+    console.warn(`[shopify_backfill] Failed to fetch/save transactions via GraphQL: ${error instanceof Error ? error.message : String(error)}`);
+    console.warn(`[shopify_backfill] Continuing with KPI aggregation using shopify_orders...`);
+  }
+
   // Aggregate KPIs
   const aggregates = aggregateKpis(orderRows);
   const kpiRows = aggregates.map((row) => ({
@@ -948,6 +1012,7 @@ async function main() {
   console.log(`\n[shopify_backfill] Summary:`);
   console.log(`  - Orders processed: ${orderRows.length}`);
   console.log(`  - KPI rows created: ${kpiRows.length}`);
+  console.log(`  - GraphQL orders fetched: ${graphqlOrders.length}`);
   console.log(`  - Date range: ${since} to ${until}`);
 }
 

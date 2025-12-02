@@ -149,7 +149,7 @@ export async function getShopifyAuthorizeUrl(options: {
   };
 }
 
-function normalizeShopDomain(domain: string): string {
+export function normalizeShopDomain(domain: string): string {
   return domain
     .trim()
     .replace(/^https?:\/\//, '')

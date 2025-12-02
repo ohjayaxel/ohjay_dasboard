@@ -11,6 +11,9 @@ import {
   calculateShopifyLikeSales,
   type ShopifyOrder as SalesShopifyOrder,
 } from '@/lib/shopify/sales';
+import { fetchShopifyOrderGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
+import { mapOrderToTransactions, type SalesTransaction } from '@/lib/shopify/transaction-mapper';
+import { getShopifyAccessToken } from '@/lib/integrations/shopify';
 
 type ShopifyRefund = {
   id: number;
@@ -344,6 +347,7 @@ async function processWebhookOrder(
   client: ReturnType<typeof getSupabaseServiceClient>,
   tenantId: string,
   order: ShopifyOrder,
+  shopDomain: string,
 ) {
   let orderRow = mapShopifyOrderToRow(tenantId, order);
 
@@ -388,6 +392,87 @@ async function processWebhookOrder(
 
   if (upsertError) {
     throw new Error(`Failed to upsert order: ${upsertError.message}`);
+  }
+
+  // Fetch full order via GraphQL and create transactions for 100% matching
+  try {
+    if (shopDomain) {
+      const graphqlOrder = await fetchShopifyOrderGraphQL({
+        tenantId,
+        shopDomain,
+        orderId: order.id.toString(),
+      });
+
+      if (graphqlOrder && !graphqlOrder.test) {
+        // Map to transactions
+        const transactions = mapOrderToTransactions(graphqlOrder, 'Europe/Stockholm');
+
+        // Convert to database format
+        const transactionRows = transactions.map((t) => ({
+          tenant_id: tenantId,
+          shopify_order_id: t.shopify_order_id,
+          shopify_order_name: t.shopify_order_name,
+          shopify_order_number: t.shopify_order_number,
+          shopify_refund_id: t.shopify_refund_id,
+          shopify_line_item_id: t.shopify_line_item_id,
+          event_type: t.event_type,
+          event_date: t.event_date,
+          currency: t.currency,
+          product_sku: t.product_sku,
+          product_title: t.product_title,
+          variant_title: t.variant_title,
+          quantity: t.quantity,
+          gross_sales: t.gross_sales,
+          discounts: t.discounts,
+          returns: t.returns,
+          shipping: t.shipping,
+          tax: t.tax,
+        }));
+
+        // Upsert transactions
+        const { error: transactionError } = await client
+          .from('shopify_sales_transactions')
+          .upsert(transactionRows, {
+            onConflict: 'tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id',
+          });
+
+        if (transactionError) {
+          logger.warn(
+            {
+              route: 'shopify_webhook',
+              action: 'upsert_transactions',
+              tenantId,
+              orderId: order.id,
+              error_message: transactionError.message,
+            },
+            'Failed to upsert transactions for webhook order',
+          );
+        } else {
+          logger.info(
+            {
+              route: 'shopify_webhook',
+              action: 'upsert_transactions',
+              tenantId,
+              orderId: order.id,
+              transactionCount: transactionRows.length,
+            },
+            'Successfully created transactions for webhook order',
+          );
+        }
+      }
+    }
+  } catch (error) {
+    // Don't fail webhook if transaction creation fails - log and continue
+    logger.warn(
+      {
+        route: 'shopify_webhook',
+        action: 'create_transactions',
+        tenantId,
+        orderId: order.id,
+        error_message: error instanceof Error ? error.message : String(error),
+      },
+      'Failed to create transactions for webhook order (continuing anyway)',
+    );
   }
 
   // Recalculate KPIs for this order's date based on all orders for that date
@@ -563,7 +648,7 @@ export async function POST(request: NextRequest) {
       if (webhookTopic === 'orders/create' || webhookTopic === 'orders/updated') {
         const order = webhookData as ShopifyOrder;
 
-        await processWebhookOrder(client, tenantId, order);
+        await processWebhookOrder(client, tenantId, order, normalizedShop);
 
         logger.info(
           {
