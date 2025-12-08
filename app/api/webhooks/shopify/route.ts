@@ -13,6 +13,9 @@ import {
 } from '@/lib/shopify/sales';
 import { fetchShopifyOrderGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
 import { mapOrderToTransactions, type SalesTransaction } from '@/lib/shopify/transaction-mapper';
+import { calculateDailySales, type SalesMode } from '@/lib/shopify/sales';
+import { convertGraphQLOrderToShopifyOrder } from '@/lib/shopify/order-converter';
+import { fetchShopifyOrdersGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
 import { getShopifyAccessToken } from '@/lib/integrations/shopify';
 
 type ShopifyRefund = {
@@ -157,10 +160,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     })) || [],
   };
 
-  // Calculate refunds using Shopify-like calculation
+  // Calculate sales using Shopify-like calculation (NEW METHOD)
+  // This uses: Net Sales EXCL tax = subtotal_price - total_tax - refunds (EXCL tax)
   const salesResult = calculateShopifyLikeSales([salesOrder]);
   const orderSales = salesResult.perOrder[0];
   const totalRefunds = orderSales ? orderSales.returns : 0;
+  const netSalesFromCalculation = orderSales ? orderSales.netSales : null;
 
   // Shopify Gross Sales filtering logic:
   // Include order if:
@@ -189,19 +194,22 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
   if (!shouldExclude) {
     const roundTo2Decimals = (num: number) => Math.round(num * 100) / 100;
     
-    // Gross Sales should ALWAYS be set if order has total_price
-    // Even if line_items are missing (they might not have been fetched in older data)
-    // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
-    // This matches what user expects: gross_sales should be the same as total_price
+    // Calculate Gross Sales: SUM(line_item.price × quantity) for reference
+    // But use subtotal_price and total_tax for Net Sales calculation (NEW METHOD)
     if (totalPrice > 0) {
+      // Gross Sales INCL tax (for reference)
       grossSales = roundTo2Decimals(totalPrice);
 
-      // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
-      // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
-      // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
-      // In our system, discount_total is POSITIVE (1980.51), so we subtract it
-      // File does NOT subtract tax from net sales
-      netSales = roundTo2Decimals(grossSales - totalDiscounts - totalRefunds);
+      // NEW METHOD: Net Sales EXCL tax = subtotal_price - total_tax - refunds (EXCL tax)
+      // calculateShopifyLikeSales already uses this new method and returns correct netSales
+      if (netSalesFromCalculation !== null) {
+        netSales = netSalesFromCalculation;
+      } else {
+        // Fallback: calculate manually using new method
+        const subtotalPriceNum = subtotalPrice || 0;
+        const totalTaxNum = totalTax || 0;
+        netSales = roundTo2Decimals(subtotalPriceNum - totalTaxNum - totalRefunds);
+      }
     }
   }
 
@@ -542,6 +550,158 @@ async function processWebhookOrder(
       const { error: upsertError } = await client.from('kpi_daily').upsert(kpiDbRow, {
         onConflict: 'tenant_id,date,source',
       });
+
+      // Update daily sales for both modes
+      // Need to recalculate from all orders for affected dates
+      if (orderRow.processed_at) {
+        try {
+          // Get affected dates (created_at for Shopify mode, processed_at for Financial mode)
+          const orderCreatedDate = order.created_at
+            ? new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' })
+            : null;
+          const processedDate = orderRow.processed_at;
+          const affectedDates = new Set<string>();
+          if (orderCreatedDate) affectedDates.add(orderCreatedDate);
+          if (processedDate) affectedDates.add(processedDate);
+          
+          // Also check refund dates
+          if (graphqlOrder && graphqlOrder.refunds) {
+            for (const refund of graphqlOrder.refunds) {
+              const refundCreatedDate = new Date(refund.createdAt).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' });
+              affectedDates.add(refundCreatedDate);
+            }
+          }
+
+          // Fetch all orders for affected dates via GraphQL to recalculate daily totals
+          if (affectedDates.size > 0 && shopDomain) {
+            const datesArray = Array.from(affectedDates);
+            const earliestDate = datesArray.sort()[0];
+            const latestDate = datesArray.sort().reverse()[0];
+            
+            // Fetch orders with wider range to ensure we get all relevant orders
+            const fetchStartDate = new Date(earliestDate);
+            fetchStartDate.setDate(fetchStartDate.getDate() - 1);
+            const fetchEndDate = new Date(latestDate);
+            fetchEndDate.setDate(fetchEndDate.getDate() + 1);
+            
+            const graphqlOrders = await fetchShopifyOrdersGraphQL({
+              tenantId,
+              shopDomain,
+              since: fetchStartDate.toISOString().slice(0, 10),
+              until: fetchEndDate.toISOString().slice(0, 10),
+              excludeTest: true,
+            });
+
+            // Fetch is_new_customer from shopify_orders for all affected order IDs
+            const orderIds = graphqlOrders.map((o) => (o.legacyResourceId || o.id).toString());
+            const orderCustomerMap = new Map<string, boolean>();
+            
+            if (orderIds.length > 0) {
+              // Fetch in batches if needed (Supabase limit is 1000)
+              for (let i = 0; i < orderIds.length; i += 1000) {
+                const batch = orderIds.slice(i, i + 1000);
+                const { data: ordersData } = await client
+                  .from('shopify_orders')
+                  .select('order_id, is_new_customer')
+                  .eq('tenant_id', tenantId)
+                  .in('order_id', batch);
+                
+                if (ordersData) {
+                  for (const order of ordersData) {
+                    orderCustomerMap.set(order.order_id as string, order.is_new_customer ?? false);
+                  }
+                }
+              }
+            }
+
+            // Convert to ShopifyOrderWithTransactions format
+            const shopifyOrdersWithTransactions = graphqlOrders
+              .filter((o) => !o.test)
+              .map(convertGraphQLOrderToShopifyOrder);
+
+            // Calculate daily sales for both modes, passing the customer map
+            const shopifyModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'shopify', 'Europe/Stockholm', orderCustomerMap);
+            const financialModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'financial', 'Europe/Stockholm', orderCustomerMap);
+
+            // Filter to only affected dates
+            const shopifyRows = shopifyModeDaily
+              .filter((row) => affectedDates.has(row.date))
+              .map((row) => ({
+                tenant_id: tenantId,
+                date: row.date,
+                mode: 'shopify' as SalesMode,
+                net_sales_excl_tax: row.netSalesExclTax,
+                gross_sales_excl_tax: row.grossSalesExclTax || null,
+                refunds_excl_tax: row.refundsExclTax || null,
+                discounts_excl_tax: row.discountsExclTax || null,
+                orders_count: row.ordersCount,
+                currency: row.currency || null,
+                new_customer_net_sales: row.newCustomerNetSales || null,
+              }));
+
+            const financialRows = financialModeDaily
+              .filter((row) => affectedDates.has(row.date))
+              .map((row) => ({
+                tenant_id: tenantId,
+                date: row.date,
+                mode: 'financial' as SalesMode,
+                net_sales_excl_tax: row.netSalesExclTax,
+                gross_sales_excl_tax: row.grossSalesExclTax || null,
+                refunds_excl_tax: row.refundsExclTax || null,
+                discounts_excl_tax: row.discountsExclTax || null,
+                orders_count: row.ordersCount,
+                currency: row.currency || null,
+                new_customer_net_sales: row.newCustomerNetSales || null,
+              }));
+
+            // Upsert daily sales
+            if (shopifyRows.length > 0 || financialRows.length > 0) {
+              const { error: dailySalesError } = await client
+                .from('shopify_daily_sales')
+                .upsert([...shopifyRows, ...financialRows], {
+                  onConflict: 'tenant_id,date,mode',
+                });
+
+              if (dailySalesError) {
+                logger.warn(
+                  {
+                    route: 'shopify_webhook',
+                    action: 'upsert_daily_sales',
+                    tenantId,
+                    orderId: order.id,
+                    error_message: dailySalesError.message,
+                  },
+                  'Failed to update daily sales (continuing anyway)',
+                );
+              } else {
+                logger.info(
+                  {
+                    route: 'shopify_webhook',
+                    action: 'upsert_daily_sales',
+                    tenantId,
+                    orderId: order.id,
+                    shopifyRows: shopifyRows.length,
+                    financialRows: financialRows.length,
+                  },
+                  'Updated daily sales for both modes',
+                );
+              }
+            }
+          }
+        } catch (error) {
+          // Don't fail webhook if daily sales update fails
+          logger.warn(
+            {
+              route: 'shopify_webhook',
+              action: 'calculate_daily_sales',
+              tenantId,
+              orderId: order.id,
+              error_message: error instanceof Error ? error.message : String(error),
+            },
+            'Failed to calculate daily sales (continuing anyway)',
+          );
+        }
+      }
 
       if (upsertError) {
         logger.warn(

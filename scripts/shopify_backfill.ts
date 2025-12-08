@@ -17,27 +17,91 @@
  */
 
 import { ArgumentParser } from 'argparse';
-import { createClient } from '@supabase/supabase-js';
+import { readFileSync } from 'fs';
 
+// Load environment variables from .env.local or env file
+function loadEnvFile() {
+  // Try multiple possible locations (Next.js standard + custom)
+  const possibleEnvFiles = [
+    process.env.ENV_FILE,
+    '.env.local',
+    '.env.production.local',
+    '.env.development.local',
+    '.env',
+    'env/local.prod.sh',
+    '../env/local.prod.sh',
+    '../../env/local.prod.sh',
+  ].filter(Boolean) as string[];
+
+  for (const envFile of possibleEnvFiles) {
+    try {
+      const content = readFileSync(envFile, 'utf-8');
+      const envVars: Record<string, string> = {};
+      content.split('\n').forEach((line) => {
+        // Support both export KEY=value and KEY=value formats
+        const exportMatch = line.match(/^export\s+(\w+)=(.+)$/);
+        const directMatch = line.match(/^(\w+)=(.+)$/);
+        const match = exportMatch || directMatch;
+        if (match && !line.trim().startsWith('#')) {
+          const [, key, value] = match;
+          envVars[key] = value.replace(/^["']|["']$/g, '').trim();
+        }
+      });
+      Object.assign(process.env, envVars);
+      console.log(`[shopify_backfill] Loaded environment variables from ${envFile}`);
+      return;
+    } catch (error) {
+      // Continue to next file
+    }
+  }
+  
+  // If no file found, check if env vars are already set
+  if (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL) {
+    console.log(`[shopify_backfill] Using existing environment variables`);
+    return;
+  }
+  
+  console.warn(`[shopify_backfill] Warning: Could not load env file. Make sure NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set.`);
+}
+
+loadEnvFile();
+
+import { createClient } from '@supabase/supabase-js';
 import { decryptSecret } from '@/lib/integrations/crypto';
+import { getShopifyConnection, getShopifyAccessToken } from '@/lib/integrations/shopify';
+import { resolveTenantId } from '@/lib/tenants/resolve-tenant';
 import {
   calculateShopifyLikeSales,
   type ShopifyOrder as SalesShopifyOrder,
+  calculateDailySales,
+  type SalesMode,
 } from '@/lib/shopify/sales';
 import { fetchShopifyOrdersGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
 import { mapOrderToTransactions, type SalesTransaction } from '@/lib/shopify/transaction-mapper';
+import { convertGraphQLOrderToShopifyOrder } from '@/lib/shopify/order-converter';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// Create Supabase client (same pattern as other scripts)
+// Check if env vars are already set (from shell or other source)
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+if (!supabaseUrl || !supabaseKey) {
+  console.error('\n❌ Error: Missing environment variables');
+  console.error('   NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL');
+  console.error('   SUPABASE_SERVICE_ROLE_KEY');
+  console.error('\n💡 Tip: Export them in your shell or create .env.local file\n');
   throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables');
 }
 
-const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+console.log(`[shopify_backfill] Using Supabase URL: ${supabaseUrl.substring(0, 20)}...`);
+
+const supabaseClient = createClient(supabaseUrl, supabaseKey, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
+  },
+  db: {
+    schema: 'public',
   },
 });
 
@@ -137,17 +201,19 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   const totalDiscounts = parseAmount(order.total_discounts);
   const subtotalPrice = parseAmount(order.subtotal_price);
   
-  // Calculate refunds using Shopify-like calculation
-  // Convert our ShopifyOrder to SalesShopifyOrder format for refund calculation
+  // Calculate sales using Shopify-like calculation (NEW METHOD)
+  // Convert our ShopifyOrder to SalesShopifyOrder format
+  // This includes subtotal_price for the new calculation method
   const salesOrder: SalesShopifyOrder = {
     id: order.id,
     created_at: order.created_at,
     currency: order.currency,
     financial_status: order.financial_status || 'unknown',
     cancelled_at: order.cancelled_at || null,
+    subtotal_price: order.subtotal_price, // NEW: Required for correct Net Sales calculation
+    total_tax: order.total_tax, // NEW: Required for correct Net Sales calculation
     line_items: order.line_items || [],
     total_discounts: order.total_discounts,
-    total_tax: order.total_tax,
     refunds: order.refunds?.map((refund) => ({
       id: refund.id,
       created_at: refund.created_at,
@@ -535,57 +601,91 @@ async function main() {
 
   const supabase = supabaseClient;
 
-  // Get tenant ID from slug
-  const { data: tenant, error: tenantError } = await supabase
+  // Get tenant ID from slug (direct lookup for scripts, not using React cache)
+  console.log(`[shopify_backfill] Looking up tenant: ${args.tenant}...`);
+  let tenantId: string;
+  let tenantName: string;
+  
+  const { data: tenantData, error: tenantError } = await supabase
     .from('tenants')
-    .select('id, name, slug')
+    .select('id, slug, name')
     .eq('slug', args.tenant)
     .maybeSingle();
 
   if (tenantError) {
-    throw new Error(`Failed to fetch tenant: ${tenantError.message}`);
-  }
-
-  if (!tenant) {
+    console.error(`[shopify_backfill] Tenant lookup error:`, tenantError);
+    // This might be a schema cache issue - Supabase sometimes needs a moment
+    // Try with a simple query first to warm up the cache
+    await supabase.from('tenants').select('id').limit(1);
+    
+    // Retry
+    const { data: tenantDataRetry, error: tenantErrorRetry } = await supabase
+      .from('tenants')
+      .select('id, slug, name')
+      .eq('slug', args.tenant)
+      .maybeSingle();
+    
+    if (tenantErrorRetry || !tenantDataRetry) {
+      throw new Error(`Failed to fetch tenant: ${tenantError.message}`);
+    }
+    
+    tenantId = tenantDataRetry.id;
+    tenantName = tenantDataRetry.name;
+  } else if (!tenantData) {
     throw new Error(`Tenant not found: ${args.tenant}`);
+  } else {
+    tenantId = tenantData.id;
+    tenantName = tenantData.name;
   }
 
-  console.log(`[shopify_backfill] Found tenant: ${tenant.name} (${tenant.id})`);
+  console.log(`[shopify_backfill] Found tenant: ${tenantName} (${tenantId})`);
+  
+  // Get Shopify connection using platform function
+  const connection = await getShopifyConnection(tenantId);
+  // Try platform function first, fallback to direct lookup
+  let shopDomain: string;
+  let accessToken: string;
+  
+  try {
+    const connection = await getShopifyConnection(tenantId);
+    if (connection && connection.meta?.store_domain) {
+      shopDomain = connection.meta.store_domain || connection.meta.shop || '';
+      const token = await getShopifyAccessToken(tenantId);
+      accessToken = token || '';
+    } else {
+      throw new Error('Platform function failed, using fallback');
+    }
+  } catch (error) {
+    // Fallback: Direct lookup
+    const { data: connectionData, error: connectionError } = await supabase
+      .from('connections')
+      .select('id, status, access_token_enc, meta')
+      .eq('tenant_id', tenantId)
+      .eq('source', 'shopify')
+      .maybeSingle();
 
-  // Get Shopify connection
-  const { data: connection, error: connectionError } = await supabase
-    .from('connections')
-    .select('id, status, access_token_enc, meta')
-    .eq('tenant_id', tenant.id)
-    .eq('source', 'shopify')
-    .maybeSingle();
+    if (connectionError) {
+      throw new Error(`Failed to fetch Shopify connection: ${connectionError.message}`);
+    }
 
-  if (connectionError) {
-    throw new Error(`Failed to fetch Shopify connection: ${connectionError.message}`);
-  }
+    if (!connectionData) {
+      throw new Error(`No Shopify connection found for tenant ${args.tenant}`);
+    }
 
-  if (!connection) {
-    throw new Error(`No Shopify connection found for tenant ${args.tenant}`);
-  }
+    shopDomain = connectionData.meta?.store_domain || connectionData.meta?.shop;
+    if (!shopDomain || typeof shopDomain !== 'string') {
+      throw new Error('No shop domain found in connection metadata');
+    }
 
-  if (connection.status !== 'connected') {
-    throw new Error(`Shopify connection is not connected (status: ${connection.status})`);
-  }
-
-  const shopDomain = connection.meta?.store_domain || connection.meta?.shop;
-  if (!shopDomain || typeof shopDomain !== 'string') {
-    throw new Error('No shop domain found in connection metadata');
+    accessToken = decryptSecret(connectionData.access_token_enc) || '';
+    if (!accessToken) {
+      throw new Error('Failed to decrypt access token');
+    }
   }
 
   console.log(`[shopify_backfill] Shop domain: ${shopDomain}`);
 
-  // Decrypt access token
-  const accessToken = decryptSecret(connection.access_token_enc);
-  if (!accessToken) {
-    throw new Error('Failed to decrypt access token');
-  }
-
-  console.log(`[shopify_backfill] Access token decrypted successfully\n`);
+  console.log(`[shopify_backfill] Access token retrieved successfully\n`);
 
   const startDate = new Date(since);
   const endDate = new Date(until);
@@ -734,7 +834,7 @@ async function main() {
   let orderRows: ShopifyOrderRow[] = [];
   
   for (const order of shopifyOrders) {
-    let row = mapShopifyOrderToRow(tenant.id, order);
+    let row = mapShopifyOrderToRow(tenantId, order);
     const originalProcessedAt = row.processed_at;
     
     // Match file behavior for date assignment:
@@ -818,7 +918,7 @@ async function main() {
     const { data: existingOrders, error: lookupError } = await supabase
       .from('shopify_orders')
       .select('customer_id, processed_at')
-      .eq('tenant_id', tenant.id)
+      .eq('tenant_id', tenantId)
       .in('customer_id', Array.from(customerIdsInBatch))
       .not('customer_id', 'is', null)
       .not('processed_at', 'is', null);
@@ -876,24 +976,83 @@ async function main() {
     return;
   }
 
-  // Save orders to database
-  console.log(`\n[shopify_backfill] Upserting orders to shopify_orders table...`);
-  const { error: upsertError } = await supabase.from('shopify_orders').upsert(orderRows, {
-    onConflict: 'tenant_id,order_id',
-  });
-
-  if (upsertError) {
-    throw new Error(`Failed to upsert orders: ${upsertError.message}`);
+  // Helper function for retry with exponential backoff
+  async function retryWithBackoff<T>(
+    fn: () => Promise<T>,
+    maxRetries: number = 3,
+    baseDelayMs: number = 1000,
+    description: string = 'operation'
+  ): Promise<T> {
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < maxRetries) {
+          const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+          console.warn(
+            `[shopify_backfill] ${description} failed (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    }
+    throw lastError || new Error(`Failed ${description} after ${maxRetries} attempts`);
   }
 
-  console.log(`[shopify_backfill] Successfully saved ${orderRows.length} orders`);
+  // Save orders to database in batches to avoid timeout
+  console.log(`\n[shopify_backfill] Upserting orders to shopify_orders table...`);
+  const ORDER_BATCH_SIZE = 500; // Reduced from 1000 for better stability
+  let savedOrderCount = 0;
+  const failedBatches: number[] = [];
+  
+  for (let i = 0; i < orderRows.length; i += ORDER_BATCH_SIZE) {
+    const batch = orderRows.slice(i, i + ORDER_BATCH_SIZE);
+    const batchNum = Math.floor(i / ORDER_BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(orderRows.length / ORDER_BATCH_SIZE);
+    console.log(`[shopify_backfill] Upserting order batch ${batchNum}/${totalBatches} (${batch.length} orders)...`);
+    
+    try {
+      await retryWithBackoff(
+        async () => {
+          const { error: upsertError } = await supabase.from('shopify_orders').upsert(batch, {
+            onConflict: 'tenant_id,order_id',
+          });
+          if (upsertError) {
+            throw new Error(upsertError.message);
+          }
+        },
+        3,
+        2000,
+        `Order batch ${batchNum}/${totalBatches} upsert`,
+      );
+      
+      savedOrderCount += batch.length;
+      console.log(`[shopify_backfill] ✓ Successfully saved batch ${batchNum}/${totalBatches} (${savedOrderCount}/${orderRows.length} total)`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[shopify_backfill] ✗ Failed to upsert order batch ${batchNum} after retries: ${errorMessage}`);
+      failedBatches.push(batchNum);
+      
+      // Continue with next batch instead of crashing entire process
+      console.warn(`[shopify_backfill] Continuing with remaining batches...`);
+    }
+  }
+
+  if (failedBatches.length > 0) {
+    console.error(`\n[shopify_backfill] ⚠️  WARNING: ${failedBatches.length} batches failed to save: ${failedBatches.join(', ')}`);
+    console.error(`[shopify_backfill] Consider re-running the backfill to retry failed batches`);
+  }
+
+  console.log(`[shopify_backfill] Successfully saved ${savedOrderCount}/${orderRows.length} orders`);
 
   // Fetch orders via GraphQL and save transactions for 100% matching
   console.log(`\n[shopify_backfill] Fetching orders via GraphQL for transaction mapping...`);
   let graphqlOrders: GraphQLOrder[] = [];
   try {
     graphqlOrders = await fetchShopifyOrdersGraphQL({
-      tenantId: tenant.id,
+      tenantId: tenantId,
       shopDomain,
       since,
       until,
@@ -911,7 +1070,7 @@ async function main() {
 
     // Convert transactions to database format
     const transactionRowsRaw = allTransactions.map((t) => ({
-      tenant_id: tenant.id,
+      tenant_id: tenantId,
       shopify_order_id: t.shopify_order_id,
       shopify_order_name: t.shopify_order_name,
       shopify_order_number: t.shopify_order_number,
@@ -948,32 +1107,52 @@ async function main() {
 
     // Save transactions to database in batches to avoid conflicts
     console.log(`[shopify_backfill] Upserting ${transactionRows.length} transactions to shopify_sales_transactions table...`);
-    const BATCH_SIZE = 1000;
+    const TRANSACTION_BATCH_SIZE = 500; // Reduced from 1000 for better stability
     let savedCount = 0;
-    for (let i = 0; i < transactionRows.length; i += BATCH_SIZE) {
-      const batch = transactionRows.slice(i, i + BATCH_SIZE);
-      const { error: transactionError } = await supabase
-        .from('shopify_sales_transactions')
-        .upsert(batch, {
-          onConflict: 'tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id',
-        });
-
-      if (transactionError) {
-        console.warn(`[shopify_backfill] Failed to upsert transaction batch ${Math.floor(i / BATCH_SIZE) + 1}: ${transactionError.message}`);
-      } else {
+    const failedTransactionBatches: number[] = [];
+    
+    for (let i = 0; i < transactionRows.length; i += TRANSACTION_BATCH_SIZE) {
+      const batch = transactionRows.slice(i, i + TRANSACTION_BATCH_SIZE);
+      const batchNum = Math.floor(i / TRANSACTION_BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(transactionRows.length / TRANSACTION_BATCH_SIZE);
+      
+      try {
+        await retryWithBackoff(
+          async () => {
+            const { error: transactionError } = await supabase
+              .from('shopify_sales_transactions')
+              .upsert(batch, {
+                onConflict: 'tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id',
+              });
+            if (transactionError) {
+              throw new Error(transactionError.message);
+            }
+          },
+          3,
+          2000,
+          `Transaction batch ${batchNum}/${totalBatches} upsert`,
+        );
+        
         savedCount += batch.length;
+        if (batchNum % 10 === 0 || batchNum === totalBatches) {
+          console.log(`[shopify_backfill] ✓ Saved transaction batch ${batchNum}/${totalBatches} (${savedCount}/${transactionRows.length} total)`);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`[shopify_backfill] ✗ Failed to upsert transaction batch ${batchNum} after retries: ${errorMessage}`);
+        failedTransactionBatches.push(batchNum);
+        // Continue with next batch
       }
     }
 
-    if (savedCount > 0) {
-      console.log(`[shopify_backfill] Successfully saved ${savedCount} transactions`);
+    if (failedTransactionBatches.length > 0) {
+      console.warn(`[shopify_backfill] ⚠️  WARNING: ${failedTransactionBatches.length} transaction batches failed: ${failedTransactionBatches.slice(0, 10).join(', ')}${failedTransactionBatches.length > 10 ? '...' : ''}`);
     }
 
-    if (transactionError) {
-      console.warn(`[shopify_backfill] Failed to upsert transactions: ${transactionError.message}`);
-      console.warn(`[shopify_backfill] Continuing with KPI aggregation using shopify_orders...`);
+    if (savedCount > 0) {
+      console.log(`[shopify_backfill] Successfully saved ${savedCount}/${transactionRows.length} transactions`);
     } else {
-      console.log(`[shopify_backfill] Successfully saved ${transactionRows.length} transactions`);
+      console.warn(`[shopify_backfill] No transactions were saved. Continuing with KPI aggregation using shopify_orders...`);
     }
   } catch (error) {
     console.warn(`[shopify_backfill] Failed to fetch/save transactions via GraphQL: ${error instanceof Error ? error.message : String(error)}`);
@@ -983,7 +1162,7 @@ async function main() {
   // Aggregate KPIs
   const aggregates = aggregateKpis(orderRows);
   const kpiRows = aggregates.map((row) => ({
-    tenant_id: tenant.id,
+    tenant_id: tenantId,
     date: row.date,
     source: 'shopify',
     spend: row.spend,
@@ -1004,32 +1183,167 @@ async function main() {
 
   console.log(`\n[shopify_backfill] Aggregated ${kpiRows.length} KPI rows`);
 
-  // Save KPIs to database
+  // Save KPIs to database in batches
   console.log(`[shopify_backfill] Upserting KPIs to kpi_daily table...`);
-  const { error: kpiError } = await supabase.from('kpi_daily').upsert(kpiRows, {
-    onConflict: 'tenant_id,date,source',
-  });
+  const KPI_BATCH_SIZE = 500;
+  let savedKpiCount = 0;
+  const failedKpiBatches: number[] = [];
+  
+  for (let i = 0; i < kpiRows.length; i += KPI_BATCH_SIZE) {
+    const batch = kpiRows.slice(i, i + KPI_BATCH_SIZE);
+    const batchNum = Math.floor(i / KPI_BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(kpiRows.length / KPI_BATCH_SIZE);
+    
+    try {
+      await retryWithBackoff(
+        async () => {
+          const { error: kpiError } = await supabase.from('kpi_daily').upsert(batch, {
+            onConflict: 'tenant_id,date,source',
+          });
+          if (kpiError) {
+            throw new Error(kpiError.message);
+          }
+        },
+        3,
+        2000,
+        `KPI batch ${batchNum}/${totalBatches} upsert`,
+      );
+      
+      savedKpiCount += batch.length;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[shopify_backfill] ✗ Failed to upsert KPI batch ${batchNum} after retries: ${errorMessage}`);
+      failedKpiBatches.push(batchNum);
+    }
+  }
+  
+  if (failedKpiBatches.length > 0) {
+    console.warn(`[shopify_backfill] ⚠️  WARNING: ${failedKpiBatches.length} KPI batches failed: ${failedKpiBatches.join(', ')}`);
+  }
+  
+  console.log(`[shopify_backfill] Successfully saved ${savedKpiCount}/${kpiRows.length} KPI rows`);
 
-  if (kpiError) {
-    throw new Error(`Failed to upsert KPIs: ${kpiError.message}`);
+  // Calculate and save daily sales for both modes
+  if (graphqlOrders.length > 0) {
+    console.log(`\n[shopify_backfill] Calculating daily sales for both modes...`);
+    
+    // Create map of order_id -> is_new_customer from the orderRows we just saved
+    const orderCustomerMap = new Map<string, boolean>();
+    for (const row of orderRows) {
+      if (row.order_id) {
+        orderCustomerMap.set(row.order_id, row.is_new_customer ?? false);
+      }
+    }
+    
+    // Convert GraphQL orders to ShopifyOrderWithTransactions format
+    const shopifyOrdersWithTransactions = graphqlOrders
+      .filter((order) => !order.test) // Exclude test orders
+      .map(convertGraphQLOrderToShopifyOrder);
+
+    // Calculate daily sales for both modes, passing the customer map
+    const shopifyModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'shopify', 'Europe/Stockholm', orderCustomerMap);
+    const financialModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'financial', 'Europe/Stockholm', orderCustomerMap);
+
+    console.log(`[shopify_backfill] Shopify mode: ${shopifyModeDaily.length} daily rows`);
+    console.log(`[shopify_backfill] Financial mode: ${financialModeDaily.length} daily rows`);
+
+    // Prepare rows for database
+    const dailySalesRows = [
+      ...shopifyModeDaily.map((row) => ({
+        tenant_id: tenantId,
+        date: row.date,
+        mode: 'shopify' as SalesMode,
+        net_sales_excl_tax: row.netSalesExclTax,
+        gross_sales_excl_tax: row.grossSalesExclTax || null,
+        refunds_excl_tax: row.refundsExclTax || null,
+        discounts_excl_tax: row.discountsExclTax || null,
+        orders_count: row.ordersCount,
+        currency: row.currency || null,
+        new_customer_net_sales: row.newCustomerNetSales || null,
+      })),
+      ...financialModeDaily.map((row) => ({
+        tenant_id: tenantId,
+        date: row.date,
+        mode: 'financial' as SalesMode,
+        net_sales_excl_tax: row.netSalesExclTax,
+        gross_sales_excl_tax: row.grossSalesExclTax || null,
+        refunds_excl_tax: row.refundsExclTax || null,
+        discounts_excl_tax: row.discountsExclTax || null,
+        orders_count: row.ordersCount,
+        currency: row.currency || null,
+        new_customer_net_sales: row.newCustomerNetSales || null,
+      })),
+    ];
+
+    // Save daily sales to database in batches
+    console.log(`[shopify_backfill] Upserting ${dailySalesRows.length} daily sales rows...`);
+    const DAILY_SALES_BATCH_SIZE = 500;
+    let savedDailySalesCount = 0;
+    const failedDailySalesBatches: number[] = [];
+    
+    for (let i = 0; i < dailySalesRows.length; i += DAILY_SALES_BATCH_SIZE) {
+      const batch = dailySalesRows.slice(i, i + DAILY_SALES_BATCH_SIZE);
+      const batchNum = Math.floor(i / DAILY_SALES_BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(dailySalesRows.length / DAILY_SALES_BATCH_SIZE);
+      
+      try {
+        await retryWithBackoff(
+          async () => {
+            const { error: dailySalesError } = await supabase
+              .from('shopify_daily_sales')
+              .upsert(batch, {
+                onConflict: 'tenant_id,date,mode',
+              });
+            if (dailySalesError) {
+              throw new Error(dailySalesError.message);
+            }
+          },
+          3,
+          2000,
+          `Daily sales batch ${batchNum}/${totalBatches} upsert`,
+        );
+        
+        savedDailySalesCount += batch.length;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`[shopify_backfill] ✗ Failed to upsert daily sales batch ${batchNum} after retries: ${errorMessage}`);
+        failedDailySalesBatches.push(batchNum);
+      }
+    }
+    
+    if (failedDailySalesBatches.length > 0) {
+      console.warn(`[shopify_backfill] ⚠️  WARNING: ${failedDailySalesBatches.length} daily sales batches failed: ${failedDailySalesBatches.join(', ')}`);
+    }
+    
+    if (savedDailySalesCount > 0) {
+      console.log(`[shopify_backfill] Successfully saved ${savedDailySalesCount}/${dailySalesRows.length} daily sales rows`);
+    } else {
+      console.warn(`[shopify_backfill] No daily sales rows were saved.`);
+    }
   }
 
-  console.log(`[shopify_backfill] Successfully saved ${kpiRows.length} KPI rows`);
+  // Clear backfill flag if it exists (need to fetch connection again to check)
+  const { data: connectionCheck } = await supabaseClient
+    .from('connections')
+    .select('meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', 'shopify')
+    .maybeSingle();
 
-  // Clear backfill flag if it exists
-  if (connection.meta?.backfill_since) {
+  if (connectionCheck?.meta?.backfill_since) {
     const clearedMeta = {
-      ...(connection.meta ?? {}),
+      ...(connectionCheck.meta ?? {}),
       backfill_since: null,
     };
 
-    const { error: clearError } = await supabase
+    const { error: clearError } = await supabaseClient
       .from('connections')
       .update({
         meta: clearedMeta,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', connection.id);
+      .eq('tenant_id', tenantId)
+      .eq('source', 'shopify');
 
     if (clearError) {
       console.warn(`[shopify_backfill] Failed to clear backfill flag: ${clearError.message}`);

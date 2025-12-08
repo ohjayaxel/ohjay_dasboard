@@ -187,18 +187,17 @@ export async function getOverviewData(params: {
   to?: string;
 }): Promise<OverviewResult> {
   // Fetch data from all sources
-  // Use transactions-based aggregation for Shopify (100% match with Shopify Sales reports)
+  // Use shopify_daily_sales table with mode='shopify' (matches Shopify Analytics)
   // Use kpi_daily for Meta and Google Ads
-  const [{ aggregateDailySales }] = await Promise.all([
-    import('./shopify-aggregations'),
-  ]);
+  const { fetchShopifyDailySales } = await import('./fetchers');
 
-  const [shopifyAggregations, metaRows, googleRows] = await Promise.all([
-    aggregateDailySales(
-      params.tenantId,
-      params.from ?? '1970-01-01',
-      params.to ?? '2100-01-01',
-    ),
+  const [shopifyRows, metaRows, googleRows] = await Promise.all([
+    fetchShopifyDailySales({
+      tenantId: params.tenantId,
+      from: params.from,
+      to: params.to,
+      mode: 'shopify',
+    }),
     fetchKpiDaily({
       tenantId: params.tenantId,
       from: params.from,
@@ -216,8 +215,8 @@ export async function getOverviewData(params: {
   // Aggregate by date
   const byDate = new Map<string, OverviewDataPoint>();
 
-  // Process Shopify data from transactions
-  for (const row of shopifyAggregations) {
+  // Process Shopify data from shopify_daily_sales (mode='shopify')
+  for (const row of shopifyRows) {
     const existing = byDate.get(row.date) ?? {
       date: row.date,
       gross_sales: 0,
@@ -229,9 +228,9 @@ export async function getOverviewData(params: {
       aov: null,
     };
 
-    existing.gross_sales += row.gross_sales;
-    existing.net_sales += row.net_sales;
-    existing.orders += row.orders ?? 0;
+    existing.gross_sales += row.gross_sales_excl_tax ?? 0;
+    existing.net_sales += row.net_sales_excl_tax;
+    existing.orders += row.orders_count ?? 0;
     existing.new_customer_net_sales += row.new_customer_net_sales ?? 0;
 
     byDate.set(row.date, existing);
@@ -254,8 +253,33 @@ export async function getOverviewData(params: {
     byDate.set(row.date, existing);
   }
 
+  // Fill in all dates in the range to ensure complete series
+  const allDates = new Set<string>();
+  const startDate = new Date(params.from ?? '1970-01-01');
+  const endDate = new Date(params.to ?? '2100-01-01');
+  
+  for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+    const dateStr = d.toISOString().slice(0, 10);
+    allDates.add(dateStr);
+    
+    // Initialize date if it doesn't exist
+    if (!byDate.has(dateStr)) {
+      byDate.set(dateStr, {
+        date: dateStr,
+        gross_sales: 0,
+        net_sales: 0,
+        new_customer_net_sales: 0,
+        marketing_spend: 0,
+        amer: null,
+        orders: 0,
+        aov: null,
+      });
+    }
+  }
+
   // Calculate aMER and AOV for each date
   const series = Array.from(byDate.values())
+    .filter((point) => allDates.has(point.date)) // Only include dates in the requested range
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((point) => {
       const amer = point.marketing_spend > 0 
@@ -288,19 +312,10 @@ export async function getOverviewData(params: {
     aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
   };
 
-  // Get currency from first transaction or shopify_orders
+  // Get currency from shopify_daily_sales
   let currency: string | null = null;
-  if (shopifyAggregations.length > 0) {
-    const { getSupabaseServiceClient } = await import('@/lib/supabase/server');
-    const client = getSupabaseServiceClient();
-    const { data: firstTransaction } = await client
-      .from('shopify_sales_transactions')
-      .select('currency')
-      .eq('tenant_id', params.tenantId)
-      .not('currency', 'is', null)
-      .limit(1)
-      .single();
-    currency = firstTransaction?.currency ?? null;
+  if (shopifyRows.length > 0) {
+    currency = shopifyRows.find((row) => row.currency)?.currency ?? null;
   }
 
   return { series, totals, currency };
@@ -390,12 +405,12 @@ export async function getMarketsData(params: {
     for (let i = 0; i < orderIdArray.length; i += 1000) {
       const batch = orderIdArray.slice(i, i + 1000);
       const { data: batchOrders, error: ordersError } = await supabase
-        .from('shopify_orders')
+      .from('shopify_orders')
         .select('order_id, country, is_new_customer, is_refund, processed_at')
-        .eq('tenant_id', params.tenantId)
+      .eq('tenant_id', params.tenantId)
         .in('order_id', batch);
 
-      if (ordersError) {
+    if (ordersError) {
         console.warn(`Failed to fetch orders batch: ${ordersError.message}`);
       } else if (batchOrders) {
         for (const order of batchOrders) {
@@ -520,12 +535,12 @@ export async function getMarketsData(params: {
     if (transaction.event_type === 'SALE' && !order.is_refund) {
       if (!ordersByCountry.has(country)) {
         ordersByCountry.set(country, new Set());
-      }
+    }
       ordersByCountry.get(country)!.add(orderId);
 
       // Calculate new customer net sales (only for SALE events)
       if (order.is_new_customer === true) {
-        existing.new_customer_net_sales += netSales;
+      existing.new_customer_net_sales += netSales;
       }
     }
 

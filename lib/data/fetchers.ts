@@ -31,6 +31,71 @@ type FetchKpiDailyParams = {
   order?: 'asc' | 'desc';
 };
 
+export type SalesMode = 'shopify' | 'financial';
+
+export type ShopifyDailySalesRow = {
+  tenant_id: string;
+  date: string;
+  mode: SalesMode;
+  net_sales_excl_tax: number;
+  gross_sales_excl_tax: number | null;
+  refunds_excl_tax: number | null;
+  discounts_excl_tax: number | null;
+  orders_count: number;
+  currency: string | null;
+  new_customer_net_sales: number | null;
+};
+
+export type FetchShopifyDailySalesParams = {
+  tenantId: string;
+  from?: string;
+  to?: string;
+  mode?: SalesMode;
+  limit?: number;
+  order?: 'asc' | 'desc';
+};
+
+/**
+ * Fetches daily Shopify sales aggregated by mode
+ */
+export async function fetchShopifyDailySales(
+  params: FetchShopifyDailySalesParams,
+): Promise<ShopifyDailySalesRow[]> {
+  const client = getSupabaseServiceClient();
+
+  let query = client
+    .from('shopify_daily_sales')
+    .select(
+      'tenant_id, date, mode, net_sales_excl_tax, gross_sales_excl_tax, refunds_excl_tax, discounts_excl_tax, orders_count, currency, new_customer_net_sales',
+    )
+    .eq('tenant_id', params.tenantId)
+    .order('date', { ascending: params.order !== 'desc' });
+
+  if (params.from) {
+    query = query.gte('date', params.from);
+  }
+
+  if (params.to) {
+    query = query.lte('date', params.to);
+  }
+
+  if (params.mode) {
+    query = query.eq('mode', params.mode);
+  }
+
+  if (params.limit) {
+    query = query.limit(params.limit);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    throw new Error(`Failed to fetch Shopify daily sales: ${error.message}`);
+  }
+
+  return (data || []) as ShopifyDailySalesRow[];
+}
+
 export async function fetchKpiDaily(params: FetchKpiDailyParams): Promise<KpiDailyRow[]> {
   const client = getSupabaseServiceClient();
 

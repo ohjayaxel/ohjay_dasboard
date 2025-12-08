@@ -1,16 +1,26 @@
 /**
  * @fileoverview
- * Sales calculation functions that mirror Shopify Analytics/Finance reports.
+ * Sales calculation functions that support two modes:
  * 
- * These functions calculate Gross Sales, Net Sales, Discounts, and Returns
- * using the same logic as Shopify's Finance reports:
+ * 1. **Shopify Analytics Mode**: Matches Shopify Analytics reports as closely as possible
+ * 2. **Financial Mode**: Financially correct model reflecting actual cash flow
+ * 
+ * These functions calculate Gross Sales, Net Sales, Discounts, and Returns:
  * - Gross Sales = product selling price × ordered quantity (line items only)
  * - Discounts = sum of all line item discounts
  * - Returns = value of returned items from refunds
- * - Net Sales = Gross Sales - Discounts - Returns
+ * - Net Sales = subtotal_price - total_tax - returns (EXCL tax)
  * 
  * No shipping, taxes, or fees are included in these calculations.
  */
+
+/**
+ * Sales calculation mode
+ * 
+ * - "shopify": Matches Shopify Analytics (uses order.createdAt, includes cancelled orders)
+ * - "financial": Financially correct (uses transaction.processedAt, excludes cancelled orders)
+ */
+export type SalesMode = 'shopify' | 'financial';
 
 /**
  * Shopify Order structure (REST API-like)
@@ -21,6 +31,8 @@ export type ShopifyOrder = {
   currency: string;
   financial_status: string;
   cancelled_at: string | null;
+  subtotal_price?: string; // Subtotal after discounts, INCL tax (equivalent to subtotalPriceSet in GraphQL)
+  total_tax?: string; // Total tax on order (equivalent to totalTaxSet in GraphQL)
   line_items: {
     id: number | string;
     price: string; // Price per unit, as string
@@ -28,14 +40,13 @@ export type ShopifyOrder = {
     total_discount: string; // Discount on this line item, as string
   }[];
   total_discounts?: string; // Order-level total discounts (preferred over summing line_items)
-  total_tax?: string; // Tax amount - should be excluded from gross sales (Shopify Finance excludes tax)
   refunds?: {
     id: number | string;
     created_at: string;
     refund_line_items: {
       line_item_id: number | string;
       quantity: number;
-      subtotal?: string; // If available, otherwise calculate
+      subtotal?: string; // Refund amount EXCL tax (equivalent to refundLineItems.subtotalSet in GraphQL)
       line_item?: {
         price: string;
       };
@@ -73,6 +84,32 @@ export type SalesResult = {
 };
 
 /**
+ * Daily sales aggregation row
+ */
+export type DailySalesRow = {
+  date: string; // YYYY-MM-DD format
+  netSalesExclTax: number;
+  grossSalesExclTax?: number;
+  refundsExclTax?: number;
+  discountsExclTax?: number;
+  ordersCount: number;
+  currency?: string;
+  newCustomerNetSales?: number; // Net sales from new customers only
+};
+
+/**
+ * Extended Shopify Order with transaction details for mode-based calculations
+ */
+export type ShopifyOrderWithTransactions = ShopifyOrder & {
+  processed_at?: string | null;
+  transactions?: Array<{
+    kind: string;
+    status: string;
+    processedAt?: string | null;
+  }>;
+};
+
+/**
  * Valid financial statuses that should be included in sales calculations.
  * 
  * Following Shopify Finance reports, we include:
@@ -98,6 +135,136 @@ const VALID_FINANCIAL_STATUSES = new Set([
  */
 function roundTo2Decimals(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+/**
+ * Converts a date string to YYYY-MM-DD format in the shop's timezone
+ */
+function toLocalDate(dateString: string, timezone: string = 'Europe/Stockholm'): string {
+  const date = new Date(dateString);
+  return date.toLocaleDateString('en-CA', { timeZone: timezone });
+}
+
+/**
+ * Determines the event date for an order based on the sales mode
+ * 
+ * Shopify mode: Uses order.createdAt (when order was created)
+ * Financial mode: Uses transaction.processedAt (when payment was processed)
+ */
+function getOrderEventDate(
+  order: ShopifyOrderWithTransactions,
+  mode: SalesMode,
+  timezone: string = 'Europe/Stockholm',
+): string | null {
+  if (mode === 'shopify') {
+    // Shopify mode: Use order.createdAt
+    return toLocalDate(order.created_at, timezone);
+  } else {
+    // Financial mode: Use transaction.processedAt from first successful SALE
+    if (!order.transactions || order.transactions.length === 0) {
+      return null; // No transaction date available
+    }
+    
+    const successfulSale = order.transactions.find(
+      (txn) =>
+        (txn.kind === 'SALE' || txn.kind === 'CAPTURE') &&
+        txn.status === 'SUCCESS' &&
+        txn.processedAt,
+    );
+    
+    if (!successfulSale?.processedAt) {
+      return null; // No successful sale transaction
+    }
+    
+    return toLocalDate(successfulSale.processedAt, timezone);
+  }
+}
+
+/**
+ * Determines the event date for a refund based on the sales mode
+ * 
+ * Shopify mode: Uses refund.createdAt
+ * Financial mode: Uses refund.processedAt (from REFUND transaction)
+ */
+function getRefundEventDate(
+  refund: ShopifyOrder['refunds'][number],
+  order: ShopifyOrderWithTransactions,
+  mode: SalesMode,
+  timezone: string = 'Europe/Stockholm',
+): string {
+  if (mode === 'shopify') {
+    // Shopify mode: Use refund.createdAt
+    return toLocalDate(refund.created_at, timezone);
+  } else {
+    // Financial mode: Try to find REFUND transaction with processedAt
+    // Fallback to refund.createdAt if not found
+    const refundTransaction = order.transactions?.find(
+      (txn) =>
+        txn.kind === 'REFUND' &&
+        txn.status === 'SUCCESS' &&
+        txn.processedAt,
+    );
+    
+    if (refundTransaction?.processedAt) {
+      return toLocalDate(refundTransaction.processedAt, timezone);
+    }
+    
+    // Fallback to refund.createdAt
+    return toLocalDate(refund.created_at, timezone);
+  }
+}
+
+/**
+ * Filters orders based on the sales mode
+ * 
+ * Shopify mode:
+ * - Excludes test orders
+ * - Includes cancelled orders
+ * - Includes orders without successful transactions
+ * 
+ * Financial mode:
+ * - Excludes test orders (implicit - should not have valid financial_status)
+ * - Excludes cancelled orders
+ * - Excludes orders without successful transactions
+ */
+function shouldIncludeOrder(
+  order: ShopifyOrderWithTransactions,
+  mode: SalesMode,
+): boolean {
+  // Always exclude test orders (if test flag exists)
+  if ('test' in order && (order as any).test === true) {
+    return false;
+  }
+  
+  if (mode === 'shopify') {
+    // Shopify mode: Include orders with valid financial status
+    // Includes cancelled orders (they're handled via refunds in Shopify)
+    return VALID_FINANCIAL_STATUSES.has(order.financial_status);
+  } else {
+    // Financial mode: Exclude cancelled orders
+    if (order.cancelled_at) {
+      return false;
+    }
+    
+    // Financial mode: Only include orders with successful transactions
+    if (!order.transactions || order.transactions.length === 0) {
+      return false;
+    }
+    
+    const hasSuccessfulSale = order.transactions.some(
+      (txn) =>
+        (txn.kind === 'SALE' || txn.kind === 'CAPTURE') &&
+        txn.status === 'SUCCESS' &&
+        txn.processedAt,
+    );
+    
+    if (!hasSuccessfulSale) {
+      return false;
+    }
+    
+    // Also check financial status
+    return VALID_FINANCIAL_STATUSES.has(order.financial_status);
+  }
 }
 
 /**
@@ -142,30 +309,26 @@ function calculateRefundLineItemSubtotal(
 /**
  * Calculates sales metrics for a single Shopify order.
  * 
+ * NEW CALCULATION METHOD (matching Shopify Analytics):
+ * - Net Sales EXCL tax = subtotal_price - total_tax - refunds (EXCL tax)
+ * - Uses Shopify's own fields as source of truth
+ * 
  * @param order - Shopify order object
  * @returns Per-order sales breakdown
  */
 function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
-  // Calculate Gross Sales: sum of (price × quantity) for all line items
-  // Note: line_items[].price does NOT include tax (tax is separate on order level)
+  // Calculate Gross Sales: sum of (price × quantity) for all line items (INCL tax)
+  // This is for reference/display purposes only
   let grossSales = 0;
   for (const lineItem of order.line_items) {
     const price = parseFloat(lineItem.price);
     const quantity = lineItem.quantity;
     grossSales += price * quantity;
   }
-  
-  // Exclude tax from gross sales to match Shopify Finance reports
-  // Shopify Finance reports exclude tax from gross sales calculations
-  if (order.total_tax !== undefined && order.total_tax !== null) {
-    const tax = parseFloat(order.total_tax || '0');
-    grossSales -= tax;
-  }
-  
   grossSales = roundTo2Decimals(grossSales);
 
   // Calculate Discounts: prefer order.total_discounts if available (includes both line-item and order-level discounts)
-  // Otherwise, fallback to summing line_items[].total_discount
+  // This is for reference/display purposes only (INCL tax)
   let discounts = 0;
   if (order.total_discounts !== undefined && order.total_discounts !== null) {
     discounts = parseFloat(order.total_discounts || '0');
@@ -177,30 +340,52 @@ function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
   }
   discounts = roundTo2Decimals(discounts);
 
-  // Calculate Returns: sum of refund_line_items values
+  // NEW METHOD: Calculate Net Sales EXCL tax using Shopify's fields
+  // subtotal_price = ordersumma efter rabatter, INKL moms
+  // total_tax = total moms på ordern
+  const subtotalPrice = order.subtotal_price
+    ? parseFloat(order.subtotal_price)
+    : 0;
+  
+  const totalTax = order.total_tax
+    ? parseFloat(order.total_tax || '0')
+    : 0;
+  
+  // Net Sales EXCL tax BEFORE refunds
+  // = subtotalPrice - totalTax
+  const netSalesExclTaxBeforeRefunds = roundTo2Decimals(subtotalPrice - totalTax);
+
+  // Calculate Returns EXCL tax: use refund_line_items[].subtotal if available
+  // subtotal field contains refund amount EXCL tax
   let returns = 0;
   if (order.refunds && order.refunds.length > 0) {
     for (const refund of order.refunds) {
       for (const refundLineItem of refund.refund_line_items) {
-        const subtotal = calculateRefundLineItemSubtotal(
-          refundLineItem,
-          order.line_items,
-        );
-        returns += subtotal;
+        // Prefer subtotal field (EXCL tax), otherwise calculate from price
+        if (refundLineItem.subtotal) {
+          returns += parseFloat(refundLineItem.subtotal);
+        } else {
+          // Fallback: calculate from line_item.price or original order line item
+          const subtotal = calculateRefundLineItemSubtotal(
+            refundLineItem,
+            order.line_items,
+          );
+          returns += subtotal;
+        }
       }
     }
   }
   returns = roundTo2Decimals(returns);
 
-  // Calculate Net Sales
-  const netSales = roundTo2Decimals(grossSales - discounts - returns);
+  // Net Sales EXCL tax AFTER refunds
+  const netSales = roundTo2Decimals(netSalesExclTaxBeforeRefunds - returns);
 
   return {
     orderId: order.id.toString(),
-    grossSales,
-    discounts,
-    returns,
-    netSales,
+    grossSales, // Gross sales INCL tax (for reference)
+    discounts, // Discounts INCL tax (for reference)
+    returns, // Returns EXCL tax
+    netSales, // Net Sales EXCL tax AFTER refunds (NEW METHOD)
   };
 }
 
@@ -276,6 +461,192 @@ export function calculateShopifyLikeSales(orders: ShopifyOrder[]): SalesResult {
     summary,
     perOrder,
   };
+}
+
+/**
+ * Calculates daily sales aggregation from orders based on the specified mode.
+ * 
+ * **Shopify Mode:**
+ * - Sales: Uses order.createdAt for date grouping
+ * - Refunds: Uses refund.createdAt for date grouping
+ * - Includes cancelled orders
+ * - Includes orders without successful transactions
+ * 
+ * **Financial Mode:**
+ * - Sales: Uses transaction.processedAt (first successful SALE) for date grouping
+ * - Refunds: Uses refund.processedAt (REFUND transaction) for date grouping
+ * - Excludes cancelled orders
+ * - Excludes orders without successful transactions
+ * 
+ * @param orders - Array of Shopify orders with transaction details
+ * @param mode - Sales mode ('shopify' or 'financial')
+ * @param timezone - Timezone for date conversion (default: 'Europe/Stockholm')
+ * @param orderCustomerMap - Optional map of order_id -> is_new_customer boolean for calculating newCustomerNetSales
+ * @returns Array of daily sales rows
+ */
+export function calculateDailySales(
+  orders: ShopifyOrderWithTransactions[],
+  mode: SalesMode,
+  timezone: string = 'Europe/Stockholm',
+  orderCustomerMap?: Map<string, boolean>,
+): DailySalesRow[] {
+  // Filter orders based on mode
+  const includedOrders = orders.filter((order) => shouldIncludeOrder(order, mode));
+  
+  // Map to aggregate daily data
+  const dailyMap = new Map<string, DailySalesRow>();
+  
+  for (const order of includedOrders) {
+    // Calculate order sales breakdown
+    const orderSales = calculateOrderSales(order);
+    
+    // Get event date for this order based on mode
+    const orderDate = getOrderEventDate(order, mode, timezone);
+    
+    if (!orderDate) {
+      // Skip if no valid event date (e.g., no transaction in financial mode)
+      continue;
+    }
+    
+    // Get or create daily row for order date
+    let dailyRow = dailyMap.get(orderDate);
+    if (!dailyRow) {
+      dailyRow = {
+        date: orderDate,
+        netSalesExclTax: 0,
+        grossSalesExclTax: 0,
+        refundsExclTax: 0,
+        discountsExclTax: 0,
+        ordersCount: 0,
+        currency: order.currency,
+        newCustomerNetSales: 0,
+      };
+      dailyMap.set(orderDate, dailyRow);
+    }
+    
+    // Shopify mode: Add net_sales_excl_tax_before_refunds on order date
+    // Financial mode: Add net_sales_excl_tax_before_refunds on transaction date
+    const subtotalPrice = order.subtotal_price ? parseFloat(order.subtotal_price) : 0;
+    const totalTax = order.total_tax ? parseFloat(order.total_tax || '0') : 0;
+    const netSalesExclTaxBeforeRefunds = roundTo2Decimals(subtotalPrice - totalTax);
+    
+    // Calculate Gross Sales INCL tax: sum of all line item prices
+    // Use orderSales.grossSales which is already calculated from line items
+    const grossSalesInclTax = orderSales.grossSales;
+    
+    // Calculate total discounts INCL tax
+    const totalDiscountsInclTax = orderSales.discounts;
+    
+    // Calculate Discounts EXCL tax
+    let discountsExclTax = 0;
+    if (subtotalPrice > 0 && totalTax > 0) {
+      const taxRateOnSubtotal = totalTax / subtotalPrice;
+      discountsExclTax = totalDiscountsInclTax / (1 + taxRateOnSubtotal);
+    } else {
+      discountsExclTax = totalDiscountsInclTax;
+    }
+    
+    // Calculate refunds for this order (needed for Gross Sales calculation)
+    let orderTotalRefundsExclTax = 0;
+    if (order.refunds && order.refunds.length > 0) {
+      for (const refund of order.refunds) {
+        for (const refundLineItem of refund.refund_line_items) {
+          if (refundLineItem.subtotal) {
+            orderTotalRefundsExclTax += parseFloat(refundLineItem.subtotal);
+          } else {
+            const subtotal = calculateRefundLineItemSubtotal(
+              refundLineItem,
+              order.line_items,
+            );
+            orderTotalRefundsExclTax += subtotal;
+          }
+        }
+      }
+    }
+    orderTotalRefundsExclTax = roundTo2Decimals(orderTotalRefundsExclTax);
+    
+    // Calculate Gross Sales EXCL tax
+    // Gross Sales EXCL tax = Net Sales EXCL tax (after refunds) + Discounts EXCL tax + Returns EXCL tax
+    const netSalesExclTaxAfterRefunds = netSalesExclTaxBeforeRefunds - orderTotalRefundsExclTax;
+    const grossSalesExclTax = netSalesExclTaxAfterRefunds + discountsExclTax + orderTotalRefundsExclTax;
+    
+    // Add sales value on the determined date
+    dailyRow.netSalesExclTax += netSalesExclTaxBeforeRefunds;
+    dailyRow.grossSalesExclTax! += grossSalesExclTax;
+    dailyRow.discountsExclTax! += discountsExclTax;
+    dailyRow.ordersCount += 1;
+    
+    // Add to new customer net sales if this is a new customer order
+    if (orderCustomerMap && orderCustomerMap.get(order.id) === true) {
+      dailyRow.newCustomerNetSales! += netSalesExclTaxBeforeRefunds;
+    }
+    
+    // Process refunds separately (they hit on their own date)
+    // Note: Refunds only affect Net Sales and Returns, not Gross Sales or Discounts
+    if (order.refunds && order.refunds.length > 0) {
+      for (const refund of order.refunds) {
+        const refundDate = getRefundEventDate(refund, order, mode, timezone);
+        
+        // Calculate refund amount EXCL tax
+        let refundAmountExclTax = 0;
+        for (const refundLineItem of refund.refund_line_items) {
+          if (refundLineItem.subtotal) {
+            refundAmountExclTax += parseFloat(refundLineItem.subtotal);
+          } else {
+            const subtotal = calculateRefundLineItemSubtotal(
+              refundLineItem,
+              order.line_items,
+            );
+            refundAmountExclTax += subtotal;
+          }
+        }
+        refundAmountExclTax = roundTo2Decimals(refundAmountExclTax);
+        
+        if (refundAmountExclTax > 0) {
+          // Get or create daily row for refund date
+          let refundDailyRow = dailyMap.get(refundDate);
+          if (!refundDailyRow) {
+            refundDailyRow = {
+              date: refundDate,
+              netSalesExclTax: 0,
+              grossSalesExclTax: 0,
+              refundsExclTax: 0,
+              discountsExclTax: 0,
+              ordersCount: 0,
+              currency: order.currency,
+              newCustomerNetSales: 0,
+            };
+            dailyMap.set(refundDate, refundDailyRow);
+          }
+          
+          // Subtract refund from net sales on refund date
+          // Gross Sales and Discounts are NOT affected by refunds
+          refundDailyRow.netSalesExclTax -= refundAmountExclTax;
+          refundDailyRow.refundsExclTax! += refundAmountExclTax;
+          
+          // Subtract from new customer net sales if this is a new customer order
+          if (orderCustomerMap && orderCustomerMap.get(order.id) === true) {
+            refundDailyRow.newCustomerNetSales! -= refundAmountExclTax;
+          }
+        }
+      }
+    }
+  }
+  
+  // Round all values and return sorted array
+  const result = Array.from(dailyMap.values()).map((row) => ({
+    ...row,
+    netSalesExclTax: roundTo2Decimals(row.netSalesExclTax),
+    grossSalesExclTax: roundTo2Decimals(row.grossSalesExclTax || 0),
+    refundsExclTax: roundTo2Decimals(row.refundsExclTax || 0),
+    discountsExclTax: roundTo2Decimals(row.discountsExclTax || 0),
+    newCustomerNetSales: roundTo2Decimals(row.newCustomerNetSales || 0),
+  }));
+  
+  // Sort by date
+  result.sort((a, b) => a.date.localeCompare(b.date));
+  
+  return result;
 }
 
 /**
