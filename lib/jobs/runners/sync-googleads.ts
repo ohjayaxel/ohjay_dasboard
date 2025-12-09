@@ -1,6 +1,7 @@
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
 
-import { triggerSyncJob } from '../scheduler';
+import { triggerSyncJob, triggerSyncJobForTenant } from '../scheduler';
+import { refreshGoogleAdsTokenIfNeeded } from '@/lib/integrations/googleads';
 
 export async function runGoogleAdsSyncRunner() {
   const client = getSupabaseServiceClient();
@@ -25,11 +26,33 @@ export async function runGoogleAdsSyncRunner() {
     return { triggered: false, reason: 'No connected Google Ads tenants.' };
   }
 
+  // Refresh tokens before triggering sync
+  for (const tenantId of connectedTenants) {
+    try {
+      await refreshGoogleAdsTokenIfNeeded(tenantId);
+    } catch (error) {
+      console.warn(`Failed to refresh Google Ads token for tenant ${tenantId}:`, error);
+      // Continue anyway - sync will handle expired tokens
+    }
+  }
+
   const result = await triggerSyncJob('google_ads');
   return {
     triggered: true,
     tenantCount: connectedTenants.size,
     result,
   };
+}
+
+export async function runGoogleAdsSyncForTenant(tenantId: string) {
+  // Refresh token before triggering sync
+  try {
+    await refreshGoogleAdsTokenIfNeeded(tenantId);
+  } catch (error) {
+    console.warn(`Failed to refresh Google Ads token for tenant ${tenantId}:`, error);
+    // Continue anyway - sync will handle expired tokens
+  }
+
+  return triggerSyncJobForTenant('google_ads', tenantId);
 }
 

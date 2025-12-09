@@ -2,15 +2,35 @@
   "crons": [
     {
       "path": "/api/jobs/sync?source=meta",
-      "schedule": "0 3 * * *"
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/jobs/cleanup-stuck-jobs?source=meta",
+      "schedule": "*/30 * * * *"
     },
     {
       "path": "/api/jobs/sync?source=google_ads",
       "schedule": "15 3 * * *"
     },
     {
+      "path": "/api/jobs/cleanup-stuck-jobs?source=google_ads",
+      "schedule": "*/30 * * * *"
+    },
+    {
       "path": "/api/jobs/sync?source=shopify",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/jobs/cleanup-stuck-jobs?source=shopify",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/jobs/check-token-health",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/jobs/check-failure-rate",
+      "schedule": "0 */6 * * *"
     }
   ]
 }

@@ -25,6 +25,9 @@ function createSupabaseClient(): SupabaseClient {
 
 type GoogleConnection = {
   tenant_id: string;
+  access_token_enc: unknown;
+  refresh_token_enc: unknown;
+  expires_at: string | null;
   meta: Record<string, any> | null;
 };
 
@@ -124,11 +127,39 @@ async function upsertJobLog(client: SupabaseClient, payload: {
   }
 }
 
+// Note: Token refresh for Google Ads should be handled by refreshGoogleAdsTokenIfNeeded
+// in lib/integrations/googleads.ts before sync runs. This function just checks expiration
+// and logs a warning if token is expired or about to expire.
+function checkTokenExpiration(connection: GoogleConnection, tenantId: string): void {
+  if (!connection.expires_at) {
+    return; // No expiration date - assume long-lived token
+  }
+
+  const expiresAt = new Date(connection.expires_at).getTime();
+  const now = Date.now();
+  const fiveMinutesFromNow = now + 5 * 60 * 1000;
+
+  if (expiresAt < fiveMinutesFromNow) {
+    const minutesUntilExpiration = Math.ceil((expiresAt - now) / (1000 * 60));
+    console.warn(
+      `[sync-googleads] Token for tenant ${tenantId} is expired or expires within 5 minutes (${minutesUntilExpiration} minutes). ` +
+      `Token refresh should be handled before sync runs.`,
+    );
+  }
+}
+
 async function processTenant(client: SupabaseClient, connection: GoogleConnection): Promise<JobResult> {
   const tenantId = connection.tenant_id;
   const startedAt = new Date().toISOString();
 
-  await upsertJobLog(client, { tenantId, status: 'running', startedAt });
+  let jobLogInserted = false;
+  try {
+    await upsertJobLog(client, { tenantId, status: 'running', startedAt });
+    jobLogInserted = true;
+  } catch (logError) {
+    console.error(`Failed to insert initial job log for tenant ${tenantId}:`, logError);
+    // Continue anyway - we'll try to update it later
+  }
 
   try {
     // TODO: integrate with Google Ads API using stored credentials.
@@ -185,6 +216,37 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
     });
 
     return { tenantId, status: 'failed', error: message };
+  } finally {
+    // Ensure job log is always updated, even if the try-catch above fails
+    if (jobLogInserted) {
+      try {
+        // Check if job log was already updated (has finished_at)
+        const { data: existingJob } = await client
+          .from('jobs_log')
+          .select('finished_at')
+          .eq('tenant_id', tenantId)
+          .eq('source', SOURCE)
+          .eq('status', 'running')
+          .eq('started_at', startedAt)
+          .order('started_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        // Only update if still in running status
+        if (existingJob && !existingJob.finished_at) {
+          await upsertJobLog(client, {
+            tenantId,
+            status: 'failed',
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            error: 'Job execution was interrupted or failed unexpectedly',
+          });
+        }
+      } catch (finalError) {
+        // Last resort - log but don't throw
+        console.error(`Failed to update job log in finally block for tenant ${tenantId}:`, finalError);
+      }
+    }
   }
 }
 
@@ -193,7 +255,7 @@ serve(async () => {
     const client = createSupabaseClient();
     const { data, error } = await client
       .from('connections')
-      .select('tenant_id, meta')
+      .select('tenant_id, access_token_enc, refresh_token_enc, expires_at, meta')
       .eq('source', SOURCE)
       .eq('status', 'connected');
 
@@ -205,6 +267,9 @@ serve(async () => {
     const results: JobResult[] = [];
 
     for (const connection of connections) {
+      // Check token expiration and log warning if needed
+      checkTokenExpiration(connection, connection.tenant_id);
+
       const result = await processTenant(client, connection);
       results.push(result);
     }
