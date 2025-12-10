@@ -224,45 +224,27 @@ export async function handleGoogleAdsOAuthCallback(options: {
     ? new Date(Date.now() + Number(tokenResponse.expires_in) * 1000).toISOString()
     : null;
 
-  // Fetch all accessible customers and save them to meta
+  // Set up customer data - automatic fetching is disabled
+  // Users must manually enter their Customer ID in connection settings
   let accessibleCustomers: GoogleAdsCustomer[] = [];
   let customerId = options.loginCustomerId ?? null;
   let customerName: string | null = null;
   let customersError: string | null = null;
 
   if (tokenResponse.access_token) {
-    if (!GOOGLE_DEVELOPER_TOKEN) {
-      customersError = 'GOOGLE_DEVELOPER_TOKEN is not configured. Cannot fetch customer accounts without developer token.';
-      console.warn('[Google Ads OAuth] Missing GOOGLE_DEVELOPER_TOKEN - customer accounts cannot be fetched');
+    if (customerId) {
+      customerName = customerId;
+      accessibleCustomers.push({
+        id: customerId,
+        name: customerId,
+      });
     } else {
-      try {
-        // Fetch accessible customers from Google Ads API
-        const { customers: fetchedCustomers, error: fetchError } =
-          await fetchAccessibleGoogleAdsCustomers(options.tenantId);
-
-        accessibleCustomers = fetchedCustomers;
-        customersError = fetchError || null;
-
-        // Use first customer as default if no loginCustomerId was provided
-        if (!customerId && fetchedCustomers.length > 0) {
-          customerId = fetchedCustomers[0].id;
-          customerName = fetchedCustomers[0].name;
-        }
-      } catch (error) {
-        customersError = error instanceof Error ? error.message : 'Unknown error fetching customers';
-        console.error('[Google Ads OAuth] Exception while fetching customers:', error);
-      }
+      customersError =
+        'No Customer ID provided. Please manually enter your Google Ads Customer ID in the connection settings after connecting.';
     }
   } else {
-    customersError = 'No access token available. Cannot fetch customer accounts.';
-  }
-
-  // If we have a loginCustomerId but it's not in the accessible list, add it
-  if (customerId && !accessibleCustomers.find((c) => c.id === customerId)) {
-    accessibleCustomers.push({
-      id: customerId,
-      name: customerId,
-    });
+    customersError =
+      'No access token available. Cannot set up customer account.';
   }
 
   await upsertConnection(options.tenantId, {
@@ -276,8 +258,10 @@ export async function handleGoogleAdsOAuthCallback(options: {
       customer_id: customerId, // Also save as customer_id for backwards compatibility
       selected_customer_id: customerId, // The selected customer for syncing
       customer_name: customerName,
-      accessible_customers: accessibleCustomers, // Save all accessible customers
-      customers_error: customersError, // Save any error encountered
+      accessible_customers: accessibleCustomers,
+      customers_error:
+        customersError ??
+        'Please manually enter your Google Ads Customer ID in the connection settings.',
     },
   });
 }
