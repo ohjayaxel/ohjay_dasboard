@@ -708,12 +708,13 @@ export async function fetchAndClassifyGoogleAdsAccounts(tenantId: string): Promi
       }
     }
 
-    // Step 3: If we only found manager accounts, fetch child accounts
+    // Step 3: Always fetch child accounts from manager accounts (if any manager accounts found)
+    // This ensures we get ALL child accounts, not just ones directly accessible
     const managerAccounts = accounts.filter(a => a.is_manager);
-    const childAccounts = accounts.filter(a => !a.is_manager);
+    const existingChildAccounts = accounts.filter(a => !a.is_manager);
 
-    if (managerAccounts.length > 0 && childAccounts.length === 0) {
-      console.log(`[Google Ads] Only manager accounts found, fetching child accounts from ${managerAccounts.length} manager(s)...`);
+    if (managerAccounts.length > 0) {
+      console.log(`[Google Ads] Fetching child accounts from ${managerAccounts.length} manager account(s)...`);
 
       for (const managerAccount of managerAccounts) {
         try {
@@ -753,23 +754,42 @@ export async function fetchAndClassifyGoogleAdsAccounts(tenantId: string): Promi
             const responseText = await searchResponse.text();
             let results: any[] = [];
 
-            // Parse response
+            // Parse response - handle multiple formats more thoroughly
             try {
               const parsed = JSON.parse(responseText);
+              
+              // Handle array of results
               if (Array.isArray(parsed)) {
-                results = parsed;
+                for (const item of parsed) {
+                  if (item.results && Array.isArray(item.results)) {
+                    results.push(...item.results);
+                  } else if (item.customerClient) {
+                    results.push(item);
+                  } else if (Array.isArray(item)) {
+                    results.push(...item);
+                  } else {
+                    results.push(item);
+                  }
+                }
               } else if (parsed.results && Array.isArray(parsed.results)) {
+                // Single object with results array
                 results = parsed.results;
+              } else if (parsed.customerClient) {
+                // Single customerClient object
+                results = [parsed];
               } else {
                 results = [parsed];
               }
             } catch {
+              // Try newline-delimited JSON
               const lines = responseText.trim().split('\n').filter(line => line.trim());
               for (const line of lines) {
                 try {
                   const parsed = JSON.parse(line);
                   if (parsed.results && Array.isArray(parsed.results)) {
                     results.push(...parsed.results);
+                  } else if (parsed.customerClient) {
+                    results.push(parsed);
                   } else {
                     results.push(parsed);
                   }
@@ -779,42 +799,90 @@ export async function fetchAndClassifyGoogleAdsAccounts(tenantId: string): Promi
               }
             }
 
+            console.log(`[Google Ads] Parsed ${results.length} result(s) from manager ${managerAccount.customer_id}`);
+
+            let childAccountsFound = 0;
+            
+            // Helper function to process a single client account
+            const processClientAccount = (client: any, managerId: string) => {
+              // Check manager flag - must be explicitly false or undefined/null
+              const isManager = client.manager === true;
+              if (isManager) {
+                // Skip if it's a manager account
+                return;
+              }
+
+              // Extract customer ID
+              const clientCustomer = client.clientCustomer || client.customer || client.id;
+              let clientId = '';
+              
+              if (typeof clientCustomer === 'string') {
+                clientId = clientCustomer.replace('customers/', '').trim();
+              } else if (clientCustomer?.id) {
+                clientId = String(clientCustomer.id).replace('customers/', '').trim();
+              } else if (clientCustomer && typeof clientCustomer === 'object' && 'resourceName' in clientCustomer) {
+                clientId = String(clientCustomer.resourceName || '').replace('customers/', '').trim();
+              } else if (typeof clientCustomer === 'number') {
+                clientId = String(clientCustomer);
+              }
+
+              if (!clientId) {
+                console.warn(`[Google Ads] Could not extract customer ID from client:`, client);
+                return;
+              }
+
+              // Check if we already have this account
+              const existingAccount = accounts.find(a => {
+                const aId = String(a.customer_id || '').replace(/-/g, '');
+                const cId = String(clientId || '').replace(/-/g, '');
+                return aId === cId;
+              });
+
+              if (!existingAccount) {
+                accounts.push({
+                  customer_id: clientId,
+                  descriptive_name: client.descriptive_name || client.descriptiveName || clientId,
+                  currency_code: client.currency_code || client.currencyCode || 'USD',
+                  time_zone: client.time_zone || client.timeZone || 'UTC',
+                  is_manager: false,
+                  manager_customer_id: managerId,
+                });
+                childAccountsFound++;
+                console.log(`[Google Ads] Found child account: ${clientId} - ${client.descriptive_name || client.descriptiveName || clientId}`);
+              }
+            };
+
             for (const result of results) {
-              const client = result.customerClient || result.results?.[0]?.customerClient;
-
-              if (client && client.manager === false) {
-                const clientCustomer = client.clientCustomer;
-                let clientId = '';
-                if (typeof clientCustomer === 'string') {
-                  clientId = clientCustomer.replace('customers/', '').trim();
-                } else if (clientCustomer?.id) {
-                  clientId = String(clientCustomer.id).replace('customers/', '').trim();
-                } else if (clientCustomer && typeof clientCustomer === 'object' && 'resourceName' in clientCustomer) {
-                  clientId = String(clientCustomer.resourceName || '').replace('customers/', '').trim();
-                }
-
-                if (clientId) {
-                  // Check if we already have this account
-                  if (!accounts.find(a => a.customer_id === clientId)) {
-                    accounts.push({
-                      customer_id: clientId,
-                      descriptive_name: client.descriptive_name || clientId,
-                      currency_code: client.currency_code || 'USD',
-                      time_zone: client.time_zone || 'UTC',
-                      is_manager: false,
-                      manager_customer_id: managerAccount.customer_id,
-                    });
-                    console.log(`[Google Ads] Found child account: ${clientId} - ${client.descriptive_name || clientId}`);
+              // Extract customerClient from various possible structures
+              let client = result.customerClient;
+              if (!client && result.results && Array.isArray(result.results)) {
+                // If result has nested results array, process each
+                for (const nestedResult of result.results) {
+                  client = nestedResult.customerClient || nestedResult;
+                  if (client) {
+                    processClientAccount(client, managerAccount.customer_id);
                   }
                 }
+                continue;
+              }
+              if (!client) {
+                // Maybe the result itself is the client
+                client = result;
+              }
+
+              if (client) {
+                processClientAccount(client, managerAccount.customer_id);
               }
             }
+
+            console.log(`[Google Ads] Added ${childAccountsFound} new child account(s) from manager ${managerAccount.customer_id}`);
           } else {
             const errorText = await searchResponse.text();
             console.warn(`[Google Ads] Failed to fetch child accounts from manager ${managerAccount.customer_id}: ${searchResponse.status} ${errorText.substring(0, 200)}`);
           }
         } catch (error) {
-          console.warn(`[Google Ads] Error fetching child accounts from manager ${managerAccount.customer_id}:`, error);
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          console.warn(`[Google Ads] Error fetching child accounts from manager ${managerAccount.customer_id}:`, errorMsg);
         }
       }
     }
