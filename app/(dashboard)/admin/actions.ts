@@ -8,6 +8,7 @@ import { requirePlatformAdmin, getCurrentUser } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
 import { getShopifyAuthorizeUrl, connectShopifyCustomApp, validateCustomAppToken, getShopifyAccessToken } from '@/lib/integrations/shopify'
+import { getGoogleAdsAuthorizeUrl } from '@/lib/integrations/googleads'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { logger, withRequestContext } from '@/lib/logger'
 import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
@@ -61,6 +62,9 @@ const disconnectShopifySchema = z.object({
 })
 
 const connectShopifySchema = connectMetaSchema
+
+const connectGoogleAdsSchema = connectMetaSchema
+const disconnectGoogleAdsSchema = connectMetaSchema
 
 const connectShopifyCustomAppSchema = z.object({
   tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
@@ -1671,6 +1675,119 @@ export async function disconnectShopify(payload: { tenantId: string; tenantSlug:
 
     if (error) {
       throw new Error(`Failed to create Shopify connection placeholder: ${error.message}`)
+    }
+  }
+
+  await revalidateTenantViews(tenantId, tenantSlug)
+}
+
+export async function startGoogleAdsConnect(payload: { tenantId: string; tenantSlug: string; loginCustomerId?: string }) {
+  return withRequestContext(async () => {
+    const user = await requirePlatformAdmin()
+
+    const result = connectGoogleAdsSchema.safeParse(payload)
+
+    if (!result.success) {
+      throw new Error(result.error.errors[0]?.message ?? 'Invalid Google Ads connection payload.')
+    }
+
+    const { tenantId, tenantSlug } = result.data
+    const { url, state } = await getGoogleAdsAuthorizeUrl({
+      tenantId,
+      loginCustomerId: payload.loginCustomerId,
+      redirectPath: `/admin/tenants/${tenantSlug}/integrations`,
+    })
+
+    await revalidateTenantViews(tenantId, tenantSlug)
+
+    logger.info(
+      {
+        route: 'admin.googleads',
+        action: 'connect_initiated',
+        endpoint: '/api/oauth/googleads/callback',
+        tenantId,
+        tenantSlug,
+        userId: user.id,
+        state,
+        state_prefix: state.slice(0, 8),
+        redirect_url: url,
+      },
+      'Google Ads connect initiated',
+    )
+
+    return {
+      redirectUrl: url,
+      state,
+    }
+  })
+}
+
+export async function disconnectGoogleAds(payload: { tenantId: string; tenantSlug: string }) {
+  await requirePlatformAdmin()
+
+  const result = disconnectGoogleAdsSchema.safeParse(payload)
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid disconnect payload.')
+  }
+
+  const { tenantId, tenantSlug } = result.data
+  const client = getSupabaseServiceClient()
+
+  const { data: existing, error: existingError } = await client
+    .from('connections')
+    .select('id, meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', 'google_ads')
+    .maybeSingle()
+
+  if (existingError) {
+    throw new Error(`Failed to load Google Ads connection: ${existingError.message}`)
+  }
+
+  const now = new Date().toISOString()
+  const baseMeta =
+    existing && typeof existing.meta === 'object' && existing.meta !== null
+      ? (existing.meta as Record<string, unknown>)
+      : {}
+  const nextMeta = {
+    ...baseMeta,
+    oauth_state: null,
+    oauth_state_created_at: null,
+    oauth_redirect_path: `/admin/tenants/${tenantSlug}/integrations`,
+    disconnected_at: now,
+  }
+
+  if (existing) {
+    const { error } = await client
+      .from('connections')
+      .update({
+        status: 'disconnected',
+        updated_at: now,
+        access_token_enc: null,
+        refresh_token_enc: null,
+        expires_at: null,
+        meta: nextMeta,
+      })
+      .eq('id', existing.id)
+
+    if (error) {
+      throw new Error(`Failed to disconnect Google Ads: ${error.message}`)
+    }
+  } else {
+    const { error } = await client.from('connections').insert({
+      tenant_id: tenantId,
+      source: 'google_ads',
+      status: 'disconnected',
+      updated_at: now,
+      access_token_enc: null,
+      refresh_token_enc: null,
+      expires_at: null,
+      meta: nextMeta,
+    })
+
+    if (error) {
+      throw new Error(`Failed to create Google Ads connection placeholder: ${error.message}`)
     }
   }
 

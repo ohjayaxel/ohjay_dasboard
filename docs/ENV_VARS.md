@@ -16,9 +16,9 @@ This project requires separate configuration for development and production. Use
 | `META_SYSTEM_USER_TOKEN` | Server (optional) | System user token used when tenant token is unavailable | Meta Business Manager → System Users |
 | `META_DEV_ACCESS_TOKEN` | Server (optional, dev) | Development override token for Meta Marketing API calls | Meta for Developers → Marketing API Tools |
 | `META_DEV_AD_ACCOUNT_ID` | Server (optional, dev) | Ad account ID used with `META_DEV_ACCESS_TOKEN` | Meta Business Manager → Ad Accounts |
-| `GOOGLE_CLIENT_ID` | Server | Google Ads OAuth Client ID | Google Cloud Console |
-| `GOOGLE_CLIENT_SECRET` | Server | Google Ads OAuth Client Secret | Google Cloud Console |
-| `GOOGLE_DEVELOPER_TOKEN` | Server | Google Ads API developer token | Google Ads Manager account |
+| `GOOGLE_CLIENT_ID` | Server | Google Ads OAuth Client ID | Google Cloud Console → APIs & Services → Credentials |
+| `GOOGLE_CLIENT_SECRET` | Server | Google Ads OAuth Client Secret | Google Cloud Console → APIs & Services → Credentials |
+| `GOOGLE_DEVELOPER_TOKEN` | Server | Google Ads API developer token (krävs för API-anrop, men OAuth fungerar utan) | [Google Ads API Center](https://ads.google.com/aw/apicenter) - Ansök via Manager-konto |
 | `SHOPIFY_API_KEY` | Server | Shopify Admin API key | Shopify Admin → Apps → Custom App |
 | `SHOPIFY_API_SECRET` | Server | Shopify Admin API secret | Shopify Admin → Apps → Custom App |
 | `ENCRYPTION_KEY` | Server | 32-byte key for encrypting tokens | Generate locally (32 bytes base64/hex) |

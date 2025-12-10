@@ -6,9 +6,11 @@ import { notFound } from 'next/navigation'
 import {
   disconnectMeta,
   disconnectShopify,
+  disconnectGoogleAds,
   queueMetaBackfillJobs,
   startMetaConnect,
   startShopifyConnectAction,
+  startGoogleAdsConnect,
   triggerMetaSyncNow,
   updateMetaSelectedAccount,
   updateIntegrationSettings,
@@ -225,6 +227,10 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             return 'Shopify connection removed.'
           case 'shopify-backfill-triggered':
             return 'Shopify-backfill startad. Data fylls på i bakgrunden.'
+          case 'googleads-connected':
+            return 'Google Ads connection established. Initial sync triggered.'
+          case 'googleads-disconnected':
+            return 'Google Ads connection removed.'
           case 'meta-account-updated':
             return 'Meta ad account selection saved.'
           default:
@@ -240,6 +246,12 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
     shopDomain: shopifyStoreDomain ?? undefined,
   })
   const shopifyDisconnectAction = disconnectShopify.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
+  const googleAdsConnectAction = startGoogleAdsConnect.bind(null, { 
+    tenantId: tenant.id, 
+    tenantSlug: tenant.slug,
+    loginCustomerId: googleCustomerId ?? undefined,
+  })
+  const googleAdsDisconnectAction = disconnectGoogleAds.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
 
   const metaAccountForm =
     metaAccounts.length > 0 ? (
@@ -420,30 +432,30 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             </p>
           </AlertDescription>
         </Alert>
-        <form
-          action={triggerShopifyBackfill}
-          className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
-        >
-          <input type="hidden" name="tenantId" value={tenant.id} />
-          <input type="hidden" name="tenantSlug" value={tenant.slug} />
-          <div className="space-y-2">
+      <form
+        action={triggerShopifyBackfill}
+        className="grid gap-3 rounded-xl border border-muted/60 bg-background/80 p-4 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+      >
+        <input type="hidden" name="tenantId" value={tenant.id} />
+        <input type="hidden" name="tenantSlug" value={tenant.slug} />
+        <div className="space-y-2">
             <Label htmlFor="shopify-backfill-since">Backfill från datum (online)</Label>
-            <Input
-              id="shopify-backfill-since"
-              type="date"
-              name="since"
-              defaultValue={defaultShopifyBackfillSince}
-              className="h-10"
-              required
-            />
-            <p className="text-xs text-muted-foreground">
+          <Input
+            id="shopify-backfill-since"
+            type="date"
+            name="since"
+            defaultValue={defaultShopifyBackfillSince}
+            className="h-10"
+            required
+          />
+          <p className="text-xs text-muted-foreground">
               Hämtar ordrar från valt datum fram till idag en gång. Rekommenderas endast för små backfills (&lt;100 ordrar, &lt;1 månad). Flaggan återställs automatiskt efter körning.
-            </p>
-          </div>
-          <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Backfillar...">
+          </p>
+        </div>
+        <FormSubmitButton type="submit" className="md:w-auto" pendingLabel="Backfillar...">
             Kör backfill (online)
-          </FormSubmitButton>
-        </form>
+        </FormSubmitButton>
+      </form>
       </div>
     ) : (
       <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm text-muted-foreground">
@@ -483,6 +495,8 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           status={google.status}
           customerId={googleCustomerId}
           lastSyncedAt={google.updatedAt ?? undefined}
+          onConnect={googleAdsConnectAction}
+          onDisconnect={googleAdsDisconnectAction}
         />
       ),
       syncStartDate: googleSyncStartDate,
