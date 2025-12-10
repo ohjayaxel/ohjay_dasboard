@@ -14,6 +14,7 @@ import {
   triggerMetaSyncNow,
   updateMetaSelectedAccount,
   updateGoogleAdsSelectedCustomer,
+  refreshGoogleAdsCustomers,
   updateIntegrationSettings,
   triggerShopifyBackfill,
   verifyShopifyConnection,
@@ -255,6 +256,10 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             return 'Meta ad account selection saved.'
           case 'google-ads-customer-updated':
             return 'Google Ads customer selection saved.'
+          case 'google-ads-customers-refreshed':
+            return 'Google Ads customers refreshed successfully.'
+          case 'google-ads-customers-refresh-error':
+            return error ? `Failed to refresh customers: ${error}` : 'Failed to refresh customers.'
           default:
             return 'Changes saved.'
         }
@@ -309,13 +314,23 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
         )}
       </form>
     ) : google.status === 'connected' ? (
-      <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm text-muted-foreground">
-        No customer accounts were returned for this connection. Reconnect Google Ads or verify that the account has access to customer accounts.
+      <div className="space-y-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm">
+        <p className="text-muted-foreground">
+          No customer accounts were returned for this connection. Reconnect Google Ads or verify that the account has access to customer accounts.
+        </p>
         {googleCustomersError && (
-          <span className="mt-2 block text-destructive">
-            Google Ads API response: <span className="font-mono">{googleCustomersError}</span>
-          </span>
+          <div className="rounded-md bg-destructive/10 p-3">
+            <p className="font-medium text-destructive">Error:</p>
+            <p className="mt-1 font-mono text-xs">{googleCustomersError}</p>
+          </div>
         )}
+        <form action={refreshGoogleAdsCustomers}>
+          <input type="hidden" name="tenantId" value={tenant.id} />
+          <input type="hidden" name="tenantSlug" value={tenant.slug} />
+          <Button type="submit" variant="outline" size="sm">
+            Retry fetch customers
+          </Button>
+        </form>
       </div>
     ) : null
 

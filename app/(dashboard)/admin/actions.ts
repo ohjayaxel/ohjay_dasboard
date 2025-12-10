@@ -1869,3 +1869,71 @@ export async function updateGoogleAdsSelectedCustomer(formData: FormData) {
   redirect(`/admin/tenants/${result.data.tenantSlug}/integrations?status=google-ads-customer-updated&source=google_ads`)
 }
 
+export async function refreshGoogleAdsCustomers(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const result = connectGoogleAdsSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid payload.')
+  }
+
+  const { tenantId, tenantSlug } = result.data
+
+  try {
+    const { fetchAccessibleGoogleAdsCustomers } = await import('@/lib/integrations/googleads')
+    const { customers, error } = await fetchAccessibleGoogleAdsCustomers(tenantId)
+
+    const client = getSupabaseServiceClient()
+
+    const { data: connection, error: connectionError } = await client
+      .from('connections')
+      .select('id, meta')
+      .eq('tenant_id', tenantId)
+      .eq('source', 'google_ads')
+      .maybeSingle()
+
+    if (connectionError) {
+      throw new Error(`Failed to load Google Ads connection: ${connectionError.message}`)
+    }
+
+    if (!connection) {
+      throw new Error('No Google Ads connection found for this tenant.')
+    }
+
+    const baseMeta =
+      connection.meta && typeof connection.meta === 'object' && connection.meta !== null
+        ? (connection.meta as Record<string, unknown>)
+        : {}
+
+    const { error: updateError } = await client
+      .from('connections')
+      .update({
+        meta: {
+          ...baseMeta,
+          accessible_customers: customers,
+          customers_error: error || null,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', connection.id)
+
+    if (updateError) {
+      throw new Error(`Failed to update customers: ${updateError.message}`)
+    }
+
+    await revalidateTenantViews(tenantId, tenantSlug)
+
+    redirect(
+      `/admin/tenants/${tenantSlug}/integrations?status=${error ? 'google-ads-customers-refresh-error' : 'google-ads-customers-refreshed'}&source=google_ads${error ? `&error=${encodeURIComponent(error)}` : ''}`,
+    )
+  } catch (error) {
+    throw new Error(
+      `Failed to refresh Google Ads customers: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
