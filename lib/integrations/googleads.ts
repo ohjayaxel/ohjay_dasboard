@@ -224,6 +224,62 @@ export async function handleGoogleAdsOAuthCallback(options: {
     ? new Date(Date.now() + Number(tokenResponse.expires_in) * 1000).toISOString()
     : null;
 
+  // Try to fetch customer information from Google Ads API
+  let customerId = options.loginCustomerId ?? null;
+  let customerName: string | null = null;
+
+  if (tokenResponse.access_token && GOOGLE_DEVELOPER_TOKEN) {
+    try {
+      // Try to get accessible customers
+      const customersRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${tokenResponse.access_token}`,
+          'developer-token': GOOGLE_DEVELOPER_TOKEN,
+        },
+      });
+
+      if (customersRes.ok) {
+        const customersData = await customersRes.json();
+        if (customersData.resourceNames && customersData.resourceNames.length > 0) {
+          // Extract customer ID from resource name (format: customers/1234567890)
+          const firstCustomer = customersData.resourceNames[0];
+          const extractedCustomerId = firstCustomer.replace('customers/', '');
+          if (extractedCustomerId && !customerId) {
+            customerId = extractedCustomerId;
+          }
+
+          // Try to get customer details
+          try {
+            const customerRes = await fetch(
+              `${GOOGLE_REPORTING_ENDPOINT}/${extractedCustomerId}`,
+              {
+                method: 'GET',
+                headers: {
+                  Authorization: `Bearer ${tokenResponse.access_token}`,
+                  'developer-token': GOOGLE_DEVELOPER_TOKEN,
+                },
+              },
+            );
+
+            if (customerRes.ok) {
+              const customerData = await customerRes.json();
+              if (customerData.customer && customerData.customer.descriptiveName) {
+                customerName = customerData.customer.descriptiveName;
+              }
+            }
+          } catch (error) {
+            // Ignore errors when fetching customer details
+            console.warn('Failed to fetch Google Ads customer details:', error);
+          }
+        }
+      }
+    } catch (error) {
+      // If we can't fetch customer info, continue with loginCustomerId
+      console.warn('Failed to fetch Google Ads accessible customers:', error);
+    }
+  }
+
   await upsertConnection(options.tenantId, {
     status: 'connected',
     accessToken: tokenResponse.access_token,
@@ -231,8 +287,9 @@ export async function handleGoogleAdsOAuthCallback(options: {
     expiresAt,
     meta: {
       token_type: tokenResponse.token_type,
-      login_customer_id: options.loginCustomerId ?? null,
-      // TODO: persist customer ID selection when UI exposes it.
+      login_customer_id: customerId,
+      customer_id: customerId, // Also save as customer_id for backwards compatibility
+      customer_name: customerName,
     },
   });
 }
