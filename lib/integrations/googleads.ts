@@ -6,7 +6,7 @@ import { decryptSecret, encryptSecret } from './crypto';
 
 const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
-const GOOGLE_REPORTING_ENDPOINT = 'https://googleads.googleapis.com/v16/customers';
+const GOOGLE_REPORTING_ENDPOINT = 'https://googleads.googleapis.com/v21/customers';
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -235,19 +235,23 @@ export async function handleGoogleAdsOAuthCallback(options: {
       customersError = 'GOOGLE_DEVELOPER_TOKEN is not configured. Cannot fetch customer accounts without developer token.';
       console.warn('[Google Ads OAuth] Missing GOOGLE_DEVELOPER_TOKEN - customer accounts cannot be fetched');
     } else {
-      // Note: Google Ads API v16 ListAccessibleCustomers requires gRPC client library
-      // REST transcoding is not available for this method
-      // We'll skip automatic customer fetching and let user manually enter customer ID
-      // If loginCustomerId was provided, use that as the default
-      if (customerId) {
-        accessibleCustomers.push({
-          id: customerId,
-          name: customerId,
-        });
+      try {
+        // Fetch accessible customers from Google Ads API
+        const { customers: fetchedCustomers, error: fetchError } =
+          await fetchAccessibleGoogleAdsCustomers(options.tenantId);
+
+        accessibleCustomers = fetchedCustomers;
+        customersError = fetchError || null;
+
+        // Use first customer as default if no loginCustomerId was provided
+        if (!customerId && fetchedCustomers.length > 0) {
+          customerId = fetchedCustomers[0].id;
+          customerName = fetchedCustomers[0].name;
+        }
+      } catch (error) {
+        customersError = error instanceof Error ? error.message : 'Unknown error fetching customers';
+        console.error('[Google Ads OAuth] Exception while fetching customers:', error);
       }
-      
-      // Set error message to inform user they need to manually enter customer ID
-      customersError = 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID below.';
     }
   } else {
     customersError = 'No access token available. Cannot fetch customer accounts.';
@@ -353,6 +357,8 @@ export type GoogleAdsCustomer = {
 /**
  * Fetch all accessible Google Ads customers for a tenant.
  * Returns list of customers accessible from the MCC account.
+ * 
+ * Uses Google Ads API v21 REST transcoding for ListAccessibleCustomers.
  */
 export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promise<{
   customers: GoogleAdsCustomer[];
@@ -367,17 +373,92 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
     };
   }
 
-  // Note: Google Ads API v16 ListAccessibleCustomers requires gRPC client library
-  // REST transcoding is not available for this method
-  // Return empty list with helpful error message
-  return {
-    customers: [],
-    error: 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID in the connection settings.',
-  };
-  
-  // Commented out - REST transcoding doesn't work for ListAccessibleCustomers
-  // To implement automatic customer fetching, we would need to use the Google Ads gRPC client library
-  // For now, users must manually enter their Customer ID
+  try {
+    // Google Ads API v21: POST to customers:listAccessibleCustomers
+    // This endpoint uses REST transcoding from gRPC
+    const response = await fetch(
+      `${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'developer-token': GOOGLE_DEVELOPER_TOKEN,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+      },
+    );
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      return {
+        customers: [],
+        error: `Failed to fetch accessible customers: ${response.status} ${errorBody}`,
+      };
+    }
+
+    const data = await response.json();
+    const resourceNames = data.resourceNames || [];
+
+    if (resourceNames.length === 0) {
+      return {
+        customers: [],
+        error: 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.',
+      };
+    }
+
+    // Fetch customer details for each resource
+    const customers: GoogleAdsCustomer[] = [];
+
+    for (const resourceName of resourceNames) {
+      // Extract customer ID from resource name (e.g., "customers/1234567890")
+      const customerId = resourceName.replace('customers/', '');
+
+      try {
+        // Get customer details
+        const customerResponse = await fetch(`${GOOGLE_REPORTING_ENDPOINT}/${customerId}`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'developer-token': GOOGLE_DEVELOPER_TOKEN,
+          },
+        });
+
+        if (customerResponse.ok) {
+          const customerData = await customerResponse.json();
+          const customer = customerData.customer;
+
+          customers.push({
+            id: customerId,
+            name: customer?.descriptiveName || customer?.companyName || customerId,
+            descriptiveName: customer?.descriptiveName,
+          });
+        } else {
+          // If we can't fetch details, still add the ID
+          customers.push({
+            id: customerId,
+            name: customerId,
+          });
+        }
+      } catch (error) {
+        // If individual customer fetch fails, still add the ID
+        console.warn(`[Google Ads] Failed to fetch customer ${customerId} details:`, error);
+        customers.push({
+          id: customerId,
+          name: customerId,
+        });
+      }
+    }
+
+    return { customers };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error('[Google Ads] Error fetching accessible customers:', error);
+    return {
+      customers: [],
+      error: `Failed to fetch accessible customers: ${errorMessage}`,
+    };
+  }
 }
 
 export async function fetchGoogleAdsInsights(params: {
