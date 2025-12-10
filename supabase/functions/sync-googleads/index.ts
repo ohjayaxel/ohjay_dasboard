@@ -713,6 +713,72 @@ async function fetchGeographicInsights(
 }
 
 /**
+ * Fetch conversion action data from Google Ads API.
+ * 
+ * This query fetches conversion_action per date, campaign, ad_group, and country.
+ * Note: This must be a separate query because segments.conversion_action cannot
+ * be used with clicks, cost_micros, or impressions in the same query.
+ * 
+ * Returns an array of results with conversion_action data.
+ */
+async function fetchConversionActionInsights(
+  accessToken: string,
+  customerId: string,
+  startDate: string,
+  endDate: string,
+  loginCustomerId: string | null,
+): Promise<any[]> {
+  const developerToken = Deno.env.get('GOOGLE_DEVELOPER_TOKEN');
+  if (!developerToken) {
+    throw new Error('Missing GOOGLE_DEVELOPER_TOKEN environment variable');
+  }
+
+  const query = buildConversionActionQuery(startDate, endDate);
+  const url = `${GOOGLE_ADS_ENDPOINT}/customers/${customerId}/googleAds:searchStream`;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    'developer-token': developerToken,
+    'Content-Type': 'application/json',
+  };
+
+  // Add login-customer-id header if we have a manager account
+  if (loginCustomerId && loginCustomerId !== customerId) {
+    headers['login-customer-id'] = loginCustomerId;
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ query }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    let errorMessage = `Google Ads API error (conversion action query): ${response.status}`;
+    
+    // Try to extract useful error details from response
+    try {
+      const errorJson = JSON.parse(errorBody);
+      if (errorJson.error?.message) {
+        errorMessage += ` ${errorJson.error.message}`;
+      }
+      console.error('[sync-googleads] Conversion action query error:', JSON.stringify(errorJson, null, 2));
+    } catch {
+      if (errorBody && errorBody.length < 500 && !errorBody.includes('<!DOCTYPE')) {
+        errorMessage += ` ${errorBody.substring(0, 200)}`;
+      }
+    }
+    
+    // Log error but don't fail the entire sync - conversion_action is optional
+    console.warn(`[sync-googleads] Failed to fetch conversion action data: ${errorMessage}`);
+    return [];
+  }
+
+  return await parseSearchStreamResponse(response);
+}
+
+/**
  * Fetch geo target constants for country code mapping.
  * 
  * Returns a map of country_criterion_id -> country_code.
@@ -771,6 +837,73 @@ async function fetchGeoTargetConstants(
 }
 
 /**
+ * Build a lookup key for matching conversion action data with geographic data.
+ */
+function buildConversionActionKey(
+  date: string,
+  campaignId: string,
+  adGroupId: string,
+  countryCriterionId: string | number,
+  locationType: string,
+): string {
+  return `${date}|${campaignId}|${adGroupId}|${countryCriterionId}|${locationType}`;
+}
+
+/**
+ * Parse conversion action data and build a lookup map.
+ * 
+ * Returns a Map<key, conversion_action_id> where key is built from
+ * date, campaign, ad_group, country, and location_type.
+ */
+function buildConversionActionMap(
+  conversionActionResults: any[],
+  countryCodeMap: Map<string, string>,
+): Map<string, string> {
+  const conversionActionMap = new Map<string, string>();
+
+  for (const result of conversionActionResults) {
+    try {
+      const segments = result.segments || {};
+      const campaign = result.campaign || {};
+      const adGroup = result.adGroup || result.ad_group || {};
+      const geographicView = result.geographicView || result.geographic_view || {};
+
+      const date = segments.date;
+      const campaignId = campaign.id ? String(campaign.id) : null;
+      const adGroupId = adGroup.id ? String(adGroup.id) : null;
+      const countryCriterionId = geographicView.countryCriterionId || geographicView.country_criterion_id;
+      const locationType = geographicView.locationType || geographicView.location_type;
+      const conversionAction = segments.conversionAction || segments.conversion_action;
+
+      // Skip rows without required fields
+      if (!date || !campaignId || !adGroupId || !countryCriterionId || !locationType || !conversionAction) {
+        continue;
+      }
+
+      // Validate location_type
+      if (locationType !== 'AREA_OF_INTEREST' && locationType !== 'LOCATION_OF_PRESENCE') {
+        continue;
+      }
+
+      // Extract conversion action ID
+      const conversionActionId = extractConversionActionId(conversionAction);
+      if (!conversionActionId) {
+        continue;
+      }
+
+      // Build lookup key and store conversion_action_id
+      const key = buildConversionActionKey(date, campaignId, adGroupId, countryCriterionId, locationType);
+      conversionActionMap.set(key, conversionActionId);
+    } catch (error) {
+      console.warn('[buildConversionActionMap] Failed to parse conversion action result:', error);
+      // Continue processing other rows
+    }
+  }
+
+  return conversionActionMap;
+}
+
+/**
  * Transform API results into GeographicDailyRow format.
  */
 function transformGeographicResults(
@@ -778,6 +911,7 @@ function transformGeographicResults(
   tenantId: string,
   customerId: string,
   countryCodeMap: Map<string, string>,
+  conversionActionMap: Map<string, string> | null = null,
 ): GeographicDailyRow[] {
   const rows: GeographicDailyRow[] = [];
 
@@ -806,10 +940,12 @@ function transformGeographicResults(
         continue;
       }
 
-      // Note: segments.conversion_action cannot be used with clicks, cost_micros, or impressions
-      // in the same query. We'll set conversion_action_id to null for now.
-      // TODO: If conversion action attribution is needed, query it separately.
-      const conversionActionId = null;
+      // Look up conversion_action_id from the separate query results
+      let conversionActionId: string | null = null;
+      if (conversionActionMap) {
+        const key = buildConversionActionKey(date, campaignId, adGroupId, countryCriterionId, locationType);
+        conversionActionId = conversionActionMap.get(key) || null;
+      }
 
       const countryCode = countryCodeMap.get(String(countryCriterionId)) || null;
       const customerIdFormatted = customer.id ? formatCustomerIdForDisplay(String(customer.id)) : customerId;
@@ -1199,15 +1335,24 @@ async function processTenant(
       timestamp: new Date().toISOString(),
     }));
     
-    console.log(`[sync-googleads] Fetched ${rawResults.length} result rows from API`);
+    console.log(`[sync-googleads] Fetched ${rawResults.length} result rows from geographic insights API`);
 
+    // Fetch conversion action data separately (cannot be combined with clicks/cost_micros/impressions)
+    console.log(`[sync-googleads] Fetching conversion action data`);
+    const conversionActionResults = await fetchConversionActionInsights(accessToken, selectedCustomerId, startDateStr, endDateStr, managerCustomerId);
+    console.log(`[sync-googleads] Fetched ${conversionActionResults.length} conversion action result rows`);
+    
     // Fetch country code mapping
     console.log(`[sync-googleads] Fetching country code mapping`);
     const countryCodeMap = await fetchGeoTargetConstants(accessToken, selectedCustomerId, managerCustomerId);
     console.log(`[sync-googleads] Loaded ${countryCodeMap.size} country mappings`);
+    
+    // Build conversion action lookup map
+    const conversionActionMap = buildConversionActionMap(conversionActionResults, countryCodeMap);
+    console.log(`[sync-googleads] Built conversion action map with ${conversionActionMap.size} entries`);
 
-    // Transform results to database rows
-    const rows = transformGeographicResults(rawResults, tenantId, selectedCustomerId, countryCodeMap);
+    // Transform results to database rows (merge conversion action data)
+    const rows = transformGeographicResults(rawResults, tenantId, selectedCustomerId, countryCodeMap, conversionActionMap);
     
     // Structured logging: transformation complete
     console.log(JSON.stringify({
