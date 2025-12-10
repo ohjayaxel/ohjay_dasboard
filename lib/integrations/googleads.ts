@@ -521,8 +521,13 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
     // Log summary before child account fetching
     console.log(`[Google Ads] Summary after processing ${resourceNames.length} accessible customer(s):`);
     console.log(`[Google Ads]   - Regular accounts found: ${allCustomers.length}`);
+    if (allCustomers.length > 0) {
+      console.log(`[Google Ads]   - Regular account IDs: ${allCustomers.map(c => c.id).join(', ')}`);
+    }
     console.log(`[Google Ads]   - Manager accounts detected: ${managerAccountIds.length}`);
-    console.log(`[Google Ads]   - Manager account IDs: ${managerAccountIds.join(', ')}`);
+    if (managerAccountIds.length > 0) {
+      console.log(`[Google Ads]   - Manager account IDs: ${managerAccountIds.join(', ')}`);
+    }
 
     // If we found manager accounts but no regular customers, fetch child accounts
     if (managerAccountIds.length > 0 && allCustomers.length === 0) {
