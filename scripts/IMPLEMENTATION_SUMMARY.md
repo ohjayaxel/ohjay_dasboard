@@ -145,3 +145,4 @@ Net Sales (EXCL tax) = subtotalPriceSet/subtotal_price - totalTaxSet/total_tax -
    - Verifiera att live-sync använder nya beräkningen
 
 
+

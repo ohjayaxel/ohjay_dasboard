@@ -12,6 +12,7 @@ const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 const INCREMENTAL_WINDOW_DAYS = 30; // Sync last 30 days by default
+const INITIAL_SYNC_DAYS = 30; // Initial sync: last 30 days
 
 function getEnvVar(key: string) {
   const value = Deno.env.get(key);
@@ -38,18 +39,23 @@ type GoogleConnection = {
   meta: Record<string, any> | null;
 };
 
-type GoogleInsightRow = {
+type GeographicDailyRow = {
   tenant_id: string;
-  date: string;
   customer_id: string;
-  campaign_id: string | null;
-  adgroup_id: string | null;
-  ad_id: string | null;
-  cost_micros: number | null;
-  impressions: number | null;
-  clicks: number | null;
-  conversions: number | null;
-  revenue: number | null;
+  date: string;
+  campaign_id: string;
+  campaign_name: string | null;
+  ad_group_id: string;
+  ad_group_name: string | null;
+  country_criterion_id: string;
+  country_code: string | null;
+  location_type: 'AREA_OF_INTEREST' | 'LOCATION_OF_PRESENCE';
+  impressions: number;
+  clicks: number;
+  cost_micros: number;
+  conversions: number;
+  conversions_value: number;
+  conversion_action_id: string | null;
 };
 
 type JobResult = {
@@ -276,39 +282,333 @@ async function getAccessToken(client: SupabaseClient, connection: GoogleConnecti
   return accessToken;
 }
 
-function microsToSpend(micros: number | null): number {
-  if (!micros) return 0;
-  return micros / 1_000_000;
-}
+function getCustomerId(meta: Record<string, any> | null): string | null {
+  if (!meta) return null;
 
-function aggregateKpis(rows: GoogleInsightRow[]) {
-  const byDate = new Map<string, { spend: number; clicks: number; conversions: number; revenue: number }>();
-
-  for (const row of rows) {
-    const existing = byDate.get(row.date) ?? { spend: 0, clicks: 0, conversions: 0, revenue: 0 };
-    existing.spend += microsToSpend(row.cost_micros ?? 0);
-    existing.clicks += row.clicks ?? 0;
-    existing.conversions += row.conversions ?? 0;
-    existing.revenue += row.revenue ?? 0;
-    byDate.set(row.date, existing);
+  // Try selected_customer_id first
+  if (typeof meta.selected_customer_id === 'string' && meta.selected_customer_id.length > 0) {
+    return meta.selected_customer_id.replace(/-/g, ''); // Remove dashes for API calls
   }
 
-  return Array.from(byDate.entries()).map(([date, values]) => {
-    const aov = values.conversions > 0 ? values.revenue / values.conversions : null;
-    const cos = values.revenue > 0 ? values.spend / values.revenue : null;
-    const roas = values.spend > 0 ? values.revenue / values.spend : null;
+  // Fall back to customer_id
+  if (typeof meta.customer_id === 'string' && meta.customer_id.length > 0) {
+    return meta.customer_id.replace(/-/g, '');
+  }
 
-    return {
-      date,
-      spend: values.spend || null,
-      clicks: values.clicks || null,
-      conversions: values.conversions || null,
-      revenue: values.revenue || null,
-      aov,
-      cos,
-      roas,
-    };
+  return null;
+}
+
+function getLoginCustomerId(meta: Record<string, any> | null): string | null {
+  if (!meta) return null;
+
+  if (typeof meta.login_customer_id === 'string' && meta.login_customer_id.length > 0) {
+    return meta.login_customer_id.replace(/-/g, '');
+  }
+
+  return null;
+}
+
+function formatCustomerIdForDisplay(customerId: string): string {
+  // Format as XXX-XXX-XXXX if it's 10 digits
+  if (/^\d{10}$/.test(customerId)) {
+    return `${customerId.slice(0, 3)}-${customerId.slice(3, 6)}-${customerId.slice(6)}`;
+  }
+  return customerId;
+}
+
+/**
+ * Build GAQL query for geographic_view.
+ * 
+ * This query uses geographic_view which provides country + campaign + ad_group + metrics
+ * in a single pass, eliminating the need for multiple queries or joins.
+ * 
+ * Based on Phase 2 Diagnostic Report: geographic_view supports campaign.id and ad_group.id fields.
+ */
+function buildGeographicViewQuery(startDate: string, endDate: string): string {
+  return `
+SELECT
+  segments.date,
+  customer.id,
+  campaign.id,
+  campaign.name,
+  ad_group.id,
+  ad_group.name,
+  geographic_view.country_criterion_id,
+  geographic_view.location_type,
+  metrics.impressions,
+  metrics.clicks,
+  metrics.cost_micros,
+  metrics.conversions,
+  metrics.conversions_value,
+  segments.conversion_action
+FROM geographic_view
+WHERE segments.date >= '${startDate}' AND segments.date <= '${endDate}'
+  AND campaign.status != 'REMOVED'
+  AND ad_group.status != 'REMOVED'
+ORDER BY segments.date DESC, campaign.id, ad_group.id, geographic_view.country_criterion_id
+LIMIT 10000
+  `.trim();
+}
+
+/**
+ * Build GAQL query for geo_target_constant lookup.
+ * 
+ * Fetches country code mappings for all countries.
+ * This can be cached as it changes infrequently.
+ * 
+ * TODO: Consider persisting this into a reference table for performance.
+ */
+function buildGeoTargetConstantQuery(): string {
+  return `
+SELECT
+  geo_target_constant.id,
+  geo_target_constant.name,
+  geo_target_constant.country_code,
+  geo_target_constant.target_type,
+  geo_target_constant.status
+FROM geo_target_constant
+WHERE geo_target_constant.target_type = 'Country'
+  `.trim();
+}
+
+/**
+ * Extract conversion action ID from resource name.
+ * 
+ * Format: "customers/{customerId}/conversionActions/{actionId}"
+ * Returns: "{actionId}" or null if not parseable
+ */
+function extractConversionActionId(resourceName: string | null | undefined): string | null {
+  if (!resourceName || typeof resourceName !== 'string') {
+    return null;
+  }
+
+  const match = resourceName.match(/conversionActions\/(\d+)/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Parse streaming JSON response from Google Ads searchStream API.
+ * 
+ * searchStream returns newline-delimited JSON where each line contains:
+ * { results: [{ ... }] } or sometimes just { ... }
+ * Or may return a JSON array directly in v21
+ */
+async function parseSearchStreamResponse(response: Response): Promise<any[]> {
+  const text = await response.text();
+  
+  // Try parsing as JSON array first (v21 sometimes returns arrays)
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      const allResults: any[] = [];
+      for (const item of parsed) {
+        if (item.results && Array.isArray(item.results)) {
+          allResults.push(...item.results);
+        } else {
+          allResults.push(item);
+        }
+      }
+      return allResults;
+    }
+    
+    // Single object with results array
+    if (parsed.results && Array.isArray(parsed.results)) {
+      return parsed.results;
+    }
+    
+    // Single result object
+    return [parsed];
+  } catch {
+    // Fallback: parse as newline-delimited JSON
+    const lines = text.trim().split('\n').filter(line => line.trim());
+    const allResults: any[] = [];
+    
+    for (const line of lines) {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.results && Array.isArray(parsed.results)) {
+          allResults.push(...parsed.results);
+        } else {
+          allResults.push(parsed);
+        }
+      } catch {
+        // Skip invalid lines
+      }
+    }
+    
+    return allResults;
+  }
+}
+
+/**
+ * Fetch geographic insights from Google Ads API using geographic_view.
+ */
+async function fetchGeographicInsights(
+  accessToken: string,
+  customerId: string,
+  startDate: string,
+  endDate: string,
+  loginCustomerId: string | null,
+): Promise<any[]> {
+  const developerToken = Deno.env.get('GOOGLE_DEVELOPER_TOKEN');
+  if (!developerToken) {
+    throw new Error('Missing GOOGLE_DEVELOPER_TOKEN environment variable');
+  }
+
+  const query = buildGeographicViewQuery(startDate, endDate);
+  const url = `${GOOGLE_ADS_ENDPOINT}/customers/${customerId}/googleAds:searchStream`;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    'developer-token': developerToken,
+    'Content-Type': 'application/json',
+  };
+
+  // Add login-customer-id header if we have a manager account
+  if (loginCustomerId && loginCustomerId !== customerId) {
+    headers['login-customer-id'] = loginCustomerId;
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ query }),
   });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Google Ads API error: ${response.status} ${errorBody}`);
+  }
+
+  return await parseSearchStreamResponse(response);
+}
+
+/**
+ * Fetch geo target constants for country code mapping.
+ * 
+ * Returns a map of country_criterion_id -> country_code.
+ * 
+ * TODO: Consider persisting this into a reference table for performance.
+ */
+async function fetchGeoTargetConstants(
+  accessToken: string,
+  customerId: string,
+  loginCustomerId: string | null,
+): Promise<Map<string, string>> {
+  const developerToken = Deno.env.get('GOOGLE_DEVELOPER_TOKEN');
+  if (!developerToken) {
+    throw new Error('Missing GOOGLE_DEVELOPER_TOKEN environment variable');
+  }
+
+  const query = buildGeoTargetConstantQuery();
+  const url = `${GOOGLE_ADS_ENDPOINT}/customers/${customerId}/googleAds:searchStream`;
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    'developer-token': developerToken,
+    'Content-Type': 'application/json',
+  };
+
+  if (loginCustomerId && loginCustomerId !== customerId) {
+    headers['login-customer-id'] = loginCustomerId;
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ query }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Google Ads geo target constant fetch failed: ${response.status} ${errorBody}`);
+  }
+
+  const results = await parseSearchStreamResponse(response);
+  const mapping = new Map<string, string>();
+
+  for (const result of results) {
+    try {
+      const geoConstant = result.geoTargetConstant || result.geo_target_constant;
+      if (geoConstant?.id && geoConstant?.countryCode) {
+        mapping.set(String(geoConstant.id), geoConstant.countryCode);
+      }
+    } catch (error) {
+      console.warn('[fetchGeoTargetConstants] Failed to parse result:', error);
+    }
+  }
+
+  return mapping;
+}
+
+/**
+ * Transform API results into GeographicDailyRow format.
+ */
+function transformGeographicResults(
+  results: any[],
+  tenantId: string,
+  customerId: string,
+  countryCodeMap: Map<string, string>,
+): GeographicDailyRow[] {
+  const rows: GeographicDailyRow[] = [];
+
+  for (const result of results) {
+    try {
+      const segments = result.segments || {};
+      const customer = result.customer || {};
+      const campaign = result.campaign || {};
+      const adGroup = result.adGroup || result.ad_group || {};
+      const geographicView = result.geographicView || result.geographic_view || {};
+      const metrics = result.metrics || {};
+
+      const date = segments.date;
+      const campaignId = campaign.id ? String(campaign.id) : null;
+      const adGroupId = adGroup.id ? String(adGroup.id) : null;
+      const countryCriterionId = geographicView.countryCriterionId || geographicView.country_criterion_id;
+      const locationType = geographicView.locationType || geographicView.location_type;
+
+      // Skip rows without required fields
+      if (!date || !campaignId || !adGroupId || !countryCriterionId || !locationType) {
+        continue;
+      }
+
+      // Validate location_type
+      if (locationType !== 'AREA_OF_INTEREST' && locationType !== 'LOCATION_OF_PRESENCE') {
+        continue;
+      }
+
+      const conversionActionId = extractConversionActionId(
+        segments.conversionAction || segments.conversion_action
+      );
+
+      const countryCode = countryCodeMap.get(String(countryCriterionId)) || null;
+      const customerIdFormatted = customer.id ? formatCustomerIdForDisplay(String(customer.id)) : customerId;
+
+      rows.push({
+        tenant_id: tenantId,
+        customer_id: customerIdFormatted,
+        date,
+        campaign_id: campaignId,
+        campaign_name: campaign.name || null,
+        ad_group_id: adGroupId,
+        ad_group_name: adGroup.name || null,
+        country_criterion_id: String(countryCriterionId),
+        country_code: countryCode,
+        location_type: locationType as 'AREA_OF_INTEREST' | 'LOCATION_OF_PRESENCE',
+        impressions: metrics.impressions ? Number(metrics.impressions) : 0,
+        clicks: metrics.clicks ? Number(metrics.clicks) : 0,
+        cost_micros: metrics.costMicros || metrics.cost_micros ? Number(metrics.costMicros || metrics.cost_micros) : 0,
+        conversions: metrics.conversions ? Number(metrics.conversions) : 0,
+        conversions_value: metrics.conversionsValue || metrics.conversions_value ? Number(metrics.conversionsValue || metrics.conversions_value) : 0,
+        conversion_action_id: conversionActionId,
+      });
+    } catch (error) {
+      console.warn('[transformGeographicResults] Failed to parse result row:', error);
+      // Continue processing other rows
+    }
+  }
+
+  return rows;
 }
 
 async function upsertJobLog(client: SupabaseClient, payload: {
@@ -329,190 +629,6 @@ async function upsertJobLog(client: SupabaseClient, payload: {
 
   if (error) {
     console.error(`Failed to write jobs_log for tenant ${payload.tenantId}:`, error);
-  }
-}
-
-function getCustomerId(meta: Record<string, any> | null): string | null {
-  if (!meta) return null;
-
-  // Try selected_customer_id first
-  if (typeof meta.selected_customer_id === 'string' && meta.selected_customer_id.length > 0) {
-    return meta.selected_customer_id.replace(/-/g, ''); // Remove dashes for API calls
-  }
-
-  // Fall back to customer_id
-  if (typeof meta.customer_id === 'string' && meta.customer_id.length > 0) {
-    return meta.customer_id.replace(/-/g, '');
-  }
-
-  // Fall back to login_customer_id
-  if (typeof meta.login_customer_id === 'string' && meta.login_customer_id.length > 0) {
-    return meta.login_customer_id.replace(/-/g, '');
-  }
-
-  return null;
-}
-
-function formatCustomerIdForDisplay(customerId: string): string {
-  // Format as XXX-XXX-XXXX if it's 10 digits
-  if (/^\d{10}$/.test(customerId)) {
-    return `${customerId.slice(0, 3)}-${customerId.slice(3, 6)}-${customerId.slice(6)}`;
-  }
-  return customerId;
-}
-
-function buildGaqlQuery(customerId: string, startDate: string, endDate: string): string {
-  // Google Ads Query Language (GAQL) query for insights
-  // Fetch metrics grouped by date, campaign, ad group, and ad
-  return `
-    SELECT
-      segments.date,
-      campaign.id,
-      campaign.name,
-      ad_group.id,
-      ad_group.name,
-      ad_group_ad.ad.id,
-      metrics.cost_micros,
-      metrics.impressions,
-      metrics.clicks,
-      metrics.conversions,
-      metrics.value_per_conversion
-    FROM ad_group_ad
-    WHERE segments.date >= '${startDate}' AND segments.date <= '${endDate}'
-    AND campaign.status = 'ENABLED'
-    AND ad_group.status = 'ENABLED'
-    AND ad_group_ad.ad.status = 'ENABLED'
-    ORDER BY segments.date DESC
-  `.trim();
-}
-
-async function fetchGoogleAdsInsights(
-  accessToken: string,
-  customerId: string,
-  startDate: string,
-  endDate: string,
-): Promise<GoogleInsightRow[]> {
-  const developerToken = Deno.env.get('GOOGLE_DEVELOPER_TOKEN');
-  if (!developerToken) {
-    throw new Error('Missing GOOGLE_DEVELOPER_TOKEN environment variable');
-  }
-
-  const query = buildGaqlQuery(customerId, startDate, endDate);
-  const url = `${GOOGLE_ADS_ENDPOINT}/customers/${customerId}/googleAds:searchStream`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'developer-token': developerToken,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ query }),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`Google Ads API error: ${response.status} ${errorBody}`);
-  }
-
-  // Google Ads searchStream returns results in chunks
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new Error('No response body reader available');
-  }
-
-  const decoder = new TextDecoder();
-  const insights: GoogleInsightRow[] = [];
-  let buffer = '';
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // Parse JSON objects from the stream (may contain multiple JSON objects)
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            const chunk = JSON.parse(line);
-            if (chunk.results && Array.isArray(chunk.results)) {
-              for (const result of chunk.results) {
-                const row = parseGoogleAdsResult(result);
-                if (row) {
-                  insights.push(row);
-                }
-              }
-            }
-          } catch (e) {
-            console.warn('[sync-googleads] Failed to parse JSON chunk:', e, line);
-          }
-        }
-      }
-    }
-
-    // Process remaining buffer
-    if (buffer.trim()) {
-      try {
-        const chunk = JSON.parse(buffer);
-        if (chunk.results && Array.isArray(chunk.results)) {
-          for (const result of chunk.results) {
-            const row = parseGoogleAdsResult(result);
-            if (row) {
-              insights.push(row);
-            }
-          }
-        }
-      } catch (e) {
-        console.warn('[sync-googleads] Failed to parse final buffer:', e);
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  return insights;
-}
-
-function parseGoogleAdsResult(result: any): GoogleInsightRow | null {
-  // Extract data from Google Ads API response
-  // Note: This is a simplified parser - adjust based on actual API response structure
-  try {
-    const segments = result.segments || {};
-    const campaign = result.campaign || {};
-    const adGroup = result.ad_group || {};
-    const adGroupAd = result.ad_group_ad || {};
-    const ad = adGroupAd?.ad || {};
-    const metrics = result.metrics || {};
-
-    const date = segments.date;
-    if (!date) {
-      return null; // Skip rows without date
-    }
-
-    // Note: We don't have tenant_id in the result, so we'll set it in processTenant
-    return {
-      tenant_id: '', // Will be set by caller
-      date: date,
-      customer_id: '', // Will be set by caller
-      campaign_id: campaign.id ? String(campaign.id) : null,
-      adgroup_id: adGroup.id ? String(adGroup.id) : null,
-      ad_id: ad.id ? String(ad.id) : null,
-      cost_micros: metrics.cost_micros ? Number(metrics.cost_micros) : null,
-      impressions: metrics.impressions ? Number(metrics.impressions) : null,
-      clicks: metrics.clicks ? Number(metrics.clicks) : null,
-      conversions: metrics.conversions ? Number(metrics.conversions) : null,
-      revenue: metrics.value_per_conversion && metrics.conversions
-        ? Number(metrics.value_per_conversion) * Number(metrics.conversions)
-        : null,
-    };
-  } catch (error) {
-    console.warn('[sync-googleads] Failed to parse result:', error);
-    return null;
   }
 }
 
@@ -544,7 +660,10 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
       );
     }
 
-    // Calculate date range (last 30 days by default, or use sync_start_date from meta)
+    const loginCustomerId = getLoginCustomerId(connection.meta);
+
+    // Calculate date range
+    // Initial sync: last 30 days, subsequent syncs: last 30 days (can be adjusted based on sync_start_date)
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -566,55 +685,44 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
     const endDateStr = endDate.toISOString().slice(0, 10);
 
     console.log(
-      `[sync-googleads] Fetching insights for tenant ${tenantId}, customer ${formatCustomerIdForDisplay(customerId)}, date range: ${startDateStr} to ${endDateStr}`,
+      `[sync-googleads] Fetching geographic insights for tenant ${tenantId}, customer ${formatCustomerIdForDisplay(customerId)}, date range: ${startDateStr} to ${endDateStr}`,
     );
 
-    // Fetch insights from Google Ads API
-    const rawInsights = await fetchGoogleAdsInsights(accessToken, customerId, startDateStr, endDateStr);
+    // Fetch geographic insights from Google Ads API
+    const rawResults = await fetchGeographicInsights(accessToken, customerId, startDateStr, endDateStr, loginCustomerId);
+    console.log(`[sync-googleads] Fetched ${rawResults.length} result rows from API`);
 
-    // Add tenant_id and customer_id to each row
-    const customerIdDisplay = formatCustomerIdForDisplay(customerId);
-    const insights: GoogleInsightRow[] = rawInsights.map((row) => ({
-      ...row,
-      tenant_id: tenantId,
-      customer_id: customerIdDisplay,
-    }));
+    // Fetch country code mapping
+    console.log(`[sync-googleads] Fetching country code mapping`);
+    const countryCodeMap = await fetchGeoTargetConstants(accessToken, customerId, loginCustomerId);
+    console.log(`[sync-googleads] Loaded ${countryCodeMap.size} country mappings`);
 
-    console.log(`[sync-googleads] Fetched ${insights.length} insight rows for tenant ${tenantId}`);
+    // Transform results to database rows
+    const rows = transformGeographicResults(rawResults, tenantId, customerId, countryCodeMap);
+    console.log(`[sync-googleads] Transformed ${rows.length} rows for database`);
 
-    if (insights.length > 0) {
-      // Upsert insights to database
-      const { error: upsertError } = await client.from('google_insights_daily').upsert(insights, {
-        onConflict: 'tenant_id,date,customer_id,campaign_id,adgroup_id,ad_id',
-      });
+    if (rows.length > 0) {
+      // Batch upsert (Supabase has a limit, so we'll do in batches of 1000)
+      const batchSize = 1000;
+      let upserted = 0;
 
-      if (upsertError) {
-        throw new Error(`Failed to upsert insights: ${upsertError.message}`);
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize);
+        
+        const { error: upsertError } = await client
+          .from('google_ads_geographic_daily')
+          .upsert(batch, {
+            onConflict: 'tenant_id,customer_id,date,campaign_id,ad_group_id,country_criterion_id,location_type',
+          });
+
+        if (upsertError) {
+          throw new Error(`Failed to upsert batch ${i / batchSize + 1}: ${upsertError.message}`);
+        }
+        
+        upserted += batch.length;
       }
 
-      // Aggregate KPIs by date
-      const aggregates = aggregateKpis(insights);
-      const kpiRows = aggregates.map((row) => ({
-        tenant_id: tenantId,
-        date: row.date,
-        source: SOURCE,
-        spend: row.spend,
-        clicks: row.clicks,
-        conversions: row.conversions,
-        revenue: row.revenue,
-        aov: row.aov,
-        cos: row.cos,
-        roas: row.roas,
-      }));
-
-      // Upsert aggregated KPIs
-      const { error: kpiError } = await client.from('kpi_daily').upsert(kpiRows, {
-        onConflict: 'tenant_id,date,source',
-      });
-
-      if (kpiError) {
-        throw new Error(`Failed to upsert KPIs: ${kpiError.message}`);
-      }
+      console.log(`[sync-googleads] Upserted ${upserted} rows to google_ads_geographic_daily`);
     }
 
     await upsertJobLog(client, {
@@ -624,7 +732,7 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
       finishedAt: new Date().toISOString(),
     });
 
-    return { tenantId, status: 'succeeded', inserted: insights.length };
+    return { tenantId, status: 'succeeded', inserted: rows.length };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[sync-googleads] Error processing tenant ${tenantId}:`, message);
@@ -689,7 +797,7 @@ serve(async (req) => {
       // Ignore parse errors, use default payload
     }
 
-    // Fetch connections
+    // Fetch connections with access_token_enc and refresh_token_enc
     let query = client
       .from('connections')
       .select('tenant_id, access_token_enc, refresh_token_enc, expires_at, meta')

@@ -127,3 +127,4 @@ if (allRequired && !hasWarnings) {
   console.log('✅ Alla miljövariabler är korrekt konfigurerade!\n');
 }
 
+

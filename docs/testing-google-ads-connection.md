@@ -174,3 +174,4 @@ När kopplingen fungerar kan du:
 2. **Testa reconnect:** Koppla igen och verifiera att det fungerar
 3. **Testa token refresh:** Vänta tills token närmar sig expiration och verifiera att refresh fungerar automatiskt
 
+

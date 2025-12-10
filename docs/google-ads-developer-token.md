@@ -103,3 +103,4 @@ eller testa via integrations-sidan:
 - [Google Ads API Dokumentation](https://developers.google.com/google-ads/api/docs/start)
 - [API Access Requirements](https://developers.google.com/google-ads/api/docs/get-started/dev-token)
 
+

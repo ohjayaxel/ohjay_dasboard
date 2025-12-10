@@ -9,3 +9,4 @@ alter table shopify_daily_sales
 comment on column shopify_daily_sales.new_customer_net_sales is 'Net sales excluding tax from new customers only (is_new_customer = true), used for aMER calculation';
 
 
+

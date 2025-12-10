@@ -125,3 +125,4 @@ if (successfulTransactions.length === 0) {
 - Detta kan vara en optional view för direkt jämförelse
 
 
+

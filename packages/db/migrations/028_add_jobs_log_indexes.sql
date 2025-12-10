@@ -11,3 +11,4 @@ ON jobs_log(tenant_id, source, started_at DESC);
 COMMENT ON INDEX idx_jobs_log_source_status_started IS 'Index for cleanup-stuck-jobs query: find running jobs by source and started_at';
 COMMENT ON INDEX idx_jobs_log_tenant_source_started IS 'Index for job status lookups: find recent jobs for a tenant';
 
+

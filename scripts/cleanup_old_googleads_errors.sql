@@ -30,3 +30,4 @@ WHERE
   source = 'google_ads'
   AND meta->>'customers_error' IS NOT NULL;
 
+

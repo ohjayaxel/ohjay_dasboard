@@ -46,3 +46,4 @@ pnpm tsx scripts/compare_modes.ts --tenant=skinome --from=2025-11-28 --to=2025-1
 4. **Underhållbart**: Ändringar i connection-hantering påverkar automatiskt scripts också
 
 
+

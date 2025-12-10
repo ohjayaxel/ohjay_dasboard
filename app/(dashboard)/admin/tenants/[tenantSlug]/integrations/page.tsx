@@ -794,6 +794,55 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           ))}
         </CardContent>
       </Card>
+
+      {/* Semantic layer / data model info section to explain how
+          marketing spend and aMER are computed across Meta + Google Ads. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg font-semibold">Data model & semantic layer</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              Daily performance metrics (net sales, new customer net sales, marketing spend, aMER) are now powered by a unified semantic layer.
+            </p>
+            <ul className="list-disc list-inside space-y-2 pl-2">
+              <li>
+                <span className="font-medium text-foreground">Marketing spend</span> is aggregated from both Meta Ads and Google Ads:
+                <code className="mx-1 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                  total marketing spend = Meta spend + Google Ads spend
+                </code>
+              </li>
+              <li>
+                <span className="font-medium text-foreground">aMER</span> (adjusted Marketing Efficiency Ratio) is defined as:
+                <code className="mx-1 rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                  new customer net sales ÷ total marketing spend
+                </code>
+              </li>
+              <li>
+                The semantic layer reads from:
+                <ul className="ml-4 mt-1 list-disc space-y-1">
+                  <li>
+                    <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                      v_marketing_spend_daily
+                    </code>{' '}
+                    (cross-channel spend per day)
+                  </li>
+                  <li>
+                    <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
+                      v_daily_metrics
+                    </code>{' '}
+                    (combined sales + marketing metrics per day)
+                  </li>
+                </ul>
+              </li>
+              <li>
+                Calculated metrics (like aMER) are validated against legacy aggregation logic to ensure parity.
+              </li>
+            </ul>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }

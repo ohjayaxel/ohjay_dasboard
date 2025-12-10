@@ -117,3 +117,4 @@ Net Sales (EXCL tax) = subtotalPriceSet - totalTaxSet - refunds (EXCL tax)
 - Kan hantera cancelled orders annorlunda (t.ex. inkludera dem om de har refunds)
 
 
+

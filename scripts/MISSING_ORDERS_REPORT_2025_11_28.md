@@ -197,3 +197,4 @@ The 2 missing orders explain only **-148.48 SEK** of the **897.69 SEK** differen
 For practical business purposes, our calculation method (using `transaction.processedAt` and excluding cancelled orders) provides a more accurate representation of actual revenue per date, even if it doesn't match Shopify Analytics exactly.
 
 
+

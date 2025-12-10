@@ -11,3 +11,4 @@ COMMENT ON COLUMN shopify_daily_sales.new_customer_net_sales IS 'Net sales (excl
 COMMENT ON COLUMN shopify_daily_sales.returning_customer_net_sales IS 'Net sales (excl tax) from returning customers only, mode-dependent';
 COMMENT ON COLUMN shopify_daily_sales.guest_net_sales IS 'Net sales (excl tax) from guest checkouts (no customer_id)';
 
+

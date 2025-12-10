@@ -58,3 +58,4 @@ echo "Key exists: $([ -n "$SUPABASE_SERVICE_ROLE_KEY" ] && echo "Yes" || echo "N
 ```
 
 
+
