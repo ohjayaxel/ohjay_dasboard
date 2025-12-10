@@ -199,8 +199,16 @@ async function decryptAccessToken(payload: unknown): Promise<string | null> {
     );
     return textDecoder.decode(decrypted);
   } catch (error) {
-    console.error('Failed to decrypt Google Ads access token:', error);
-    throw new Error('Unable to decrypt Google Ads access token for tenant.');
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error('Failed to decrypt Google Ads access token:', errorMsg);
+    
+    // Provide helpful error message if decryption fails
+    // This usually means ENCRYPTION_KEY doesn't match the key used to encrypt the token
+    throw new Error(
+      'Unable to decrypt Google Ads access token. This usually means ENCRYPTION_KEY in Edge Function environment ' +
+      'does not match the key used when the token was encrypted. Please re-authenticate Google Ads connection ' +
+      'by disconnecting and reconnecting in the integrations settings.'
+    );
   }
 }
 
@@ -647,7 +655,24 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
 
   try {
     // Get access token (refresh if needed)
-    const accessToken = await getAccessToken(client, connection);
+    let accessToken: string | null = null;
+    try {
+      accessToken = await getAccessToken(client, connection);
+    } catch (decryptError) {
+      const errorMsg = decryptError instanceof Error ? decryptError.message : String(decryptError);
+      console.error(`[sync-googleads] Failed to get access token for tenant ${tenantId}:`, errorMsg);
+      
+      // If decryption fails, provide helpful error
+      if (errorMsg.includes('decrypt') || errorMsg.includes('Unable to decrypt')) {
+        throw new Error(
+          `Unable to decrypt Google Ads access token for tenant ${tenantId}. ` +
+          `This usually means ENCRYPTION_KEY in Edge Function environment does not match the key used to encrypt the token. ` +
+          `Please re-authenticate Google Ads connection by disconnecting and reconnecting in the integrations settings.`
+        );
+      }
+      throw decryptError;
+    }
+    
     if (!accessToken) {
       throw new Error('No access token available. Token may be expired and refresh failed.');
     }

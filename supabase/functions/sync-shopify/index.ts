@@ -461,9 +461,6 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   const totalDiscounts = parseFloat(order.total_discounts || '0');
   const subtotalPrice = parseFloat(order.subtotal_price || '0');
   
-  // Use Shopify-like sales calculation for refunds and discounts
-  const sales = calculateShopifyLikeSalesInline(order);
-  
   // Shopify Gross Sales filtering logic:
   // Include order if:
   // - cancelled_at = null (not cancelled)
@@ -488,21 +485,30 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   let grossSales: number | null = null;
   let netSales: number | null = null;
 
-  if (!shouldExclude) {
+  if (!shouldExclude && totalPrice > 0) {
+    // Use Shopify-like sales calculation for refunds and discounts
+    // Note: This may return zeros if financial_status is invalid, but we'll use total_price as fallback
+    const sales = calculateShopifyLikeSalesInline(order);
+    
     // Gross Sales should ALWAYS be set if order has total_price > 0
     // Don't require line_items - orders can have total_price without line_items being fetched
     // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
     // This matches what user expects: gross_sales should be the same as total_price
-    if (totalPrice > 0) {
-      grossSales = Math.round(totalPrice * 100) / 100;
-      
-      // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
-      // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
-      // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
-      // In our system, sales.discounts is POSITIVE, so we subtract it
-      // File does NOT subtract tax from net sales
-      netSales = Math.round((grossSales - sales.discounts - sales.returns) * 100) / 100;
-    }
+    grossSales = Math.round(totalPrice * 100) / 100;
+    
+    // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
+    // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
+    // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
+    // In our system, sales.discounts is POSITIVE, so we subtract it
+    // File does NOT subtract tax from net sales
+    
+    // If calculateShopifyLikeSalesInline returned zeros (e.g., due to invalid financial_status),
+    // use totalPrice as a fallback for net_sales calculation
+    // This ensures we capture sales even if financial_status is null or invalid
+    const effectiveDiscounts = sales.discounts > 0 ? sales.discounts : totalDiscounts;
+    const effectiveReturns = sales.returns > 0 ? sales.returns : 0;
+    
+    netSales = Math.round((grossSales - effectiveDiscounts - effectiveReturns) * 100) / 100;
   }
 
   // Extract country from billing_address (preferred) or shipping_address
