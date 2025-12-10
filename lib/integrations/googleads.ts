@@ -236,21 +236,22 @@ export async function handleGoogleAdsOAuthCallback(options: {
       console.warn('[Google Ads OAuth] Missing GOOGLE_DEVELOPER_TOKEN - customer accounts cannot be fetched');
     } else {
       try {
-        // Get list of accessible customers
-        // Note: Google Ads API v16 uses gRPC transcoding
-        // Endpoint: POST /v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers
-        const customersRes = await fetch(
-          `https://googleads.googleapis.com/v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers`,
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${tokenResponse.access_token}`,
-              'developer-token': GOOGLE_DEVELOPER_TOKEN,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({}),
-          },
-        );
+        // Note: Google Ads API v16 ListAccessibleCustomers requires gRPC client library
+        // REST transcoding is not available for this method
+        // We'll skip automatic customer fetching and let user manually enter customer ID
+        // If loginCustomerId was provided, use that as the default
+        if (customerId) {
+          accessibleCustomers.push({
+            id: customerId,
+            name: customerId,
+          });
+        }
+        
+        // Set error message to inform user they need to manually enter customer ID
+        customersError = 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID below.';
+        
+        // Skip the API call since REST transcoding doesn't work for this method
+        const customersRes = { ok: false, status: 501 };
 
         if (customersRes.ok) {
           const customersData = await customersRes.json();
@@ -461,10 +462,17 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
     };
   }
 
+  // Note: Google Ads API v16 ListAccessibleCustomers requires gRPC client library
+  // REST transcoding is not available for this method
+  // Return empty list with helpful error message
+  return {
+    customers: [],
+    error: 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID in the connection settings.',
+  };
+  
+  // Commented out - REST transcoding doesn't work for ListAccessibleCustomers
+  /*
   try {
-    // Get list of accessible customers
-    // Note: Google Ads API v16 uses gRPC transcoding
-    // Endpoint: POST /v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers
     const customersRes = await fetch(
       `https://googleads.googleapis.com/v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers`,
       {

@@ -1832,15 +1832,27 @@ export async function updateGoogleAdsSelectedCustomer(formData: FormData) {
     throw new Error('No Google Ads connection found for this tenant.')
   }
 
+  // Allow manual customer ID entry - validate format but don't require it to be in accessible_customers list
+  // Customer ID format: XXX-XXX-XXXX (with or without dashes)
+  const customerIdNormalized = result.data.customerId.replace(/-/g, '');
+  if (customerIdNormalized.length < 10 || customerIdNormalized.length > 10 || !/^\d+$/.test(customerIdNormalized)) {
+    throw new Error('Invalid customer ID format. Should be 10 digits (e.g., 123-456-7890 or 1234567890).');
+  }
+
+  // Format customer ID with dashes: XXX-XXX-XXXX
+  const formattedCustomerId = `${customerIdNormalized.slice(0, 3)}-${customerIdNormalized.slice(3, 6)}-${customerIdNormalized.slice(6)}`;
+  
+  // Try to get customer name if we have accessible_customers list, otherwise use ID as name
   const customers = Array.isArray((connection.meta as any)?.accessible_customers)
     ? ((connection.meta as any).accessible_customers as Array<{ id: string; name: string }>)
     : []
 
-  const selectedCustomer = customers.find((c) => c.id === result.data.customerId)
+  const selectedCustomer = customers.find((c) => {
+    const cIdNormalized = c.id.replace(/-/g, '');
+    return cIdNormalized === customerIdNormalized;
+  });
 
-  if (!selectedCustomer) {
-    throw new Error('Selected customer ID is not in the list of accessible customers.')
-  }
+  const customerName = selectedCustomer?.name ?? formattedCustomerId;
 
   const baseMeta =
     connection.meta && typeof connection.meta === 'object' && connection.meta !== null
@@ -1852,9 +1864,9 @@ export async function updateGoogleAdsSelectedCustomer(formData: FormData) {
     .update({
       meta: {
         ...baseMeta,
-        selected_customer_id: result.data.customerId,
-        customer_id: result.data.customerId, // Also update customer_id for backwards compatibility
-        customer_name: selectedCustomer.name,
+        selected_customer_id: formattedCustomerId,
+        customer_id: formattedCustomerId, // Also update customer_id for backwards compatibility
+        customer_name: customerName,
       },
       updated_at: new Date().toISOString(),
     })
