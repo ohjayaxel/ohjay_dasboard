@@ -224,27 +224,13 @@ export async function handleGoogleAdsOAuthCallback(options: {
     ? new Date(Date.now() + Number(tokenResponse.expires_in) * 1000).toISOString()
     : null;
 
-  // Set up customer data - automatic fetching is disabled
-  // Users must manually enter their Customer ID in connection settings
-  let accessibleCustomers: GoogleAdsCustomer[] = [];
+  // OAuth callback does NOT automatically fetch customers
+  // Users must click "Detect Google Ads accounts" button to trigger automatic detection
   let customerId = options.loginCustomerId ?? null;
   let customerName: string | null = null;
-  let customersError: string | null = null;
 
-  if (tokenResponse.access_token) {
-    if (customerId) {
-      customerName = customerId;
-      accessibleCustomers.push({
-        id: customerId,
-        name: customerId,
-      });
-    } else {
-      customersError =
-        'No Customer ID provided. Please manually enter your Google Ads Customer ID in the connection settings after connecting.';
-    }
-  } else {
-    customersError =
-      'No access token available. Cannot set up customer account.';
+  if (tokenResponse.access_token && customerId) {
+    customerName = customerId;
   }
 
   await upsertConnection(options.tenantId, {
@@ -256,12 +242,12 @@ export async function handleGoogleAdsOAuthCallback(options: {
       token_type: tokenResponse.token_type,
       login_customer_id: customerId,
       customer_id: customerId, // Also save as customer_id for backwards compatibility
-      selected_customer_id: customerId, // The selected customer for syncing
+      selected_customer_id: customerId || null, // May be set via loginCustomerId parameter
       customer_name: customerName,
-      accessible_customers: accessibleCustomers,
-      customers_error:
-        customersError ??
-        'Please manually enter your Google Ads Customer ID in the connection settings.',
+      accessible_customers: [], // Empty initially - will be populated when user clicks "Detect accounts"
+      customers_error: customerId
+        ? null
+        : 'No account selected yet. Click "Detect Google Ads accounts" to load accessible accounts.',
     },
   });
 }
@@ -338,16 +324,18 @@ export type GoogleAdsCustomer = {
   descriptiveName?: string;
 };
 
+export type FetchAccessibleCustomersResult = {
+  customers: GoogleAdsCustomer[];
+  error?: string | null;
+};
+
 /**
  * Fetch all accessible Google Ads customers for a tenant.
  * Returns list of customers accessible from the MCC account.
  * 
- * Uses Google Ads API v21 REST transcoding for ListAccessibleCustomers.
+ * Uses Google Ads API v21 REST endpoint: GET /v21/customers:listAccessibleCustomers
  */
-export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promise<{
-  customers: GoogleAdsCustomer[];
-  error?: string;
-}> {
+export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promise<FetchAccessibleCustomersResult> {
   const accessToken = await getGoogleAdsAccessToken(tenantId);
 
   if (!accessToken || !GOOGLE_DEVELOPER_TOKEN) {
@@ -358,26 +346,37 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
   }
 
   try {
-    // Google Ads API v21: POST to customers:listAccessibleCustomers
-    // This endpoint uses REST transcoding from gRPC
+    // Google Ads API v21: GET to customers:listAccessibleCustomers
+    // REST endpoint for listing accessible customers
     const response = await fetch(
       `${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`,
       {
-        method: 'POST',
+        method: 'GET',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'developer-token': GOOGLE_DEVELOPER_TOKEN,
-          'Content-Type': 'application/json',
         },
-        body: JSON.stringify({}),
       },
     );
 
     if (!response.ok) {
       const errorBody = await response.text();
+      // Clean up HTML errors and extract useful message
+      let cleanError = `Failed to fetch accessible customers: ${response.status}`;
+      if (errorBody && !errorBody.includes('<!DOCTYPE')) {
+        try {
+          const errorJson = JSON.parse(errorBody);
+          cleanError = errorJson.message || errorJson.error?.message || cleanError;
+        } catch {
+          // If not JSON, use first 200 chars if not HTML
+          if (errorBody.length < 500 && !errorBody.includes('<html')) {
+            cleanError = `${cleanError} - ${errorBody.substring(0, 200)}`;
+          }
+        }
+      }
       return {
         customers: [],
-        error: `Failed to fetch accessible customers: ${response.status} ${errorBody}`,
+        error: cleanError,
       };
     }
 

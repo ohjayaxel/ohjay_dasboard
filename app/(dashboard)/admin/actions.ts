@@ -8,7 +8,7 @@ import { requirePlatformAdmin, getCurrentUser } from '@/lib/auth/current-user'
 import { Roles } from '@/lib/auth/roles'
 import { getMetaAuthorizeUrl } from '@/lib/integrations/meta'
 import { getShopifyAuthorizeUrl, connectShopifyCustomApp, validateCustomAppToken, getShopifyAccessToken } from '@/lib/integrations/shopify'
-import { getGoogleAdsAuthorizeUrl } from '@/lib/integrations/googleads'
+import { getGoogleAdsAuthorizeUrl, refreshGoogleAdsTokenIfNeeded } from '@/lib/integrations/googleads'
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { logger, withRequestContext } from '@/lib/logger'
 import { triggerSyncJobForTenant } from '@/lib/jobs/scheduler'
@@ -1895,9 +1895,6 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
 
   const { tenantId, tenantSlug } = result.data
 
-  // Note: Automatic customer fetching is disabled. Manual Customer ID entry required.
-  // This function now just returns a helpful message to the user
-  // Users must manually enter their Customer ID in the connection settings
   const client = getSupabaseServiceClient()
 
   const { data: connection, error: connectionError } = await client
@@ -1915,19 +1912,64 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
     throw new Error('No Google Ads connection found for this tenant.')
   }
 
+  // Refresh token if needed before making API call
+  try {
+    await refreshGoogleAdsTokenIfNeeded(tenantId)
+  } catch (tokenError) {
+    console.error('[refreshGoogleAdsCustomers] Token refresh failed:', tokenError)
+    // Continue anyway - might still work with current token
+  }
+
+  // Fetch accessible customers using v21 API
+  const { fetchAccessibleGoogleAdsCustomers } = await import('@/lib/integrations/googleads')
+  const fetchResult = await fetchAccessibleGoogleAdsCustomers(tenantId)
+
   const baseMeta =
     connection.meta && typeof connection.meta === 'object' && connection.meta !== null
       ? (connection.meta as Record<string, unknown>)
       : {}
 
-  // Update error message to inform user about manual entry requirement
+  let updatedMeta: Record<string, unknown> = { ...baseMeta }
+  let statusMessage = 'google-ads-customers-refreshed'
+  let customersError: string | null = null
+
+  if (fetchResult.error) {
+    // API call failed - set error message
+    customersError = fetchResult.error
+    updatedMeta.customers_error = customersError
+    updatedMeta.accessible_customers = []
+    statusMessage = 'google-ads-customers-refresh-error'
+  } else if (fetchResult.customers.length === 0) {
+    // No customers found
+    customersError = 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.'
+    updatedMeta.customers_error = customersError
+    updatedMeta.accessible_customers = []
+  } else if (fetchResult.customers.length === 1) {
+    // Exactly one customer - auto-select it
+    const singleCustomer = fetchResult.customers[0]
+    updatedMeta.accessible_customers = fetchResult.customers
+    updatedMeta.selected_customer_id = singleCustomer.id
+    updatedMeta.customer_id = singleCustomer.id // Backwards compatibility
+    updatedMeta.customer_name = singleCustomer.name
+    updatedMeta.customers_error = null
+  } else {
+    // Multiple customers - save list, don't auto-select
+    updatedMeta.accessible_customers = fetchResult.customers
+    customersError = 'Multiple Google Ads accounts found. Please select one in the integration settings.'
+    updatedMeta.customers_error = customersError
+    // If we had a previously selected customer that's still in the list, keep it
+    const previousSelected = typeof baseMeta.selected_customer_id === 'string' ? baseMeta.selected_customer_id : null
+    if (previousSelected && fetchResult.customers.find((c) => c.id === previousSelected)) {
+      updatedMeta.selected_customer_id = previousSelected
+    } else {
+      updatedMeta.selected_customer_id = null
+    }
+  }
+
   const { error: updateError } = await client
     .from('connections')
     .update({
-      meta: {
-        ...baseMeta,
-        customers_error: 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID below.',
-      },
+      meta: updatedMeta,
       updated_at: new Date().toISOString(),
     })
     .eq('id', connection.id)
@@ -1940,7 +1982,7 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
 
   // Redirect must be outside try-catch block to work properly in Next.js server actions
   redirect(
-    `/admin/tenants/${tenantSlug}/integrations?status=google-ads-customers-info&source=google_ads`,
+    `/admin/tenants/${tenantSlug}/integrations?status=${statusMessage}&source=google_ads${customersError ? `&error=${encodeURIComponent(customersError)}` : ''}`,
   )
 }
 
