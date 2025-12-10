@@ -1,0 +1,21 @@
+# Reference CSV for 2025-11-30
+# Format: dimension,dimension_value,orders,gross_sales,net_sales,discounts,tax,returns
+# 
+# Dimension types:
+#   - customer_type: NEW, RETURNING, GUEST
+#   - country_customer_type: COUNTRY|CUSTOMER_TYPE (e.g., SE|NEW)
+#   - product_country_customer_type: PRODUCT_KEY|COUNTRY|CUSTOMER_TYPE
+#   - total: ALL
+
+# Customer Type Totals
+customer_type,NEW,42,52581.02,41030.57,0,0,0
+customer_type,RETURNING,119,93026.80,81679.77,0,0,0
+
+# Country + Customer Type (examples - add more as needed)
+# country_customer_type,SE,NEW,34,54084.80,44407.70,0,0,0
+# country_customer_type,SE,RETURNING,111,108033.80,96910.17,0,0,0
+
+# Total
+total,ALL,161,145607.82,122710.34,0,0,0
+
+

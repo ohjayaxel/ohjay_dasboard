@@ -433,18 +433,18 @@ export function ShopifyConnect({
       )}
 
       {status === 'connected' ? (
-        <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
           <Button onClick={handleConnect} disabled={isPending}>
             Reconnect Shopify
-          </Button>
-          <Button
-            variant="outline"
-            onClick={handleDisconnect}
+        </Button>
+        <Button
+          variant="outline"
+          onClick={handleDisconnect}
             disabled={isPending}
-          >
-            Disconnect
-          </Button>
-        </div>
+        >
+          Disconnect
+        </Button>
+      </div>
       ) : (
         <Tabs value={connectionMethod} onValueChange={(value) => setConnectionMethod(value as 'oauth' | 'custom_app')}>
           <TabsList className="grid w-full grid-cols-2">

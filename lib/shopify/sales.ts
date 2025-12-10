@@ -1,9 +1,8 @@
 /**
  * @fileoverview
- * Sales calculation functions that support two modes:
+ * Sales calculation functions for Shopify Analytics Mode.
  * 
- * 1. **Shopify Analytics Mode**: Matches Shopify Analytics reports as closely as possible
- * 2. **Financial Mode**: Financially correct model reflecting actual cash flow
+ * **Shopify Analytics Mode**: Matches Shopify Analytics reports as closely as possible.
  * 
  * These functions calculate Gross Sales, Net Sales, Discounts, and Returns:
  * - Gross Sales = product selling price × ordered quantity (line items only)
@@ -17,10 +16,10 @@
 /**
  * Sales calculation mode
  * 
- * - "shopify": Matches Shopify Analytics (uses order.createdAt, includes cancelled orders)
- * - "financial": Financially correct (uses transaction.processedAt, excludes cancelled orders)
+ * Currently only 'shopify' mode is supported (matches Shopify Analytics).
+ * Financial mode has been removed as it's not being used.
  */
-export type SalesMode = 'shopify' | 'financial';
+export type SalesMode = 'shopify';
 
 /**
  * Shopify Order structure (REST API-like)
@@ -84,6 +83,23 @@ export type SalesResult = {
 };
 
 /**
+ * Customer type classification for Shopify Mode
+ */
+export type CustomerTypeShopifyMode = 'FIRST_TIME' | 'RETURNING' | 'GUEST' | 'UNKNOWN';
+
+/**
+ * Order customer classification map
+ * Maps order_id -> customer type classification
+ */
+export type OrderCustomerClassification = {
+  shopifyMode: CustomerTypeShopifyMode;
+  // DEPRECATED: financialMode kept for backward compatibility but not used
+  financialMode?: 'NEW' | 'RETURNING' | 'GUEST' | 'UNKNOWN';
+  customerCreatedAt?: string | null; // For Shopify Mode calculation
+  isFirstOrderForCustomer: boolean;
+};
+
+/**
  * Daily sales aggregation row
  */
 export type DailySalesRow = {
@@ -94,7 +110,9 @@ export type DailySalesRow = {
   discountsExclTax?: number;
   ordersCount: number;
   currency?: string;
-  newCustomerNetSales?: number; // Net sales from new customers only
+  newCustomerNetSales?: number; // Net sales from new/first-time customers only (mode-dependent)
+  returningCustomerNetSales?: number; // Net sales from returning customers only (mode-dependent)
+  guestNetSales?: number; // Net sales from guest checkouts only
 };
 
 /**
@@ -146,125 +164,60 @@ function toLocalDate(dateString: string, timezone: string = 'Europe/Stockholm'):
 }
 
 /**
- * Determines the event date for an order based on the sales mode
+ * Determines the event date for an order
  * 
  * Shopify mode: Uses order.createdAt (when order was created)
- * Financial mode: Uses transaction.processedAt (when payment was processed)
  */
 function getOrderEventDate(
   order: ShopifyOrderWithTransactions,
-  mode: SalesMode,
+  mode: SalesMode, // Always 'shopify' now
   timezone: string = 'Europe/Stockholm',
 ): string | null {
-  if (mode === 'shopify') {
-    // Shopify mode: Use order.createdAt
-    return toLocalDate(order.created_at, timezone);
-  } else {
-    // Financial mode: Use transaction.processedAt from first successful SALE
-    if (!order.transactions || order.transactions.length === 0) {
-      return null; // No transaction date available
-    }
-    
-    const successfulSale = order.transactions.find(
-      (txn) =>
-        (txn.kind === 'SALE' || txn.kind === 'CAPTURE') &&
-        txn.status === 'SUCCESS' &&
-        txn.processedAt,
-    );
-    
-    if (!successfulSale?.processedAt) {
-      return null; // No successful sale transaction
-    }
-    
-    return toLocalDate(successfulSale.processedAt, timezone);
-  }
+  // Shopify mode: Use order.createdAt
+  return toLocalDate(order.created_at, timezone);
+  
+  // DEPRECATED: Financial mode removed - was using transaction.processedAt
 }
 
 /**
- * Determines the event date for a refund based on the sales mode
+ * Determines the event date for a refund
  * 
  * Shopify mode: Uses refund.createdAt
- * Financial mode: Uses refund.processedAt (from REFUND transaction)
  */
 function getRefundEventDate(
   refund: ShopifyOrder['refunds'][number],
   order: ShopifyOrderWithTransactions,
-  mode: SalesMode,
+  mode: SalesMode, // Always 'shopify' now
   timezone: string = 'Europe/Stockholm',
 ): string {
-  if (mode === 'shopify') {
-    // Shopify mode: Use refund.createdAt
-    return toLocalDate(refund.created_at, timezone);
-  } else {
-    // Financial mode: Try to find REFUND transaction with processedAt
-    // Fallback to refund.createdAt if not found
-    const refundTransaction = order.transactions?.find(
-      (txn) =>
-        txn.kind === 'REFUND' &&
-        txn.status === 'SUCCESS' &&
-        txn.processedAt,
-    );
-    
-    if (refundTransaction?.processedAt) {
-      return toLocalDate(refundTransaction.processedAt, timezone);
-    }
-    
-    // Fallback to refund.createdAt
-    return toLocalDate(refund.created_at, timezone);
-  }
+  // Shopify mode: Use refund.createdAt
+  return toLocalDate(refund.created_at, timezone);
+  
+  // DEPRECATED: Financial mode removed - was using refund transaction processedAt
 }
 
 /**
- * Filters orders based on the sales mode
+ * Filters orders for Shopify Mode
  * 
  * Shopify mode:
  * - Excludes test orders
- * - Includes cancelled orders
- * - Includes orders without successful transactions
- * 
- * Financial mode:
- * - Excludes test orders (implicit - should not have valid financial_status)
- * - Excludes cancelled orders
- * - Excludes orders without successful transactions
+ * - Includes cancelled orders (they're handled via refunds in Shopify)
+ * - Includes orders without successful transactions (only checks financial_status)
  */
 function shouldIncludeOrder(
   order: ShopifyOrderWithTransactions,
-  mode: SalesMode,
+  mode: SalesMode, // Always 'shopify' now
 ): boolean {
   // Always exclude test orders (if test flag exists)
   if ('test' in order && (order as any).test === true) {
     return false;
   }
   
-  if (mode === 'shopify') {
-    // Shopify mode: Include orders with valid financial status
-    // Includes cancelled orders (they're handled via refunds in Shopify)
-    return VALID_FINANCIAL_STATUSES.has(order.financial_status);
-  } else {
-    // Financial mode: Exclude cancelled orders
-    if (order.cancelled_at) {
-      return false;
-    }
-    
-    // Financial mode: Only include orders with successful transactions
-    if (!order.transactions || order.transactions.length === 0) {
-      return false;
-    }
-    
-    const hasSuccessfulSale = order.transactions.some(
-      (txn) =>
-        (txn.kind === 'SALE' || txn.kind === 'CAPTURE') &&
-        txn.status === 'SUCCESS' &&
-        txn.processedAt,
-    );
-    
-    if (!hasSuccessfulSale) {
-      return false;
-    }
-    
-    // Also check financial status
-    return VALID_FINANCIAL_STATUSES.has(order.financial_status);
-  }
+  // Shopify mode: Include orders with valid financial status
+  // Includes cancelled orders (they're handled via refunds in Shopify)
+  return VALID_FINANCIAL_STATUSES.has(order.financial_status);
+  
+  // DEPRECATED: Financial mode removed - was excluding cancelled orders and requiring successful transactions
 }
 
 /**
@@ -316,7 +269,7 @@ function calculateRefundLineItemSubtotal(
  * @param order - Shopify order object
  * @returns Per-order sales breakdown
  */
-function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
+export function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
   // Calculate Gross Sales: sum of (price × quantity) for all line items (INCL tax)
   // This is for reference/display purposes only
   let grossSales = 0;
@@ -464,33 +417,33 @@ export function calculateShopifyLikeSales(orders: ShopifyOrder[]): SalesResult {
 }
 
 /**
- * Calculates daily sales aggregation from orders based on the specified mode.
+ * Calculates daily sales aggregation from orders using Shopify Mode.
  * 
  * **Shopify Mode:**
  * - Sales: Uses order.createdAt for date grouping
  * - Refunds: Uses refund.createdAt for date grouping
- * - Includes cancelled orders
- * - Includes orders without successful transactions
- * 
- * **Financial Mode:**
- * - Sales: Uses transaction.processedAt (first successful SALE) for date grouping
- * - Refunds: Uses refund.processedAt (REFUND transaction) for date grouping
- * - Excludes cancelled orders
- * - Excludes orders without successful transactions
+ * - Includes cancelled orders (handled via refunds)
+ * - Includes orders without successful transactions (only checks financial_status)
  * 
  * @param orders - Array of Shopify orders with transaction details
- * @param mode - Sales mode ('shopify' or 'financial')
+ * @param mode - Sales mode (always 'shopify' now)
  * @param timezone - Timezone for date conversion (default: 'Europe/Stockholm')
- * @param orderCustomerMap - Optional map of order_id -> is_new_customer boolean for calculating newCustomerNetSales
+ * @param orderCustomerMap - Optional map of order_id -> is_new_customer boolean for calculating newCustomerNetSales (legacy)
+ * @param orderCustomerClassification - Map of order_id -> customer classification (preferred)
+ * @param reportingPeriodStart - YYYY-MM-DD format for Shopify Mode customer.createdAt check
+ * @param reportingPeriodEnd - YYYY-MM-DD format for Shopify Mode customer.createdAt check
  * @returns Array of daily sales rows
  */
 export function calculateDailySales(
   orders: ShopifyOrderWithTransactions[],
-  mode: SalesMode,
+  mode: SalesMode, // Always 'shopify' now
   timezone: string = 'Europe/Stockholm',
-  orderCustomerMap?: Map<string, boolean>,
+  orderCustomerMap?: Map<string, boolean>, // Legacy parameter for backward compatibility
+  orderCustomerClassification?: Map<string, OrderCustomerClassification>, // New parameter with full classification
+  reportingPeriodStart?: string, // YYYY-MM-DD format for Shopify Mode customer.createdAt check
+  reportingPeriodEnd?: string, // YYYY-MM-DD format for Shopify Mode customer.createdAt check
 ): DailySalesRow[] {
-  // Filter orders based on mode
+  // Filter orders (Shopify mode only now)
   const includedOrders = orders.filter((order) => shouldIncludeOrder(order, mode));
   
   // Map to aggregate daily data
@@ -500,11 +453,11 @@ export function calculateDailySales(
     // Calculate order sales breakdown
     const orderSales = calculateOrderSales(order);
     
-    // Get event date for this order based on mode
+    // Get event date for this order (always uses order.createdAt for Shopify mode)
     const orderDate = getOrderEventDate(order, mode, timezone);
     
     if (!orderDate) {
-      // Skip if no valid event date (e.g., no transaction in financial mode)
+      // Skip if no valid event date (should not happen in Shopify mode, but kept for safety)
       continue;
     }
     
@@ -520,6 +473,8 @@ export function calculateDailySales(
         ordersCount: 0,
         currency: order.currency,
         newCustomerNetSales: 0,
+        returningCustomerNetSales: 0,
+        guestNetSales: 0,
       };
       dailyMap.set(orderDate, dailyRow);
     }
@@ -576,9 +531,34 @@ export function calculateDailySales(
     dailyRow.discountsExclTax! += discountsExclTax;
     dailyRow.ordersCount += 1;
     
-    // Add to new customer net sales if this is a new customer order
-    if (orderCustomerMap && orderCustomerMap.get(order.id) === true) {
+    // Classify customer type (Shopify Mode only now)
+    let customerType: CustomerTypeShopifyMode = 'UNKNOWN';
+    let isGuest = false;
+    
+    if (orderCustomerClassification) {
+      const classification = orderCustomerClassification.get(order.id.toString());
+      if (classification) {
+        customerType = classification.shopifyMode;
+        isGuest = classification.shopifyMode === 'GUEST';
+      }
+    } else if (orderCustomerMap) {
+      // Legacy mode: fallback to boolean map
+      const isNewCustomer = orderCustomerMap.get(order.id.toString()) === true;
+      customerType = isNewCustomer ? 'FIRST_TIME' : 'RETURNING';
+    }
+    
+    // Add to appropriate customer type net sales bucket
+    if (isGuest || customerType === 'GUEST') {
+      dailyRow.guestNetSales! += netSalesExclTaxBeforeRefunds;
+    } else if (customerType === 'FIRST_TIME') {
       dailyRow.newCustomerNetSales! += netSalesExclTaxBeforeRefunds;
+    } else if (customerType === 'RETURNING') {
+      dailyRow.returningCustomerNetSales! += netSalesExclTaxBeforeRefunds;
+    } else {
+      // Unknown - for backward compatibility, use legacy logic if available
+      if (orderCustomerMap && orderCustomerMap.get(order.id.toString()) === true) {
+        dailyRow.newCustomerNetSales! += netSalesExclTaxBeforeRefunds;
+      }
     }
     
     // Process refunds separately (they hit on their own date)
@@ -615,6 +595,8 @@ export function calculateDailySales(
               ordersCount: 0,
               currency: order.currency,
               newCustomerNetSales: 0,
+              returningCustomerNetSales: 0,
+              guestNetSales: 0,
             };
             dailyMap.set(refundDate, refundDailyRow);
           }
@@ -624,9 +606,18 @@ export function calculateDailySales(
           refundDailyRow.netSalesExclTax -= refundAmountExclTax;
           refundDailyRow.refundsExclTax! += refundAmountExclTax;
           
-          // Subtract from new customer net sales if this is a new customer order
-          if (orderCustomerMap && orderCustomerMap.get(order.id) === true) {
+          // Subtract from appropriate customer type net sales bucket
+          if (isGuest || customerType === 'GUEST') {
+            refundDailyRow.guestNetSales! -= refundAmountExclTax;
+          } else if (customerType === 'FIRST_TIME') {
             refundDailyRow.newCustomerNetSales! -= refundAmountExclTax;
+          } else if (customerType === 'RETURNING') {
+            refundDailyRow.returningCustomerNetSales! -= refundAmountExclTax;
+          } else {
+            // Legacy fallback
+            if (orderCustomerMap && orderCustomerMap.get(order.id.toString()) === true) {
+              refundDailyRow.newCustomerNetSales! -= refundAmountExclTax;
+            }
           }
         }
       }
@@ -641,6 +632,8 @@ export function calculateDailySales(
     refundsExclTax: roundTo2Decimals(row.refundsExclTax || 0),
     discountsExclTax: roundTo2Decimals(row.discountsExclTax || 0),
     newCustomerNetSales: roundTo2Decimals(row.newCustomerNetSales || 0),
+    returningCustomerNetSales: roundTo2Decimals(row.returningCustomerNetSales || 0),
+    guestNetSales: roundTo2Decimals(row.guestNetSales || 0),
   }));
   
   // Sort by date

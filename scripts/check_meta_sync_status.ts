@@ -1,131 +1,208 @@
 #!/usr/bin/env -S tsx
 
-import { createClient } from '@supabase/supabase-js';
+/**
+ * Check Meta sync status for a tenant
+ */
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
-const supabase = createClient(supabaseUrl, supabaseKey, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
+// Load environment variables
+function loadEnvFile() {
+  // First try to source from shell script if it exists (preferred for local.prod.sh)
+  const shellScripts = [
+    'env/local.prod.sh',
+    'env/local.dev.sh',
+  ];
 
-async function check() {
-  console.log('=== Meta Sync Status Check ===\n');
-
-  // 1. Check if Meta connection exists
-  const { data: connections, error: connError } = await supabase
-    .from('connections')
-    .select('tenant_id, status, updated_at, meta')
-    .eq('source', 'meta');
-
-  if (connError) {
-    console.error('Error fetching connections:', connError);
-    return;
-  }
-
-  console.log(`Total Meta connections: ${connections?.length || 0}`);
-  if (connections && connections.length > 0) {
-    connections.forEach((conn) => {
-      console.log(`  - Tenant: ${conn.tenant_id}`);
-      console.log(`    Status: ${conn.status}`);
-      console.log(`    Updated: ${conn.updated_at}`);
-      const meta = conn.meta as Record<string, unknown> | null;
-      if (meta) {
-        console.log(`    Last synced: ${meta.last_synced_at || 'never'}`);
-        console.log(`    Sync range: ${JSON.stringify(meta.last_synced_range || 'none')}`);
-      }
-      console.log('');
-    });
-  }
-
-  // 2. Check jobs_log for recent Meta sync attempts
-  const { data: jobs, error: jobsError } = await supabase
-    .from('jobs_log')
-    .select('*')
-    .eq('source', 'meta')
-    .order('started_at', { ascending: false })
-    .limit(10);
-
-  if (jobsError) {
-    console.error('Error fetching jobs_log:', jobsError);
-  } else {
-    console.log('=== Recent Meta Sync Jobs (last 10) ===\n');
-    if (!jobs || jobs.length === 0) {
-      console.log('No sync jobs found in jobs_log\n');
-    } else {
-      jobs.forEach((job, idx) => {
-        console.log(`Job ${idx + 1}:`);
-        console.log(`  Tenant: ${job.tenant_id}`);
-        console.log(`  Status: ${job.status}`);
-        console.log(`  Started: ${job.started_at}`);
-        console.log(`  Finished: ${job.finished_at || 'N/A'}`);
-        if (job.error) {
-          console.log(`  Error: ${job.error}`);
+  for (const script of shellScripts) {
+    try {
+      const content = readFileSync(script, 'utf-8');
+      // Parse export statements from shell script
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        // Only process lines starting with 'export '
+        if (!trimmed.startsWith('export ')) continue;
+        // Match: export KEY="value" or export KEY=value
+        const match = trimmed.match(/^export\s+([^=]+)=["']?([^"']+)["']?/);
+        if (match) {
+          const key = match[1].trim();
+          let value = match[2].trim();
+          // Remove surrounding quotes if still present
+          if ((value.startsWith('"') && value.endsWith('"')) || 
+              (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+          }
+          process.env[key] = value;
         }
-        console.log('');
-      });
+      }
+      console.log(`[check_meta_sync] Loaded env from ${script}`);
+      return;
+    } catch (error) {
+      // File doesn't exist, continue
     }
   }
 
-  // 3. Check latest Meta data date
-  const { data: latestData, error: dataError } = await supabase
-    .from('meta_insights_daily')
-    .select('date')
-    .order('date', { ascending: false })
-    .limit(1)
-    .single();
-
-  if (dataError) {
-    console.error('Error fetching latest Meta data:', dataError);
-  } else {
-    console.log('=== Latest Meta Data ===');
-    console.log(`Latest date: ${latestData?.date || 'No data found'}`);
-    
-    if (latestData?.date) {
-      const latestDate = new Date(latestData.date);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const daysDiff = Math.floor((today.getTime() - latestDate.getTime()) / (1000 * 60 * 60 * 24));
-      console.log(`Days behind: ${daysDiff}`);
+  // Fallback to .env.local
+  try {
+    const content = readFileSync('.env.local', 'utf-8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = trimmed.match(/^([^=]+)=["']?([^"']+)["']?/);
+      if (match) {
+        const key = match[1].trim();
+        let value = match[2].trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || 
+            (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        process.env[key] = value;
+      }
     }
-    console.log('');
-  }
-
-  // 4. Check pg_cron jobs (if accessible)
-  console.log('=== pg_cron Status ===');
-  console.log('To check pg_cron jobs, run this SQL in Supabase SQL Editor:');
-  console.log('  SELECT * FROM cron.job WHERE jobname = \'meta-sync-hourly\';');
-  console.log('  SELECT * FROM cron.job_run_details WHERE jobid = (SELECT jobid FROM cron.job WHERE jobname = \'meta-sync-hourly\') ORDER BY start_time DESC LIMIT 10;');
-  console.log('');
-  
-  console.log('=== Recommendations ===');
-  if (!jobs || jobs.length === 0) {
-    console.log('⚠️  No sync jobs found. Meta sync may not be running automatically.');
-    console.log('   - Check if pg_cron is configured (see SQL above)');
-    console.log('   - Or run: curl -X GET "https://your-domain.com/api/jobs/sync?source=meta"');
-  } else {
-    const lastJob = jobs[0];
-    const lastJobDate = new Date(lastJob.started_at);
-    const now = new Date();
-    const hoursSinceLastJob = (now.getTime() - lastJobDate.getTime()) / (1000 * 60 * 60);
-    
-    if (hoursSinceLastJob > 2) {
-      console.log(`⚠️  Last sync was ${hoursSinceLastJob.toFixed(1)} hours ago.`);
-      console.log('   - Meta sync may not be running automatically');
-      console.log('   - Check pg_cron configuration');
-    } else {
-      console.log(`✅ Last sync was ${hoursSinceLastJob.toFixed(1)} hours ago.`);
-    }
-    
-    if (lastJob.status === 'failed') {
-      console.log('❌ Last sync job failed. Check error message above.');
-    } else if (lastJob.status === 'running') {
-      console.log('⚠️  Last sync job is still running. This may indicate a timeout or hang.');
-    } else if (lastJob.status === 'succeeded') {
-      console.log('✅ Last sync job succeeded.');
-    }
+    console.log(`[check_meta_sync] Loaded env from .env.local`);
+  } catch (error) {
+    // File doesn't exist
   }
 }
 
-check().catch(console.error);
+loadEnvFile()
 
+// Ensure required vars are set
+if (!process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_URL) {
+  process.env.NEXT_PUBLIC_SUPABASE_URL = process.env.SUPABASE_URL
+}
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+  process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+}
+
+import { getSupabaseServiceClient } from '@/lib/supabase/server'
+
+async function main() {
+  const tenantSlug = process.argv[2] || 'skinome'
+
+  const supabase = getSupabaseServiceClient()
+
+  // Get tenant ID
+  const { data: tenant, error: tenantError } = await supabase
+    .from('tenants')
+    .select('id, name, slug')
+    .eq('slug', tenantSlug)
+    .single()
+
+  if (tenantError || !tenant) {
+    console.error(`❌ Tenant not found: ${tenantSlug}`)
+    process.exit(1)
+  }
+
+  console.log(`\n📊 Meta Sync Status for: ${tenant.name} (${tenant.slug})`)
+  console.log(`   Tenant ID: ${tenant.id}\n`)
+
+  // Get Meta connection
+  const { data: connection, error: connectionError } = await supabase
+    .from('connections')
+    .select('status, meta, updated_at')
+    .eq('tenant_id', tenant.id)
+    .eq('source', 'meta')
+    .single()
+
+  if (connectionError || !connection) {
+    console.error(`❌ Meta connection not found for tenant`)
+    process.exit(1)
+  }
+
+  console.log(`🔗 Connection Status: ${connection.status}`)
+  console.log(`   Last Updated: ${connection.updated_at}`)
+
+  const meta = connection.meta as Record<string, unknown> | null
+  if (meta) {
+    if (meta.last_synced_at) {
+      console.log(`   Last Synced: ${meta.last_synced_at}`)
+    }
+    if (meta.last_synced_range) {
+      const range = meta.last_synced_range as { since?: string; until?: string }
+      console.log(`   Last Synced Range: ${range.since} to ${range.until}`)
+    }
+    if (meta.last_backfill_at) {
+      console.log(`   Last Backfill: ${meta.last_backfill_at}`)
+    }
+  }
+
+  // Get recent job logs
+  const { data: jobs, error: jobsError } = await supabase
+    .from('jobs_log')
+    .select('id, status, started_at, finished_at, error')
+    .eq('tenant_id', tenant.id)
+    .eq('source', 'meta')
+    .order('started_at', { ascending: false })
+    .limit(10)
+
+  if (jobsError) {
+    console.error(`❌ Failed to fetch job logs: ${jobsError.message}`)
+    process.exit(1)
+  }
+
+  console.log(`\n📝 Recent Job Logs (last 10):`)
+  if (!jobs || jobs.length === 0) {
+    console.log(`   No job logs found`)
+  } else {
+    for (const job of jobs) {
+      const duration = job.finished_at
+        ? `${Math.round((new Date(job.finished_at).getTime() - new Date(job.started_at).getTime()) / 1000)}s`
+        : 'running...'
+      const status = job.status === 'succeeded' ? '✅' : job.status === 'failed' ? '❌' : '⏳'
+      console.log(`   ${status} ${job.status.toUpperCase()} - ${job.started_at} (${duration})`)
+      if (job.error) {
+        console.log(`      Error: ${job.error}`)
+      }
+    }
+  }
+
+  // Check latest data in kpi_daily
+  const { data: latestKpi, error: kpiError } = await supabase
+    .from('kpi_daily')
+    .select('date, spend')
+    .eq('tenant_id', tenant.id)
+    .eq('source', 'meta')
+    .order('date', { ascending: false })
+    .limit(1)
+    .single()
+
+  if (kpiError) {
+    console.log(`\n⚠️  Could not fetch latest KPI data: ${kpiError.message}`)
+  } else if (latestKpi) {
+    console.log(`\n💰 Latest Marketing Spend Data:`)
+    console.log(`   Date: ${latestKpi.date}`)
+    console.log(`   Spend: ${latestKpi.spend ? latestKpi.spend.toLocaleString('sv-SE', { style: 'currency', currency: 'SEK' }) : 'N/A'}`)
+  } else {
+    console.log(`\n⚠️  No marketing spend data found`)
+  }
+
+  // Check data from 2025-12-04 onwards
+  const { data: recentKpi, error: recentKpiError } = await supabase
+    .from('kpi_daily')
+    .select('date, spend')
+    .eq('tenant_id', tenant.id)
+    .eq('source', 'meta')
+    .gte('date', '2025-12-04')
+    .order('date', { ascending: true })
+
+  if (recentKpiError) {
+    console.log(`\n⚠️  Could not fetch recent KPI data: ${recentKpiError.message}`)
+  } else if (recentKpi && recentKpi.length > 0) {
+    console.log(`\n📅 Marketing Spend from 2025-12-04 onwards:`)
+    for (const row of recentKpi) {
+      console.log(`   ${row.date}: ${row.spend ? row.spend.toLocaleString('sv-SE', { style: 'currency', currency: 'SEK' }) : '0 kr'}`)
+    }
+  } else {
+    console.log(`\n❌ No marketing spend data found from 2025-12-04 onwards`)
+  }
+
+  console.log(`\n`)
+}
+
+main().catch((error) => {
+  console.error('Error:', error)
+  process.exit(1)
+})

@@ -164,9 +164,15 @@ export function mapRefundToReturnTransactions(
         continue;
       }
 
-      // Use original price from the line item (before discount)
-      const originalPrice = parseMoneyAmount(originalLineItem.originalUnitPriceSet.shopMoney.amount);
-      const refundValue = roundTo2Decimals(originalPrice * refundLineItem.quantity);
+      // NEW METHOD: Use subtotalSet (EXCL tax) if available, otherwise fallback to original price
+      let refundValue: number;
+      if (refundLineItem.subtotalSet) {
+        refundValue = roundTo2Decimals(parseMoneyAmount(refundLineItem.subtotalSet.shopMoney.amount));
+      } else {
+        // Fallback: use original price * quantity
+        const originalPrice = parseMoneyAmount(originalLineItem.originalUnitPriceSet.shopMoney.amount);
+        refundValue = roundTo2Decimals(originalPrice * refundLineItem.quantity);
+      }
 
       transactions.push({
         shopify_order_id: order.id,

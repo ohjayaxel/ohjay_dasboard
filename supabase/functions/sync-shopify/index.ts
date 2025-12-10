@@ -296,6 +296,10 @@ function normalizeShopDomain(domain: string): string {
 /**
  * Shopify-like sales calculation (mirrors lib/shopify/sales.ts logic)
  * Edge Functions can't import from lib/, so we duplicate the logic here
+ * 
+ * NEW CALCULATION METHOD (matching Shopify Analytics):
+ * - Net Sales EXCL tax = subtotal_price - total_tax - refunds (EXCL tax)
+ * - Uses Shopify's own fields as source of truth
  */
 function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
   grossSales: number;
@@ -317,8 +321,18 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
     return { grossSales: 0, discounts: 0, returns: 0, netSales: 0 };
   }
 
+  // Calculate Gross Sales: sum of (price × quantity) for all line items (INCL tax)
+  // This is for reference/display purposes only
+  let grossSales = 0;
+  for (const lineItem of order.line_items || []) {
+    const price = parseFloat(lineItem.price || '0');
+    const quantity = lineItem.quantity || 0;
+    grossSales += price * quantity;
+  }
+  grossSales = Math.round(grossSales * 100) / 100;
+
   // Calculate Discounts: prefer order.total_discounts if available (includes both line-item and order-level discounts)
-  // Otherwise, fallback to summing line_items[].total_discount
+  // This is for reference/display purposes only (INCL tax)
   let discounts = 0;
   if (order.total_discounts !== undefined && order.total_discounts !== null) {
     discounts = parseFloat(order.total_discounts || '0');
@@ -330,46 +344,13 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
   }
   discounts = Math.round(discounts * 100) / 100;
 
-  // Calculate Returns: sum of refund_line_items values
-  let returns = 0;
-  if (order.refunds && order.refunds.length > 0) {
-    for (const refund of order.refunds) {
-      for (const refundLineItem of refund.refund_line_items || []) {
-        let subtotal = 0;
-        
-        // If subtotal is provided, use it
-        if (refundLineItem.subtotal) {
-          subtotal = parseFloat(refundLineItem.subtotal);
-        } else if (refundLineItem.line_item?.price) {
-          // Use line_item.price × quantity
-          subtotal = parseFloat(refundLineItem.line_item.price) * refundLineItem.quantity;
-        } else {
-          // Fallback: find original line item
-          const originalLineItem = (order.line_items || []).find(
-            (item) => item.id.toString() === refundLineItem.line_item_id.toString(),
-          );
-          if (originalLineItem) {
-            subtotal = parseFloat(originalLineItem.price) * refundLineItem.quantity;
-          }
-        }
-        
-        returns += subtotal;
-      }
-    }
-  }
-  returns = Math.round(returns * 100) / 100;
-
-  // Shopify Gross Sales calculation:
-  // Gross Sales = SUM(line_item.price × line_item.quantity)
-  // This is the product price × quantity, BEFORE discounts, tax, shipping
-  let grossSales = 0;
-  for (const lineItem of order.line_items || []) {
-    const price = parseFloat(lineItem.price || '0');
-    const quantity = lineItem.quantity || 0;
-    grossSales += price * quantity;
-  }
-  grossSales = Math.round(grossSales * 100) / 100;
-
+  // NEW METHOD: Calculate Net Sales EXCL tax using Shopify's fields
+  // subtotal_price = ordersumma efter rabatter, INKL moms
+  // total_tax = total moms på ordern
+  const subtotalPrice = order.subtotal_price
+    ? parseFloat(order.subtotal_price)
+    : 0;
+  
   const totalTax = (() => {
     if (order.total_tax === null || order.total_tax === undefined || order.total_tax === '') {
       return 0;
@@ -377,15 +358,39 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
     const tax = parseFloat(order.total_tax);
     return Number.isFinite(tax) ? tax : 0;
   })();
+  
+  // Net Sales EXCL tax BEFORE refunds
+  // = subtotalPrice - totalTax
+  const netSalesExclTaxBeforeRefunds = Math.round((subtotalPrice - totalTax) * 100) / 100;
 
-  const grossExcludingTax = Math.round((grossSales - totalTax) * 100) / 100;
+  // Calculate Returns EXCL tax: use refund_line_items[].subtotal if available
+  // subtotal field contains refund amount EXCL tax
+  let returns = 0;
+  if (order.refunds && order.refunds.length > 0) {
+    for (const refund of order.refunds) {
+      for (const refundLineItem of refund.refund_line_items || []) {
+        // Prefer subtotal field (EXCL tax), otherwise calculate from price
+        if (refundLineItem.subtotal) {
+          returns += parseFloat(refundLineItem.subtotal);
+        } else if (refundLineItem.line_item?.price) {
+          // Use line_item.price × quantity
+          returns += parseFloat(refundLineItem.line_item.price) * refundLineItem.quantity;
+        } else {
+          // Fallback: find original line item
+          const originalLineItem = (order.line_items || []).find(
+            (item) => item.id.toString() === refundLineItem.line_item_id.toString(),
+          );
+          if (originalLineItem) {
+            returns += parseFloat(originalLineItem.price) * refundLineItem.quantity;
+          }
+        }
+      }
+    }
+  }
+  returns = Math.round(returns * 100) / 100;
 
-  // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
-  // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
-  // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
-  // In our system, discounts is POSITIVE, so we subtract it
-  // File does NOT subtract tax from net sales
-  const netSales = Math.round((grossExcludingTax - discounts - returns) * 100) / 100;
+  // Net Sales EXCL tax AFTER refunds
+  const netSales = Math.round((netSalesExclTaxBeforeRefunds - returns) * 100) / 100;
 
   return { grossSales, discounts, returns, netSales };
 }
@@ -666,7 +671,14 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
   const tenantId = connection.tenant_id;
   const startedAt = new Date().toISOString();
 
-  await upsertJobLog(client, { tenantId, status: 'running', startedAt });
+  let jobLogInserted = false;
+  try {
+    await upsertJobLog(client, { tenantId, status: 'running', startedAt });
+    jobLogInserted = true;
+  } catch (logError) {
+    console.error(`Failed to insert initial job log for tenant ${tenantId}:`, logError);
+    // Continue anyway - we'll try to update it later
+  }
 
   try {
     // Get access token
@@ -812,6 +824,13 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       if (kpiError) {
         throw new Error(kpiError.message);
       }
+
+      // Note: Daily sales aggregation by mode (shopify/financial) requires GraphQL data
+      // (line items, refunds with subtotalSet, etc.) which is not available via REST API.
+      // This is handled by:
+      // 1. Backfill script (scripts/shopify_backfill.ts) - calculates both modes
+      // 2. Webhook handler (app/api/webhooks/shopify/route.ts) - uses GraphQL for new orders
+      // Edge function focuses on order-level data sync via REST API.
     }
 
     if (backfillSince) {
@@ -858,6 +877,37 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
     });
 
     return { tenantId, status: 'failed', error: message };
+  } finally {
+    // Ensure job log is always updated, even if the try-catch above fails
+    if (jobLogInserted) {
+      try {
+        // Check if job log was already updated (has finished_at)
+        const { data: existingJob } = await client
+          .from('jobs_log')
+          .select('finished_at')
+          .eq('tenant_id', tenantId)
+          .eq('source', SOURCE)
+          .eq('status', 'running')
+          .eq('started_at', startedAt)
+          .order('started_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        // Only update if still in running status
+        if (existingJob && !existingJob.finished_at) {
+          await upsertJobLog(client, {
+            tenantId,
+            status: 'failed',
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            error: 'Job execution was interrupted or failed unexpectedly',
+          });
+        }
+      } catch (finalError) {
+        // Last resort - log but don't throw
+        console.error(`Failed to update job log in finally block for tenant ${tenantId}:`, finalError);
+      }
+    }
   }
 }
 

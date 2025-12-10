@@ -1895,7 +1895,7 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
 
   const { tenantId, tenantSlug } = result.data
 
-  // Note: Automatic customer fetching is not available for Google Ads API v16
+  // Note: Automatic customer fetching is disabled. Manual Customer ID entry required.
   // This function now just returns a helpful message to the user
   // Users must manually enter their Customer ID in the connection settings
   const client = getSupabaseServiceClient()
