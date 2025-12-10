@@ -511,7 +511,8 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
           // GAQL query to fetch non-manager child accounts
           const query = `SELECT customer_client.client_customer, customer_client.descriptive_name, customer_client.manager FROM customer_client WHERE customer_client.status = 'ENABLED' AND customer_client.manager = false LIMIT 100`;
 
-          const searchResponse = await fetch(
+          // Try primary endpoint first: /googleAds:searchStream
+          let searchResponse = await fetch(
             `${GOOGLE_REPORTING_ENDPOINT}/${managerId}/googleAds:searchStream`,
             {
               method: 'POST',
@@ -525,10 +526,29 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
             },
           );
 
+          // If primary endpoint fails, try alternative format
+          if (!searchResponse.ok) {
+            console.log(`[Google Ads] Primary endpoint failed (${searchResponse.status}), trying alternative format...`);
+            searchResponse = await fetch(
+              `${GOOGLE_REPORTING_ENDPOINT}/${managerId}:googleAds:searchStream`,
+              {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  'developer-token': GOOGLE_DEVELOPER_TOKEN,
+                  'login-customer-id': managerId,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ query }),
+              },
+            );
+          }
+
           if (searchResponse.ok) {
             // Parse streaming JSON response - handle multiple formats
             // searchStream can return: JSON array, newline-delimited JSON, or single object
             const responseText = await searchResponse.text();
+            console.log(`[Google Ads] Response from manager ${managerId}: ${responseText.length} bytes`);
             
             // Try parsing as JSON array first (v21 sometimes returns arrays)
             let results: any[] = [];
@@ -536,6 +556,7 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
               const parsed = JSON.parse(responseText);
               if (Array.isArray(parsed)) {
                 // Array of result objects
+                console.log(`[Google Ads] Parsed as JSON array with ${parsed.length} items`);
                 for (const item of parsed) {
                   if (item.results && Array.isArray(item.results)) {
                     results.push(...item.results);
@@ -545,14 +566,17 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
                 }
               } else if (parsed.results && Array.isArray(parsed.results)) {
                 // Single object with results array
+                console.log(`[Google Ads] Parsed as object with results array (${parsed.results.length} items)`);
                 results = parsed.results;
               } else {
                 // Single result object
+                console.log(`[Google Ads] Parsed as single object`);
                 results = [parsed];
               }
             } catch {
               // Fallback: parse as newline-delimited JSON
               const lines = responseText.trim().split('\n').filter(line => line.trim());
+              console.log(`[Google Ads] Parsing as newline-delimited JSON (${lines.length} lines)`);
               for (const line of lines) {
                 try {
                   const parsed = JSON.parse(line);
@@ -567,6 +591,8 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
               }
             }
 
+            console.log(`[Google Ads] Processing ${results.length} result(s) from manager ${managerId}`);
+
             // Process all results to extract customer clients
             for (const result of results) {
               try {
@@ -575,7 +601,20 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
                 // - { customerClient: {...} } - direct format
                 const client = result.customerClient || (result.results?.[0]?.customerClient);
 
-                if (client && client.manager === false) {
+                if (!client) {
+                  console.log(`[Google Ads] Skipping result - no customerClient field:`, JSON.stringify(result).substring(0, 200));
+                  continue;
+                }
+
+                // Log client structure for debugging
+                console.log(`[Google Ads] Processing client:`, {
+                  hasClientCustomer: !!client.clientCustomer,
+                  clientCustomerType: typeof client.clientCustomer,
+                  manager: client.manager,
+                  descriptiveName: client.descriptiveName,
+                });
+
+                if (client.manager === false) {
                   const clientCustomer = client.clientCustomer;
                   // Extract ID from "customers/1234567890" format
                   let clientId = '';
@@ -589,7 +628,7 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
                   }
 
                   if (clientId) {
-                    console.log(`[Google Ads] Found child account from manager ${managerId}:`, {
+                    console.log(`[Google Ads] ✅ Found child account from manager ${managerId}:`, {
                       id: clientId,
                       descriptiveName: client.descriptiveName,
                       manager: client.manager,
@@ -600,7 +639,11 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
                       name: client.descriptiveName || clientId,
                       descriptiveName: client.descriptiveName,
                     });
+                  } else {
+                    console.warn(`[Google Ads] ⚠️  Could not extract client ID from:`, JSON.stringify(clientCustomer));
                   }
+                } else {
+                  console.log(`[Google Ads] Skipping client - is manager: ${client.manager}`);
                 }
               } catch (parseError) {
                 // Skip invalid result entries
@@ -610,7 +653,8 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
             }
           } else {
             const errorText = await searchResponse.text();
-            console.warn(`[Google Ads] Failed to fetch clients for manager ${managerId}: ${searchResponse.status} ${errorText}`);
+            console.error(`[Google Ads] ❌ Failed to fetch clients for manager ${managerId}: ${searchResponse.status}`);
+            console.error(`[Google Ads] Error response: ${errorText.substring(0, 1000)}`);
           }
         } catch (error) {
           console.warn(`[Google Ads] Error fetching clients for manager ${managerId}:`, error);
