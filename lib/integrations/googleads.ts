@@ -235,114 +235,19 @@ export async function handleGoogleAdsOAuthCallback(options: {
       customersError = 'GOOGLE_DEVELOPER_TOKEN is not configured. Cannot fetch customer accounts without developer token.';
       console.warn('[Google Ads OAuth] Missing GOOGLE_DEVELOPER_TOKEN - customer accounts cannot be fetched');
     } else {
-      try {
-        // Note: Google Ads API v16 ListAccessibleCustomers requires gRPC client library
-        // REST transcoding is not available for this method
-        // We'll skip automatic customer fetching and let user manually enter customer ID
-        // If loginCustomerId was provided, use that as the default
-        if (customerId) {
-          accessibleCustomers.push({
-            id: customerId,
-            name: customerId,
-          });
-        }
-        
-        // Set error message to inform user they need to manually enter customer ID
-        customersError = 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID below.';
-        
-        // Skip the API call since REST transcoding doesn't work for this method
-        const customersRes = { ok: false, status: 501 };
-
-        if (customersRes.ok) {
-          const customersData = await customersRes.json();
-          const resourceNames = customersData.resourceNames || [];
-
-          if (resourceNames.length === 0) {
-            customersError = 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.';
-          }
-
-          // Fetch details for each customer
-          for (const resourceName of resourceNames) {
-            const extractedCustomerId = resourceName.replace('customers/', '');
-
-            try {
-              const customerRes = await fetch(
-                `${GOOGLE_REPORTING_ENDPOINT}/${extractedCustomerId}`,
-                {
-                  method: 'GET',
-                  headers: {
-                    Authorization: `Bearer ${tokenResponse.access_token}`,
-                    'developer-token': GOOGLE_DEVELOPER_TOKEN,
-                  },
-                },
-              );
-
-              let customerData: any = null;
-              if (customerRes.ok) {
-                try {
-                  customerData = await customerRes.json();
-                  const customer = customerData.customer;
-
-                  accessibleCustomers.push({
-                    id: extractedCustomerId,
-                    name: customer?.descriptiveName || customer?.companyName || extractedCustomerId,
-                    descriptiveName: customer?.descriptiveName,
-                  });
-
-                  // Use first customer as default if no loginCustomerId was provided
-                  if (!customerId && extractedCustomerId) {
-                    customerId = extractedCustomerId;
-                    if (customer?.descriptiveName) {
-                      customerName = customer.descriptiveName;
-                    }
-                  }
-                } catch (parseError) {
-                  console.warn(`[Google Ads OAuth] Failed to parse customer ${extractedCustomerId} response:`, parseError);
-                  accessibleCustomers.push({
-                    id: extractedCustomerId,
-                    name: extractedCustomerId,
-                  });
-
-                  if (!customerId && extractedCustomerId) {
-                    customerId = extractedCustomerId;
-                  }
-                }
-              } else {
-                // If we can't fetch details, still add the customer ID
-                const errorText = await customerRes.text();
-                console.warn(`[Google Ads OAuth] Failed to fetch customer ${extractedCustomerId} details: ${customerRes.status} ${errorText}`);
-                accessibleCustomers.push({
-                  id: extractedCustomerId,
-                  name: extractedCustomerId,
-                });
-
-                // Use first customer as default if no loginCustomerId was provided
-                if (!customerId && extractedCustomerId) {
-                  customerId = extractedCustomerId;
-                }
-              }
-            } catch (error) {
-              // If individual customer fetch fails, still add the ID
-              console.warn(`[Google Ads OAuth] Error fetching customer ${extractedCustomerId}:`, error);
-              accessibleCustomers.push({
-                id: extractedCustomerId,
-                name: extractedCustomerId,
-              });
-
-              if (!customerId && extractedCustomerId) {
-                customerId = extractedCustomerId;
-              }
-            }
-          }
-        } else {
-          const errorBody = await customersRes.text();
-          customersError = `Failed to fetch accessible customers: ${customersRes.status} ${errorBody}`;
-          console.error('[Google Ads OAuth] Failed to fetch accessible customers:', customersRes.status, errorBody);
-        }
-      } catch (error) {
-        customersError = error instanceof Error ? error.message : 'Unknown error fetching customers';
-        console.error('[Google Ads OAuth] Exception while fetching customers:', error);
+      // Note: Google Ads API v16 ListAccessibleCustomers requires gRPC client library
+      // REST transcoding is not available for this method
+      // We'll skip automatic customer fetching and let user manually enter customer ID
+      // If loginCustomerId was provided, use that as the default
+      if (customerId) {
+        accessibleCustomers.push({
+          id: customerId,
+          name: customerId,
+        });
       }
+      
+      // Set error message to inform user they need to manually enter customer ID
+      customersError = 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID below.';
     }
   } else {
     customersError = 'No access token available. Cannot fetch customer accounts.';
