@@ -517,6 +517,35 @@ LIMIT 10000
 }
 
 /**
+ * Build GAQL query for conversion_action data.
+ * 
+ * This query fetches conversion_action per date, campaign, ad_group, and country.
+ * Note: segments.conversion_action cannot be used with clicks, cost_micros, or impressions,
+ * so we query it separately and merge with geographic data.
+ */
+function buildConversionActionQuery(startDate: string, endDate: string): string {
+  return `
+SELECT
+  segments.date,
+  customer.id,
+  campaign.id,
+  ad_group.id,
+  geographic_view.country_criterion_id,
+  geographic_view.location_type,
+  segments.conversion_action,
+  metrics.conversions,
+  metrics.conversions_value
+FROM geographic_view
+WHERE segments.date >= '${startDate}' AND segments.date <= '${endDate}'
+  AND campaign.status != 'REMOVED'
+  AND ad_group.status != 'REMOVED'
+  AND metrics.conversions > 0
+ORDER BY segments.date DESC, campaign.id, ad_group.id, geographic_view.country_criterion_id
+LIMIT 10000
+  `.trim();
+}
+
+/**
  * Build GAQL query for geo_target_constant lookup.
  * 
  * Fetches country code mappings for all countries.
