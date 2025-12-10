@@ -257,6 +257,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           case 'google-ads-customer-updated':
             return 'Google Ads customer selection saved.'
           case 'google-ads-customers-refreshed':
+        case 'google-ads-customers-info':
             return 'Google Ads customers refreshed successfully.'
           case 'google-ads-customers-refresh-error':
             return error ? `Failed to refresh customers: ${error}` : 'Failed to refresh customers.'
