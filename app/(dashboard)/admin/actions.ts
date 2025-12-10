@@ -1883,9 +1883,13 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
 
   const { tenantId, tenantSlug } = result.data
 
+  let refreshError: string | null = null
+
   try {
     const { fetchAccessibleGoogleAdsCustomers } = await import('@/lib/integrations/googleads')
     const { customers, error } = await fetchAccessibleGoogleAdsCustomers(tenantId)
+
+    refreshError = error || null
 
     const client = getSupabaseServiceClient()
 
@@ -1915,7 +1919,7 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
         meta: {
           ...baseMeta,
           accessible_customers: customers,
-          customers_error: error || null,
+          customers_error: refreshError,
         },
         updated_at: new Date().toISOString(),
       })
@@ -1926,14 +1930,26 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
     }
 
     await revalidateTenantViews(tenantId, tenantSlug)
-
-    redirect(
-      `/admin/tenants/${tenantSlug}/integrations?status=${error ? 'google-ads-customers-refresh-error' : 'google-ads-customers-refreshed'}&source=google_ads${error ? `&error=${encodeURIComponent(error)}` : ''}`,
-    )
   } catch (error) {
-    throw new Error(
-      `Failed to refresh Google Ads customers: ${error instanceof Error ? error.message : String(error)}`,
+    logger.error(
+      {
+        route: 'admin.google_ads',
+        action: 'refresh_customers',
+        tenantId,
+        tenantSlug,
+        error_message: error instanceof Error ? error.message : String(error),
+      },
+      'Failed to refresh Google Ads customers',
+    )
+    // Redirect with error - redirect must be outside try-catch to work in Next.js
+    redirect(
+      `/admin/tenants/${tenantSlug}/integrations?status=google-ads-customers-refresh-error&source=google_ads&error=${encodeURIComponent(error instanceof Error ? error.message : String(error))}`,
     )
   }
+
+  // Redirect must be outside try-catch block to work properly in Next.js server actions
+  redirect(
+    `/admin/tenants/${tenantSlug}/integrations?status=${refreshError ? 'google-ads-customers-refresh-error' : 'google-ads-customers-refreshed'}&source=google_ads${refreshError ? `&error=${encodeURIComponent(refreshError)}` : ''}`,
+  )
 }
 
