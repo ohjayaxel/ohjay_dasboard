@@ -1895,73 +1895,52 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
 
   const { tenantId, tenantSlug } = result.data
 
-  let refreshError: string | null = null
+  // Note: Automatic customer fetching is not available for Google Ads API v16
+  // This function now just returns a helpful message to the user
+  // Users must manually enter their Customer ID in the connection settings
+  const client = getSupabaseServiceClient()
 
-  try {
-    const { fetchAccessibleGoogleAdsCustomers } = await import('@/lib/integrations/googleads')
-    const { customers, error } = await fetchAccessibleGoogleAdsCustomers(tenantId)
+  const { data: connection, error: connectionError } = await client
+    .from('connections')
+    .select('id, meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', 'google_ads')
+    .maybeSingle()
 
-    refreshError = error || null
-
-    const client = getSupabaseServiceClient()
-
-    const { data: connection, error: connectionError } = await client
-      .from('connections')
-      .select('id, meta')
-      .eq('tenant_id', tenantId)
-      .eq('source', 'google_ads')
-      .maybeSingle()
-
-    if (connectionError) {
-      throw new Error(`Failed to load Google Ads connection: ${connectionError.message}`)
-    }
-
-    if (!connection) {
-      throw new Error('No Google Ads connection found for this tenant.')
-    }
-
-    const baseMeta =
-      connection.meta && typeof connection.meta === 'object' && connection.meta !== null
-        ? (connection.meta as Record<string, unknown>)
-        : {}
-
-    const { error: updateError } = await client
-      .from('connections')
-      .update({
-        meta: {
-          ...baseMeta,
-          accessible_customers: customers,
-          customers_error: refreshError,
-        },
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', connection.id)
-
-    if (updateError) {
-      throw new Error(`Failed to update customers: ${updateError.message}`)
-    }
-
-    await revalidateTenantViews(tenantId, tenantSlug)
-  } catch (error) {
-    logger.error(
-      {
-        route: 'admin.google_ads',
-        action: 'refresh_customers',
-        tenantId,
-        tenantSlug,
-        error_message: error instanceof Error ? error.message : String(error),
-      },
-      'Failed to refresh Google Ads customers',
-    )
-    // Redirect with error - redirect must be outside try-catch to work in Next.js
-    redirect(
-      `/admin/tenants/${tenantSlug}/integrations?status=google-ads-customers-refresh-error&source=google_ads&error=${encodeURIComponent(error instanceof Error ? error.message : String(error))}`,
-    )
+  if (connectionError) {
+    throw new Error(`Failed to load Google Ads connection: ${connectionError.message}`)
   }
+
+  if (!connection) {
+    throw new Error('No Google Ads connection found for this tenant.')
+  }
+
+  const baseMeta =
+    connection.meta && typeof connection.meta === 'object' && connection.meta !== null
+      ? (connection.meta as Record<string, unknown>)
+      : {}
+
+  // Update error message to inform user about manual entry requirement
+  const { error: updateError } = await client
+    .from('connections')
+    .update({
+      meta: {
+        ...baseMeta,
+        customers_error: 'Automatic customer fetching requires gRPC client library. Please manually enter your Google Ads Customer ID below.',
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', connection.id)
+
+  if (updateError) {
+    throw new Error(`Failed to update connection: ${updateError.message}`)
+  }
+
+  await revalidateTenantViews(tenantId, tenantSlug)
 
   // Redirect must be outside try-catch block to work properly in Next.js server actions
   redirect(
-    `/admin/tenants/${tenantSlug}/integrations?status=${refreshError ? 'google-ads-customers-refresh-error' : 'google-ads-customers-refreshed'}&source=google_ads${refreshError ? `&error=${encodeURIComponent(refreshError)}` : ''}`,
+    `/admin/tenants/${tenantSlug}/integrations?status=google-ads-customers-info&source=google_ads`,
   )
 }
 
