@@ -224,15 +224,70 @@ export async function handleGoogleAdsOAuthCallback(options: {
     ? new Date(Date.now() + Number(tokenResponse.expires_in) * 1000).toISOString()
     : null;
 
-  // OAuth callback does NOT automatically fetch customers
-  // Users must click "Detect Google Ads accounts" button to trigger automatic detection
-  let customerId = options.loginCustomerId ?? null;
-  let customerName: string | null = null;
+  // After OAuth, automatically fetch accessible customers
+  // This improves UX by detecting accounts immediately instead of requiring manual click
+  let accessibleCustomers: GoogleAdsCustomer[] = [];
+  let customersError: string | null = null;
+  let selectedCustomerId: string | null = options.loginCustomerId ?? null;
+  let selectedCustomerName: string | null = null;
+  let loginCustomerId: string | null = options.loginCustomerId ?? null;
 
-  if (tokenResponse.access_token && customerId) {
-    customerName = customerId;
+  // If we have a real access token (not mock), try to fetch customers automatically
+  if (tokenResponse.access_token && !tokenResponse.access_token.startsWith('mock-')) {
+    try {
+      // Temporarily save connection to enable fetchAccessibleGoogleAdsCustomers to get token
+      await upsertConnection(options.tenantId, {
+        status: 'connected',
+        accessToken: tokenResponse.access_token,
+        refreshToken: tokenResponse.refresh_token ?? null,
+        expiresAt,
+        meta: {
+          token_type: tokenResponse.token_type,
+          login_customer_id: loginCustomerId,
+        },
+      });
+
+      // Fetch accessible customers
+      const fetchResult = await fetchAccessibleGoogleAdsCustomers(options.tenantId);
+
+      if (fetchResult.error) {
+        customersError = fetchResult.error;
+      } else {
+        accessibleCustomers = fetchResult.customers;
+
+        // Auto-select if only one customer found
+        if (accessibleCustomers.length === 1) {
+          selectedCustomerId = accessibleCustomers[0].id;
+          selectedCustomerName = accessibleCustomers[0].name;
+        } else if (accessibleCustomers.length > 1) {
+          // Multiple customers - don't auto-select, user must choose
+          customersError = 'Multiple Google Ads accounts found. Please select one in the integration settings.';
+          // If loginCustomerId was provided and matches one of the accessible customers, select it
+          if (loginCustomerId) {
+            const matchingCustomer = accessibleCustomers.find(c => c.id === loginCustomerId || c.id.replace(/-/g, '') === loginCustomerId.replace(/-/g, ''));
+            if (matchingCustomer) {
+              selectedCustomerId = matchingCustomer.id;
+              selectedCustomerName = matchingCustomer.name;
+              customersError = null; // Clear error if we found a match
+            }
+          }
+        } else {
+          // No customers found
+          customersError = 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.';
+        }
+      }
+    } catch (error) {
+      // If automatic detection fails, log but don't fail the OAuth callback
+      // User can manually trigger detection later
+      console.error('[Google Ads] Automatic account detection failed during OAuth callback:', error);
+      customersError = 'Failed to automatically detect accounts. Please click "Detect Google Ads accounts" to try again.';
+    }
+  } else {
+    // Mock token or no token - set appropriate error message
+    customersError = 'Using mock tokens. Real account detection requires valid OAuth credentials.';
   }
 
+  // Final connection save with all customer information
   await upsertConnection(options.tenantId, {
     status: 'connected',
     accessToken: tokenResponse.access_token,
@@ -240,14 +295,12 @@ export async function handleGoogleAdsOAuthCallback(options: {
     expiresAt,
     meta: {
       token_type: tokenResponse.token_type,
-      login_customer_id: customerId,
-      customer_id: customerId, // Also save as customer_id for backwards compatibility
-      selected_customer_id: customerId || null, // May be set via loginCustomerId parameter
-      customer_name: customerName,
-      accessible_customers: [], // Empty initially - will be populated when user clicks "Detect accounts"
-      customers_error: customerId
-        ? null
-        : 'No account selected yet. Click "Detect Google Ads accounts" to load accessible accounts.',
+      login_customer_id: loginCustomerId,
+      customer_id: selectedCustomerId, // Also save as customer_id for backwards compatibility
+      selected_customer_id: selectedCustomerId,
+      customer_name: selectedCustomerName,
+      accessible_customers: accessibleCustomers,
+      customers_error: customersError,
     },
   });
 }
@@ -318,6 +371,7 @@ export async function getGoogleAdsAccessToken(tenantId: string): Promise<string 
   return decryptSecret(connection.access_token_enc);
 }
 
+// Types must be defined before handleGoogleAdsOAuthCallback uses them
 export type GoogleAdsCustomer = {
   id: string;
   name: string;
@@ -472,18 +526,54 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
           );
 
           if (searchResponse.ok) {
-            // Parse streaming JSON response
-            // searchStream returns newline-delimited JSON where each line is a result
+            // Parse streaming JSON response - handle multiple formats
+            // searchStream can return: JSON array, newline-delimited JSON, or single object
             const responseText = await searchResponse.text();
-            const lines = responseText.trim().split('\n').filter(line => line.trim());
+            
+            // Try parsing as JSON array first (v21 sometimes returns arrays)
+            let results: any[] = [];
+            try {
+              const parsed = JSON.parse(responseText);
+              if (Array.isArray(parsed)) {
+                // Array of result objects
+                for (const item of parsed) {
+                  if (item.results && Array.isArray(item.results)) {
+                    results.push(...item.results);
+                  } else {
+                    results.push(item);
+                  }
+                }
+              } else if (parsed.results && Array.isArray(parsed.results)) {
+                // Single object with results array
+                results = parsed.results;
+              } else {
+                // Single result object
+                results = [parsed];
+              }
+            } catch {
+              // Fallback: parse as newline-delimited JSON
+              const lines = responseText.trim().split('\n').filter(line => line.trim());
+              for (const line of lines) {
+                try {
+                  const parsed = JSON.parse(line);
+                  if (parsed.results && Array.isArray(parsed.results)) {
+                    results.push(...parsed.results);
+                  } else {
+                    results.push(parsed);
+                  }
+                } catch {
+                  // Skip invalid lines
+                }
+              }
+            }
 
-            for (const line of lines) {
+            // Process all results to extract customer clients
+            for (const result of results) {
               try {
-                const result = JSON.parse(line);
-                
-                // searchStream results structure: { results: [{ customerClient: {...} }] }
-                // Or could be direct: { customerClient: {...} }
-                const client = result.results?.[0]?.customerClient || result.customerClient;
+                // searchStream results structure can be:
+                // - { results: [{ customerClient: {...} }] } - already extracted above
+                // - { customerClient: {...} } - direct format
+                const client = result.customerClient || (result.results?.[0]?.customerClient);
 
                 if (client && client.manager === false) {
                   const clientCustomer = client.clientCustomer;
@@ -493,6 +583,9 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
                     clientId = clientCustomer.replace('customers/', '').trim();
                   } else if (clientCustomer?.id) {
                     clientId = String(clientCustomer.id).replace('customers/', '').trim();
+                  } else if (clientCustomer && typeof clientCustomer === 'object' && 'resourceName' in clientCustomer) {
+                    // Sometimes it's an object with resourceName field
+                    clientId = String(clientCustomer.resourceName || '').replace('customers/', '').trim();
                   }
 
                   if (clientId) {
@@ -510,8 +603,8 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
                   }
                 }
               } catch (parseError) {
-                // Skip invalid JSON lines (could be metadata or empty lines)
-                console.warn(`[Google Ads] Failed to parse searchStream result line:`, parseError);
+                // Skip invalid result entries
+                console.warn(`[Google Ads] Failed to process searchStream result:`, parseError);
                 continue;
               }
             }
