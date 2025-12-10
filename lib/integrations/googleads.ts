@@ -471,79 +471,8 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
   };
   
   // Commented out - REST transcoding doesn't work for ListAccessibleCustomers
-  /*
-  try {
-    const customersRes = await fetch(
-      `https://googleads.googleapis.com/v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'developer-token': GOOGLE_DEVELOPER_TOKEN,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      },
-    );
-
-    if (!customersRes.ok) {
-      const errorBody = await customersRes.text();
-      return {
-        customers: [],
-        error: `Failed to fetch accessible customers: ${customersRes.status} ${errorBody}`,
-      };
-    }
-
-    const customersData = await customersRes.json();
-    const resourceNames = customersData.resourceNames || [];
-
-    // Fetch details for each customer
-    const customers: GoogleAdsCustomer[] = [];
-
-    for (const resourceName of resourceNames) {
-      const customerId = resourceName.replace('customers/', '');
-
-      try {
-        const customerRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}/${customerId}`, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'developer-token': GOOGLE_DEVELOPER_TOKEN,
-          },
-        });
-
-        if (customerRes.ok) {
-          const customerData = await customerRes.json();
-          const customer = customerData.customer;
-
-          customers.push({
-            id: customerId,
-            name: customer?.descriptiveName || customer?.companyName || customerId,
-            descriptiveName: customer?.descriptiveName,
-          });
-        } else {
-          // If we can't fetch details, still add the customer ID
-          customers.push({
-            id: customerId,
-            name: customerId,
-          });
-        }
-      } catch (error) {
-        // If individual customer fetch fails, still add the ID
-        customers.push({
-          id: customerId,
-          name: customerId,
-        });
-      }
-    }
-
-    return { customers };
-  } catch (error) {
-    return {
-      customers: [],
-      error: error instanceof Error ? error.message : 'Unknown error fetching customers',
-    };
-  }
+  // To implement automatic customer fetching, we would need to use the Google Ads gRPC client library
+  // For now, users must manually enter their Customer ID
 }
 
 export async function fetchGoogleAdsInsights(params: {
