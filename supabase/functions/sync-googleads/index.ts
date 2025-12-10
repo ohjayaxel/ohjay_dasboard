@@ -1,4 +1,82 @@
 // deno-lint-ignore-file no-explicit-any
+/**
+ * Google Ads Sync Edge Function
+ * 
+ * Syncs Google Ads performance data from geographic_view into google_ads_geographic_daily table.
+ * 
+ * MANUAL TESTING:
+ * 
+ * 1. Manual date window test:
+ *    curl -X POST "https://<PROJECT_REF>.functions.supabase.co/sync-googleads" \
+ *      -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
+ *      -H "Content-Type: application/json" \
+ *      -d '{
+ *        "tenantId": "skinome",
+ *        "mode": "manual_test",
+ *        "dateFrom": "2025-12-09",
+ *        "dateTo": "2025-12-10"
+ *      }'
+ * 
+ * 2. Hourly test (syncs last hour based on last_hourly_sync_at):
+ *    curl -X POST "https://<PROJECT_REF>.functions.supabase.co/sync-googleads" \
+ *      -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
+ *      -H "Content-Type: application/json" \
+ *      -d '{
+ *        "tenantId": "skinome",
+ *        "mode": "hourly_test"
+ *      }'
+ * 
+ * 3. Daily test (syncs last day based on last_daily_sync_at):
+ *    curl -X POST "https://<PROJECT_REF>.functions.supabase.co/sync-googleads" \
+ *      -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
+ *      -H "Content-Type: application/json" \
+ *      -d '{
+ *        "tenantId": "skinome",
+ *        "mode": "daily_test"
+ *      }'
+ * 
+ * SQL VALIDATION QUERIES:
+ * 
+ * -- Check data exists for tenant:
+ * SELECT
+ *   COUNT(*) AS rows_inserted,
+ *   MIN(date) AS first_date,
+ *   MAX(date) AS last_date,
+ *   COUNT(DISTINCT customer_id) AS customer_count,
+ *   COUNT(DISTINCT campaign_id) AS campaign_count
+ * FROM google_ads_geographic_daily
+ * WHERE tenant_id = (SELECT id FROM tenants WHERE slug = 'skinome');
+ * 
+ * -- Check by customer_id:
+ * SELECT
+ *   customer_id,
+ *   COUNT(*) AS rows_inserted,
+ *   MIN(date) AS first_date,
+ *   MAX(date) AS last_date
+ * FROM google_ads_geographic_daily
+ * WHERE tenant_id = (SELECT id FROM tenants WHERE slug = 'skinome')
+ * GROUP BY customer_id;
+ * 
+ * -- Manually set sync timestamps for testing (in connections.meta):
+ * UPDATE connections
+ * SET meta = jsonb_set(
+ *   COALESCE(meta, '{}'::jsonb),
+ *   '{last_hourly_sync_at}',
+ *   to_jsonb(NOW() - INTERVAL '2 hours')
+ * )
+ * WHERE tenant_id = (SELECT id FROM tenants WHERE slug = 'skinome')
+ *   AND source = 'google_ads';
+ * 
+ * UPDATE connections
+ * SET meta = jsonb_set(
+ *   COALESCE(meta, '{}'::jsonb),
+ *   '{last_daily_sync_at}',
+ *   to_jsonb(DATE '2025-12-08')
+ * )
+ * WHERE tenant_id = (SELECT id FROM tenants WHERE slug = 'skinome')
+ *   AND source = 'google_ads';
+ */
+
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -63,6 +141,24 @@ type JobResult = {
   status: 'succeeded' | 'failed';
   error?: string;
   inserted?: number;
+  mode?: string;
+  syncStart?: string;
+  syncEnd?: string;
+  apiRows?: number;
+};
+
+type SyncMode = 'manual_test' | 'hourly_test' | 'daily_test' | undefined;
+
+type SyncRequestPayload = {
+  tenantId?: string;
+  mode?: SyncMode;
+  dateFrom?: string;
+  dateTo?: string;
+};
+
+type SyncWindow = {
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
 };
 
 type BufferJson = {
@@ -124,12 +220,43 @@ function decodeEncryptedPayload(payload: unknown): Uint8Array | null {
       // not JSON
     }
 
+    // Handle hex-encoded strings (e.g., \x7b2274797065223a... which is hex-encoded JSON)
     if (payload.startsWith('\\x') || payload.startsWith('0x')) {
       const hexValue = payload.replace(/^(\\x|0x)/, '');
-      return hexToBytes(hexValue);
+      const decodedHex = hexToBytes(hexValue);
+      
+      // Check if decoded hex is actually a JSON string containing Buffer data
+      try {
+        const jsonString = new TextDecoder().decode(decodedHex);
+        if (jsonString.startsWith('{') && jsonString.includes('"type":"Buffer"')) {
+          const parsed = JSON.parse(jsonString);
+          if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
+            return Uint8Array.from(parsed.data);
+          }
+        }
+      } catch {
+        // Not JSON, treat as raw bytes
+      }
+      
+      return decodedHex;
     }
     if (/^[0-9a-fA-F]+$/.test(payload)) {
-      return hexToBytes(payload);
+      const decodedHex = hexToBytes(payload);
+      
+      // Check if decoded hex is actually a JSON string containing Buffer data
+      try {
+        const jsonString = new TextDecoder().decode(decodedHex);
+        if (jsonString.startsWith('{') && jsonString.includes('"type":"Buffer"')) {
+          const parsed = JSON.parse(jsonString);
+          if (parsed && typeof parsed === 'object' && parsed.type === 'Buffer' && Array.isArray(parsed.data)) {
+            return Uint8Array.from(parsed.data);
+          }
+        }
+      } catch {
+        // Not JSON, treat as raw bytes
+      }
+      
+      return decodedHex;
     }
     try {
       return base64ToBytes(payload);
@@ -522,6 +649,8 @@ async function fetchGeographicInsights(
     // Provide helpful diagnostics for common errors
     if (response.status === 404) {
       errorMessage += '. This usually means the customer_id is a manager account or you lack permission on the selected child account.';
+    } else if (response.status === 400) {
+      errorMessage += '. Bad Request - this could be due to invalid query, date format, or missing required fields.';
     }
     
     // Try to extract useful error details from response
@@ -530,11 +659,24 @@ async function fetchGeographicInsights(
       if (errorJson.error?.message) {
         errorMessage += ` ${errorJson.error.message}`;
       }
+      // Log full error for debugging
+      console.error('[sync-googleads] Google Ads API error details:', JSON.stringify(errorJson, null, 2));
     } catch {
       if (errorBody && errorBody.length < 500 && !errorBody.includes('<!DOCTYPE')) {
         errorMessage += ` ${errorBody.substring(0, 200)}`;
+        console.error('[sync-googleads] Google Ads API error body (raw):', errorBody.substring(0, 500));
       }
     }
+    
+    // Log request details for debugging
+    console.error('[sync-googleads] Request details:', {
+      url,
+      customerId,
+      loginCustomerId,
+      startDate,
+      endDate,
+      queryLength: query.length,
+    });
     
     throw new Error(errorMessage);
   }
@@ -691,7 +833,223 @@ async function upsertJobLog(client: SupabaseClient, payload: {
   }
 }
 
-async function processTenant(client: SupabaseClient, connection: GoogleConnection): Promise<JobResult> {
+/**
+ * Resolve sync window based on mode and connection state.
+ * 
+ * - manual_test + dateFrom/dateTo: Use provided dates
+ * - hourly_test: Use last_hourly_sync_at to NOW() - 1 hour (or last 24h if no timestamp)
+ * - daily_test: Use last_daily_sync_at to TODAY - 1 day (or last 30d if no timestamp)
+ * - default/cron: Use existing logic (last 30 days or sync_start_date)
+ */
+async function resolveSyncWindow(
+  client: SupabaseClient,
+  connection: GoogleConnection,
+  mode: SyncMode,
+  dateFrom?: string,
+  dateTo?: string,
+): Promise<SyncWindow> {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  // Manual test mode: use provided dates
+  if (mode === 'manual_test') {
+    if (!dateFrom || !dateTo) {
+      throw new Error(
+        'manual_test mode requires both dateFrom and dateTo parameters. ' +
+        'Example: {"tenantId": "skinome", "mode": "manual_test", "dateFrom": "2025-12-09", "dateTo": "2025-12-10"}'
+      );
+    }
+
+    // Validate date format (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(dateFrom) || !dateRegex.test(dateTo)) {
+      throw new Error(
+        'Invalid date format. Use YYYY-MM-DD format. ' +
+        `Received: dateFrom="${dateFrom}", dateTo="${dateTo}"`
+      );
+    }
+
+    // Parse and validate dates
+    const fromDate = new Date(dateFrom + 'T00:00:00Z');
+    const toDate = new Date(dateTo + 'T23:59:59Z');
+
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+      throw new Error(`Invalid dates: dateFrom="${dateFrom}", dateTo="${dateTo}"`);
+    }
+
+    if (fromDate > toDate) {
+      throw new Error(`dateFrom (${dateFrom}) must be <= dateTo (${dateTo})`);
+    }
+
+    // Prevent syncing too large a range by mistake
+    const daysDiff = Math.ceil((toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysDiff > 90) {
+      throw new Error(
+        `Date range too large: ${daysDiff} days. Maximum allowed: 90 days. ` +
+        'Please use a smaller date range for manual testing.'
+      );
+    }
+
+    return {
+      startDate: dateFrom,
+      endDate: dateTo,
+    };
+  }
+
+  // Hourly test mode: sync last hour from last_hourly_sync_at
+  if (mode === 'hourly_test') {
+    const meta = connection.meta || {};
+    const lastSyncStr = meta.last_hourly_sync_at;
+
+    let startDate: Date;
+    if (lastSyncStr && typeof lastSyncStr === 'string') {
+      // Parse last sync time and sync from then to now - 1 hour
+      const lastSync = new Date(lastSyncStr);
+      if (!isNaN(lastSync.getTime())) {
+        startDate = new Date(lastSync);
+      } else {
+        // Invalid timestamp, default to 24 hours ago
+        startDate = new Date(today);
+        startDate.setDate(startDate.getDate() - 1);
+      }
+    } else {
+      // No last sync, default to 24 hours ago
+      startDate = new Date(today);
+      startDate.setDate(startDate.getDate() - 1);
+    }
+
+    // End date: now - 1 hour (to avoid syncing incomplete current hour)
+    const endDate = new Date();
+    endDate.setHours(endDate.getHours() - 1, 0, 0, 0);
+
+    return {
+      startDate: startDate.toISOString().slice(0, 10),
+      endDate: endDate.toISOString().slice(0, 10),
+    };
+  }
+
+  // Daily test mode: sync last day from last_daily_sync_at
+  if (mode === 'daily_test') {
+    const meta = connection.meta || {};
+    const lastSyncStr = meta.last_daily_sync_at;
+
+    let startDate: Date;
+    if (lastSyncStr && typeof lastSyncStr === 'string') {
+      // Parse last sync date and sync from then to yesterday
+      const lastSync = new Date(lastSyncStr);
+      if (!isNaN(lastSync.getTime())) {
+        startDate = new Date(lastSync);
+        startDate.setHours(0, 0, 0, 0);
+      } else {
+        // Invalid timestamp, default to 30 days ago
+        startDate = new Date(today);
+        startDate.setDate(startDate.getDate() - 30);
+      }
+    } else {
+      // No last sync, default to 30 days ago
+      startDate = new Date(today);
+      startDate.setDate(startDate.getDate() - 30);
+    }
+
+    // End date: yesterday (to avoid syncing incomplete current day)
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() - 1);
+
+    return {
+      startDate: startDate.toISOString().slice(0, 10),
+      endDate: endDate.toISOString().slice(0, 10),
+    };
+  }
+
+  // Default/cron mode: existing logic
+  const syncStartDate = connection.meta?.sync_start_date
+    ? new Date(connection.meta.sync_start_date)
+    : null;
+
+  let startDate = new Date(today);
+  startDate.setDate(startDate.getDate() - (INCREMENTAL_WINDOW_DAYS - 1));
+
+  if (syncStartDate && syncStartDate < startDate) {
+    startDate = new Date(syncStartDate);
+  }
+
+  const endDate = new Date(today);
+
+  return {
+    startDate: startDate.toISOString().slice(0, 10),
+    endDate: endDate.toISOString().slice(0, 10),
+  };
+}
+
+/**
+ * Update last sync timestamps in connections.meta.
+ */
+async function updateLastSyncTimestamps(
+  client: SupabaseClient,
+  tenantId: string,
+  mode: SyncMode,
+  endDate: string,
+): Promise<void> {
+  if (mode === 'hourly_test') {
+    const { error } = await client
+      .from('connections')
+      .update({
+        meta: client.rpc('jsonb_set', {
+          base: client.select('meta').from('connections').eq('tenant_id', tenantId).eq('source', SOURCE).single(),
+          path: '{last_hourly_sync_at}',
+          new_value: new Date().toISOString(),
+        }),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('tenant_id', tenantId)
+      .eq('source', SOURCE);
+
+    // Simpler approach: read, update, write
+    const { data: conn } = await client
+      .from('connections')
+      .select('meta')
+      .eq('tenant_id', tenantId)
+      .eq('source', SOURCE)
+      .single();
+
+    if (conn) {
+      const meta = (conn.meta as Record<string, any>) || {};
+      meta.last_hourly_sync_at = new Date().toISOString();
+
+      await client
+        .from('connections')
+        .update({ meta, updated_at: new Date().toISOString() })
+        .eq('tenant_id', tenantId)
+        .eq('source', SOURCE);
+    }
+  } else if (mode === 'daily_test') {
+    const { data: conn } = await client
+      .from('connections')
+      .select('meta')
+      .eq('tenant_id', tenantId)
+      .eq('source', SOURCE)
+      .single();
+
+    if (conn) {
+      const meta = (conn.meta as Record<string, any>) || {};
+      meta.last_daily_sync_at = endDate;
+
+      await client
+        .from('connections')
+        .update({ meta, updated_at: new Date().toISOString() })
+        .eq('tenant_id', tenantId)
+        .eq('source', SOURCE);
+    }
+  }
+}
+
+async function processTenant(
+  client: SupabaseClient,
+  connection: GoogleConnection,
+  mode: SyncMode,
+  dateFrom?: string,
+  dateTo?: string,
+): Promise<JobResult> {
   const tenantId = connection.tenant_id;
   const startedAt = new Date().toISOString();
 
@@ -777,27 +1135,23 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
       `[sync-googleads] Using login-customer-id: ${managerName}`
     );
 
-    // Calculate date range
-    // Initial sync: last 30 days, subsequent syncs: last 30 days (can be adjusted based on sync_start_date)
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Resolve sync window based on mode
+    const syncWindow = await resolveSyncWindow(client, connection, mode, dateFrom, dateTo);
+    const startDateStr = syncWindow.startDate;
+    const endDateStr = syncWindow.endDate;
 
-    const syncStartDate = connection.meta?.sync_start_date
-      ? new Date(connection.meta.sync_start_date)
-      : null;
-    
-    let startDate = new Date(today);
-    startDate.setDate(startDate.getDate() - (INCREMENTAL_WINDOW_DAYS - 1));
-
-    if (syncStartDate && syncStartDate < startDate) {
-      startDate = new Date(syncStartDate);
-    }
-
-    const endDate = new Date(today);
-
-    // Format dates as YYYY-MM-DD for Google Ads API
-    const startDateStr = startDate.toISOString().slice(0, 10);
-    const endDateStr = endDate.toISOString().slice(0, 10);
+    // Structured logging: sync start
+    console.log(JSON.stringify({
+      event: 'sync_start',
+      tenantId,
+      mode: mode || 'default',
+      customerId: formatCustomerIdForDisplay(selectedCustomerId),
+      customerName: selectedCustomerName,
+      managerCustomerId: managerName,
+      syncStart: startDateStr,
+      syncEnd: endDateStr,
+      timestamp: new Date().toISOString(),
+    }));
 
     console.log(
       `[sync-googleads] Fetching geographic insights for tenant ${tenantId}, customer ${formatCustomerIdForDisplay(selectedCustomerId)}, date range: ${startDateStr} to ${endDateStr}`,
@@ -806,6 +1160,16 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
     // Fetch geographic insights from Google Ads API
     // Use selectedCustomerId (child account) for the URL, managerCustomerId for login-customer-id header
     const rawResults = await fetchGeographicInsights(accessToken, selectedCustomerId, startDateStr, endDateStr, managerCustomerId);
+    
+    // Structured logging: API fetch complete
+    console.log(JSON.stringify({
+      event: 'api_fetch_complete',
+      tenantId,
+      mode: mode || 'default',
+      apiRows: rawResults.length,
+      timestamp: new Date().toISOString(),
+    }));
+    
     console.log(`[sync-googleads] Fetched ${rawResults.length} result rows from API`);
 
     // Fetch country code mapping
@@ -815,6 +1179,17 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
 
     // Transform results to database rows
     const rows = transformGeographicResults(rawResults, tenantId, selectedCustomerId, countryCodeMap);
+    
+    // Structured logging: transformation complete
+    console.log(JSON.stringify({
+      event: 'transformation_complete',
+      tenantId,
+      mode: mode || 'default',
+      apiRows: rawResults.length,
+      transformedRows: rows.length,
+      timestamp: new Date().toISOString(),
+    }));
+    
     console.log(`[sync-googleads] Transformed ${rows.length} rows for database`);
 
     if (rows.length > 0) {
@@ -841,6 +1216,21 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
       console.log(`[sync-googleads] Upserted ${upserted} rows to google_ads_geographic_daily`);
     }
 
+    // Structured logging: database write complete
+    console.log(JSON.stringify({
+      event: 'database_write_complete',
+      tenantId,
+      mode: mode || 'default',
+      table: 'google_ads_geographic_daily',
+      rowsInserted: rows.length,
+      timestamp: new Date().toISOString(),
+    }));
+
+    // Update last sync timestamps if in hourly/daily test mode
+    if (mode === 'hourly_test' || mode === 'daily_test') {
+      await updateLastSyncTimestamps(client, tenantId, mode, endDateStr);
+    }
+
     await upsertJobLog(client, {
       tenantId,
       status: 'succeeded',
@@ -848,9 +1238,41 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
       finishedAt: new Date().toISOString(),
     });
 
-    return { tenantId, status: 'succeeded', inserted: rows.length };
+    // Structured logging: sync complete
+    console.log(JSON.stringify({
+      event: 'sync_complete',
+      tenantId,
+      mode: mode || 'default',
+      status: 'succeeded',
+      syncStart: startDateStr,
+      syncEnd: endDateStr,
+      apiRows: rawResults.length,
+      rowsInserted: rows.length,
+      timestamp: new Date().toISOString(),
+    }));
+
+    return {
+      tenantId,
+      status: 'succeeded',
+      inserted: rows.length,
+      mode: mode || 'default',
+      syncStart: startDateStr,
+      syncEnd: endDateStr,
+      apiRows: rawResults.length,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    
+    // Structured logging: sync failed
+    console.error(JSON.stringify({
+      event: 'sync_failed',
+      tenantId,
+      mode: mode || 'default',
+      status: 'failed',
+      error: message,
+      timestamp: new Date().toISOString(),
+    }));
+    
     console.error(`[sync-googleads] Error processing tenant ${tenantId}:`, message);
 
     await upsertJobLog(client, {
@@ -861,7 +1283,12 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
       error: message,
     });
 
-    return { tenantId, status: 'failed', error: message };
+    return {
+      tenantId,
+      status: 'failed',
+      error: message,
+      mode: mode || 'default',
+    };
   } finally {
     // Ensure job log is always updated, even if the try-catch above fails
     if (jobLogInserted) {
