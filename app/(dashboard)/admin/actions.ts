@@ -1944,8 +1944,10 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
     customersError = 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.'
     updatedMeta.customers_error = customersError
     updatedMeta.accessible_customers = []
+    updatedMeta.selected_customer_id = null
   } else if (fetchResult.customers.length === 1) {
-    // Exactly one customer - auto-select it
+    // Exactly one regular customer account - auto-select it
+    // (fetchAccessibleGoogleAdsCustomers guarantees no manager accounts)
     const singleCustomer = fetchResult.customers[0]
     updatedMeta.accessible_customers = fetchResult.customers
     updatedMeta.selected_customer_id = singleCustomer.id
@@ -1953,15 +1955,18 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
     updatedMeta.customer_name = singleCustomer.name
     updatedMeta.customers_error = null
   } else {
-    // Multiple customers - save list, don't auto-select
+    // Multiple customers (typical MCC scenario) - don't auto-select, force user to choose
     updatedMeta.accessible_customers = fetchResult.customers
     customersError = 'Multiple Google Ads accounts found. Please select one in the integration settings.'
     updatedMeta.customers_error = customersError
-    // If we had a previously selected customer that's still in the list, keep it
+    
+    // Check if previously selected customer is still in the accessible list
     const previousSelected = typeof baseMeta.selected_customer_id === 'string' ? baseMeta.selected_customer_id : null
     if (previousSelected && fetchResult.customers.find((c) => c.id === previousSelected)) {
+      // Keep the previously selected customer if it's still accessible
       updatedMeta.selected_customer_id = previousSelected
     } else {
+      // Force user to select - don't auto-select anything
       updatedMeta.selected_customer_id = null
     }
   }

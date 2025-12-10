@@ -310,22 +310,28 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           <input type="hidden" name="tenantId" value={tenant.id} />
           <input type="hidden" name="tenantSlug" value={tenant.slug} />
           <div className="space-y-2">
-            <Label htmlFor="google-ads-customer">Select customer account</Label>
+            <Label htmlFor="google-ads-customer">Select Google Ads account</Label>
             <select
               id="google-ads-customer"
               name="customerId"
-              defaultValue={selectedGoogleCustomerId ?? googleCustomers[0]?.id ?? ''}
+              defaultValue={selectedGoogleCustomerId || ''}
               className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               required
             >
+              <option value="">-- Select an account --</option>
               {googleCustomers.map((customer) => (
                 <option key={customer.id} value={customer.id}>
-                  {customer.name} ({customer.id})
+                  {customer.name && customer.name !== customer.id ? `${customer.name} - ${customer.id}` : customer.id}
                 </option>
               ))}
             </select>
           </div>
-          <Button type="submit" variant="outline" className="md:w-auto">
+          <Button 
+            type="submit" 
+            variant="outline" 
+            className="md:w-auto"
+            disabled={!selectedGoogleCustomerId}
+          >
             Save customer
           </Button>
           {googleCustomersError && (
