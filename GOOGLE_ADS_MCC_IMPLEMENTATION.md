@@ -189,3 +189,4 @@ if (fetchResult.customers.length === 1) {
 3. Confirm manager account (1992826509) never appears as selected
 4. Verify dropdown shows child account (118-391-2529) and can be selected
 
+

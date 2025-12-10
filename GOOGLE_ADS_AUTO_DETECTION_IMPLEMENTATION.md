@@ -242,3 +242,4 @@ The `connections.meta` JSONB field stores:
 3. **Customer refresh**: Add periodic refresh of accessible customers list
 4. **Better error recovery**: Retry logic for transient failures
 
+

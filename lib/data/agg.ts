@@ -186,83 +186,65 @@ export async function getOverviewData(params: {
   from?: string;
   to?: string;
 }): Promise<OverviewResult> {
-  // Fetch data from all sources
-  // Use shopify_daily_sales table with mode='shopify' (matches Shopify Analytics)
-  // Use kpi_daily for Meta and Google Ads
-  const { fetchShopifyDailySales } = await import('./fetchers');
+  // Overview aggregation:
+  // This implementation now uses our semantic layer views:
+  // - v_marketing_spend_daily
+  // - v_daily_metrics
+  // as the primary source of daily metrics (net sales, new customer net sales,
+  // total marketing spend from Meta + Google Ads, and aMER).
+  // These values have been validated to match the legacy aggregation logic
+  // via compareDailyMetricsLayers() for multiple periods.
 
-  const [shopifyRows, metaRows, googleRows] = await Promise.all([
-    fetchShopifyDailySales({
-      tenantId: params.tenantId,
-      from: params.from,
-      to: params.to,
-      mode: 'shopify',
-    }),
-    fetchKpiDaily({
-      tenantId: params.tenantId,
-      from: params.from,
-      to: params.to,
-      source: 'meta',
-    }),
-    fetchKpiDaily({
-      tenantId: params.tenantId,
-      from: params.from,
-      to: params.to,
-      source: 'google_ads',
-    }),
-  ]);
+  const { getDailyMetricsFromView } = await import('./daily-metrics');
 
-  // Aggregate by date
-  const byDate = new Map<string, OverviewDataPoint>();
-
-  // Process Shopify data from shopify_daily_sales (mode='shopify')
-  for (const row of shopifyRows) {
-    const existing = byDate.get(row.date) ?? {
-      date: row.date,
-      gross_sales: 0,
-      net_sales: 0,
-      new_customer_net_sales: 0,
-      marketing_spend: 0,
-      amer: null,
-      orders: 0,
-      aov: null,
-    };
-
-    existing.gross_sales += row.gross_sales_excl_tax ?? 0;
-    existing.net_sales += row.net_sales_excl_tax;
-    existing.orders += row.orders_count ?? 0;
-    existing.new_customer_net_sales += row.new_customer_net_sales ?? 0;
-
-    byDate.set(row.date, existing);
-  }
-
-  // Process Meta and Google Ads for marketing spend
-  for (const row of [...metaRows, ...googleRows]) {
-    const existing = byDate.get(row.date) ?? {
-      date: row.date,
-      gross_sales: 0,
-      net_sales: 0,
-      new_customer_net_sales: 0,
-      marketing_spend: 0,
-      amer: null,
-      orders: 0,
-      aov: null,
-    };
-
-    existing.marketing_spend += row.spend ?? 0;
-    byDate.set(row.date, existing);
-  }
+  // Fetch daily metrics from semantic layer view
+  const rows = await getDailyMetricsFromView({
+    tenantId: params.tenantId,
+    from: params.from ?? '1970-01-01',
+    to: params.to ?? '2100-01-01',
+  });
 
   // Fill in all dates in the range to ensure complete series
   const allDates = new Set<string>();
   const startDate = new Date(params.from ?? '1970-01-01');
   const endDate = new Date(params.to ?? '2100-01-01');
-  
+
   for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
     const dateStr = d.toISOString().slice(0, 10);
     allDates.add(dateStr);
-    
-    // Initialize date if it doesn't exist
+  }
+
+  // Build map by date from semantic layer rows
+  const byDate = new Map<string, OverviewDataPoint>();
+
+  for (const row of rows) {
+    const existing = byDate.get(row.date) ?? {
+      date: row.date,
+      gross_sales: 0,
+      net_sales: 0,
+      new_customer_net_sales: 0,
+      marketing_spend: 0,
+      amer: null,
+      orders: 0,
+      aov: null,
+    };
+
+    // Map semantic layer columns to OverviewDataPoint
+    existing.gross_sales += row.gross_sales ?? 0;
+    existing.net_sales += row.net_sales ?? 0;
+    existing.new_customer_net_sales += row.new_customer_net_sales ?? 0;
+    existing.marketing_spend += row.total_marketing_spend ?? 0;
+    existing.orders += row.orders ?? 0;
+
+    // aMER is already calculated in the view, but we can also compute it here for consistency
+    // However, we'll use the view's value as the primary source since it's already computed in SQL
+    existing.amer = row.amer;
+
+    byDate.set(row.date, existing);
+  }
+
+  // Initialize missing dates in range with zeros
+  for (const dateStr of Array.from(allDates)) {
     if (!byDate.has(dateStr)) {
       byDate.set(dateStr, {
         date: dateStr,
@@ -277,17 +259,22 @@ export async function getOverviewData(params: {
     }
   }
 
-  // Calculate aMER and AOV for each date
+  // Build series with calculated AOV and ensure aMER consistency
   const series = Array.from(byDate.values())
     .filter((point) => allDates.has(point.date)) // Only include dates in the requested range
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((point) => {
-      const amer = point.marketing_spend > 0 
-        ? point.new_customer_net_sales / point.marketing_spend 
-        : null;
-      const aov = point.orders > 0 
-        ? point.net_sales / point.orders 
-        : null;
+      // Calculate AOV (Average Order Value) locally
+      const aov = point.orders > 0 ? point.net_sales / point.orders : null;
+
+      // Ensure aMER is calculated if not present (shouldn't happen, but for safety)
+      const amer =
+        point.amer !== null
+          ? point.amer
+          : point.marketing_spend > 0
+            ? point.new_customer_net_sales / point.marketing_spend
+            : null;
+
       return {
         ...point,
         amer,
@@ -312,11 +299,9 @@ export async function getOverviewData(params: {
     aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
   };
 
-  // Get currency from shopify_daily_sales
-  let currency: string | null = null;
-  if (shopifyRows.length > 0) {
-    currency = shopifyRows.find((row) => row.currency)?.currency ?? null;
-  }
+  // Get currency from semantic layer rows
+  const currency =
+    rows.length > 0 ? rows.find((row) => row.currency)?.currency ?? null : null;
 
   return { series, totals, currency };
 }

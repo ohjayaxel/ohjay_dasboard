@@ -401,11 +401,14 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
 
       try {
         // Get customer details
+        // For manager accounts, we need to set login-customer-id header
+        // Use the customerId itself as login-customer-id when fetching its details
         const customerResponse = await fetch(`${GOOGLE_REPORTING_ENDPOINT}/${customerId}`, {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'developer-token': GOOGLE_DEVELOPER_TOKEN,
+            'login-customer-id': customerId, // Required for manager accounts
           },
         });
 
@@ -455,12 +458,13 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
           const query = `SELECT customer_client.client_customer, customer_client.descriptive_name, customer_client.manager FROM customer_client WHERE customer_client.status = 'ENABLED' AND customer_client.manager = false LIMIT 100`;
 
           const searchResponse = await fetch(
-            `${GOOGLE_REPORTING_ENDPOINT}/${managerId}:googleAds:searchStream`,
+            `${GOOGLE_REPORTING_ENDPOINT}/${managerId}/googleAds:searchStream`,
             {
               method: 'POST',
               headers: {
                 Authorization: `Bearer ${accessToken}`,
                 'developer-token': GOOGLE_DEVELOPER_TOKEN,
+                'login-customer-id': managerId, // Required when operating under manager account
                 'Content-Type': 'application/json',
               },
               body: JSON.stringify({ query }),
@@ -566,7 +570,7 @@ export async function fetchGoogleAdsInsights(params: {
     ];
   }
 
-  const url = `${GOOGLE_REPORTING_ENDPOINT}/${params.customerId}:googleAds:searchStream`;
+  const url = `${GOOGLE_REPORTING_ENDPOINT}/${params.customerId}/googleAds:searchStream`;
   const res = await fetch(url, {
     method: 'POST',
     headers: {

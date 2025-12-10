@@ -114,3 +114,4 @@ The Edge Function `supabase/functions/sync-googleads/index.ts` currently:
 
 But this is a separate issue from the 404 - once the function is invoked correctly, you can then work on implementing the actual Google Ads API calls inside it.
 
+

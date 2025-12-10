@@ -48,3 +48,4 @@ pnpm tsx scripts/compare_modes.ts --tenant=skinome --from=2025-11-28 --to=2025-1
 - Om variablerna saknas får du ett tydligt felmeddelande
 
 
+

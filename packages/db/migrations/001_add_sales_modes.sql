@@ -34,3 +34,4 @@ comment on column shopify_daily_sales.discounts_excl_tax is 'Total discounts exc
 comment on column shopify_daily_sales.orders_count is 'Number of orders included in this daily aggregation';
 
 
+

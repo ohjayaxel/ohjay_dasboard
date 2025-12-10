@@ -19,3 +19,4 @@ CREATE INDEX IF NOT EXISTS idx_shopify_orders_customer_type_financial
 CREATE INDEX IF NOT EXISTS idx_shopify_orders_first_order
   ON shopify_orders (tenant_id, customer_id, is_first_order_for_customer) 
   WHERE customer_id IS NOT NULL AND is_first_order_for_customer = TRUE;
+
