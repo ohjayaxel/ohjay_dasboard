@@ -100,10 +100,58 @@ async function upsertConnection(
 export async function getGoogleAdsAuthorizeUrl(options: {
   tenantId: string;
   loginCustomerId?: string;
+  redirectPath?: string;
 }) {
   requireClientCredentials();
 
+  const client = getSupabaseServiceClient();
   const state = randomBytes(16).toString('hex');
+  const now = new Date().toISOString();
+
+  // Get existing connection or create placeholder
+  const existing = await getExistingConnection(options.tenantId);
+  const baseMeta =
+    existing && existing.meta && typeof existing.meta === 'object'
+      ? (existing.meta as Record<string, unknown>)
+      : {};
+
+  const nextMeta = {
+    ...baseMeta,
+    oauth_state: state,
+    oauth_state_created_at: now,
+    oauth_redirect_path: options.redirectPath || '/admin',
+    login_customer_id: options.loginCustomerId ?? null,
+  };
+
+  if (existing) {
+    const { error } = await client
+      .from('connections')
+      .update({
+        meta: nextMeta,
+        updated_at: now,
+      })
+      .eq('id', existing.id);
+
+    if (error) {
+      throw new Error(`Failed to update Google Ads connection: ${error.message}`);
+    }
+  } else {
+    const { error } = await client.from('connections').insert({
+      tenant_id: options.tenantId,
+      source: 'google_ads',
+      status: 'disconnected',
+      updated_at: now,
+      access_token_enc: null,
+      refresh_token_enc: null,
+      expires_at: null,
+      meta: nextMeta,
+    });
+
+    if (error) {
+      throw new Error(`Failed to create Google Ads connection: ${error.message}`);
+    }
+  }
+
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID!,
     redirect_uri: buildRedirectUri(),
@@ -118,7 +166,6 @@ export async function getGoogleAdsAuthorizeUrl(options: {
     params.set('login_hint', options.loginCustomerId);
   }
 
-  // TODO: Persist state + tenant metadata for callback validation.
   return {
     url: `${GOOGLE_AUTH_ENDPOINT}?${params.toString()}`,
     state,
