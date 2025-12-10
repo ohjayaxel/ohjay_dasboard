@@ -290,15 +290,35 @@ async function getAccessToken(client: SupabaseClient, connection: GoogleConnecti
   return accessToken;
 }
 
-function getCustomerId(meta: Record<string, any> | null): string | null {
+/**
+ * Get the selected child customer ID from connection meta.
+ * This is the account we will query for reporting data.
+ * 
+ * Returns null if not set or if the selected account is a manager account.
+ */
+function getSelectedCustomerId(meta: Record<string, any> | null): string | null {
   if (!meta) return null;
 
-  // Try selected_customer_id first
+  // Try selected_customer_id first (new structure)
   if (typeof meta.selected_customer_id === 'string' && meta.selected_customer_id.length > 0) {
-    return meta.selected_customer_id.replace(/-/g, ''); // Remove dashes for API calls
+    const customerId = meta.selected_customer_id.replace(/-/g, ''); // Remove dashes for API calls
+    
+    // Verify this is NOT a manager account
+    const availableAccounts = Array.isArray(meta.available_customers) ? meta.available_customers : [];
+    const selectedAccount = availableAccounts.find((a: any) => {
+      const aId = String(a.customer_id || '').replace(/-/g, '');
+      return aId === customerId;
+    });
+    
+    if (selectedAccount && selectedAccount.is_manager === true) {
+      console.warn(`[sync-googleads] Selected customer ${customerId} is a manager account - cannot query reporting data from it`);
+      return null;
+    }
+    
+    return customerId;
   }
 
-  // Fall back to customer_id
+  // Fall back to customer_id (legacy)
   if (typeof meta.customer_id === 'string' && meta.customer_id.length > 0) {
     return meta.customer_id.replace(/-/g, '');
   }
@@ -306,9 +326,21 @@ function getCustomerId(meta: Record<string, any> | null): string | null {
   return null;
 }
 
-function getLoginCustomerId(meta: Record<string, any> | null): string | null {
+/**
+ * Get the manager customer ID (MCC account) to use as login-customer-id header.
+ * This is required when querying child accounts through a manager account.
+ * 
+ * Returns manager_customer_id if available, otherwise falls back to selected_customer_id.
+ */
+function getManagerCustomerId(meta: Record<string, any> | null): string | null {
   if (!meta) return null;
 
+  // Use manager_customer_id if set (new structure)
+  if (typeof meta.manager_customer_id === 'string' && meta.manager_customer_id.length > 0) {
+    return meta.manager_customer_id.replace(/-/g, '');
+  }
+
+  // Fall back to login_customer_id (legacy)
   if (typeof meta.login_customer_id === 'string' && meta.login_customer_id.length > 0) {
     return meta.login_customer_id.replace(/-/g, '');
   }
@@ -485,7 +517,26 @@ async function fetchGeographicInsights(
 
   if (!response.ok) {
     const errorBody = await response.text();
-    throw new Error(`Google Ads API error: ${response.status} ${errorBody}`);
+    let errorMessage = `Google Ads API error: ${response.status}`;
+    
+    // Provide helpful diagnostics for common errors
+    if (response.status === 404) {
+      errorMessage += '. This usually means the customer_id is a manager account or you lack permission on the selected child account.';
+    }
+    
+    // Try to extract useful error details from response
+    try {
+      const errorJson = JSON.parse(errorBody);
+      if (errorJson.error?.message) {
+        errorMessage += ` ${errorJson.error.message}`;
+      }
+    } catch {
+      if (errorBody && errorBody.length < 500 && !errorBody.includes('<!DOCTYPE')) {
+        errorMessage += ` ${errorBody.substring(0, 200)}`;
+      }
+    }
+    
+    throw new Error(errorMessage);
   }
 
   return await parseSearchStreamResponse(response);
@@ -677,15 +728,46 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
       throw new Error('No access token available. Token may be expired and refresh failed.');
     }
 
-    // Get customer ID from connection meta
-    const customerId = getCustomerId(connection.meta);
-    if (!customerId) {
+    // Get selected customer ID (child account) from connection meta
+    const selectedCustomerId = getSelectedCustomerId(connection.meta);
+    if (!selectedCustomerId) {
+      const meta = connection.meta || {};
+      const hasSelectedId = typeof meta.selected_customer_id === 'string' && meta.selected_customer_id.length > 0;
+      
+      if (hasSelectedId) {
+        // Check if it's a manager account
+        const availableAccounts = Array.isArray(meta.available_customers) ? meta.available_customers : [];
+        const selectedAccount = availableAccounts.find((a: any) => {
+          const aId = String(a.customer_id || '').replace(/-/g, '');
+          const selectedId = String(meta.selected_customer_id || '').replace(/-/g, '');
+          return aId === selectedId;
+        });
+        
+        if (selectedAccount && selectedAccount.is_manager === true) {
+          throw new Error(
+            'Cannot run reporting queries against a Google Ads manager account. ' +
+            'Please select a standard (non-manager) account in the admin panel.',
+          );
+        }
+      }
+      
       throw new Error(
-        'No customer ID found in connection meta. Please select a customer account in the integrations settings.',
+        'No customer account selected in connection meta. Please select a customer account in the integrations settings.',
       );
     }
 
-    const loginCustomerId = getLoginCustomerId(connection.meta);
+    // Get manager customer ID for login-customer-id header (if applicable)
+    const managerCustomerId = getManagerCustomerId(connection.meta);
+    
+    // Log account selection for diagnostics
+    const selectedCustomerName = connection.meta?.selected_customer_name || selectedCustomerId;
+    const managerName = managerCustomerId ? formatCustomerIdForDisplay(managerCustomerId) : 'none';
+    console.log(
+      `[sync-googleads] Selected Google Ads customer: ${selectedCustomerName} (${formatCustomerIdForDisplay(selectedCustomerId)})`
+    );
+    console.log(
+      `[sync-googleads] Using login-customer-id: ${managerName}`
+    );
 
     // Calculate date range
     // Initial sync: last 30 days, subsequent syncs: last 30 days (can be adjusted based on sync_start_date)
@@ -710,20 +792,21 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
     const endDateStr = endDate.toISOString().slice(0, 10);
 
     console.log(
-      `[sync-googleads] Fetching geographic insights for tenant ${tenantId}, customer ${formatCustomerIdForDisplay(customerId)}, date range: ${startDateStr} to ${endDateStr}`,
+      `[sync-googleads] Fetching geographic insights for tenant ${tenantId}, customer ${formatCustomerIdForDisplay(selectedCustomerId)}, date range: ${startDateStr} to ${endDateStr}`,
     );
 
     // Fetch geographic insights from Google Ads API
-    const rawResults = await fetchGeographicInsights(accessToken, customerId, startDateStr, endDateStr, loginCustomerId);
+    // Use selectedCustomerId (child account) for the URL, managerCustomerId for login-customer-id header
+    const rawResults = await fetchGeographicInsights(accessToken, selectedCustomerId, startDateStr, endDateStr, managerCustomerId);
     console.log(`[sync-googleads] Fetched ${rawResults.length} result rows from API`);
 
     // Fetch country code mapping
     console.log(`[sync-googleads] Fetching country code mapping`);
-    const countryCodeMap = await fetchGeoTargetConstants(accessToken, customerId, loginCustomerId);
+    const countryCodeMap = await fetchGeoTargetConstants(accessToken, selectedCustomerId, managerCustomerId);
     console.log(`[sync-googleads] Loaded ${countryCodeMap.size} country mappings`);
 
     // Transform results to database rows
-    const rows = transformGeographicResults(rawResults, tenantId, customerId, countryCodeMap);
+    const rows = transformGeographicResults(rawResults, tenantId, selectedCustomerId, countryCodeMap);
     console.log(`[sync-googleads] Transformed ${rows.length} rows for database`);
 
     if (rows.length > 0) {

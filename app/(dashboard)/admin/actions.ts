@@ -1832,27 +1832,41 @@ export async function updateGoogleAdsSelectedCustomer(formData: FormData) {
     throw new Error('No Google Ads connection found for this tenant.')
   }
 
-  // Allow manual customer ID entry - validate format but don't require it to be in accessible_customers list
-  // Customer ID format: XXX-XXX-XXXX (with or without dashes)
+  // Validate customer ID format: XXX-XXX-XXXX (with or without dashes)
   const customerIdNormalized = result.data.customerId.replace(/-/g, '');
-  if (customerIdNormalized.length < 10 || customerIdNormalized.length > 10 || !/^\d+$/.test(customerIdNormalized)) {
+  if (customerIdNormalized.length !== 10 || !/^\d+$/.test(customerIdNormalized)) {
     throw new Error('Invalid customer ID format. Should be 10 digits (e.g., 123-456-7890 or 1234567890).');
   }
 
   // Format customer ID with dashes: XXX-XXX-XXXX
   const formattedCustomerId = `${customerIdNormalized.slice(0, 3)}-${customerIdNormalized.slice(3, 6)}-${customerIdNormalized.slice(6)}`;
   
-  // Try to get customer name if we have accessible_customers list, otherwise use ID as name
-  const customers = Array.isArray((connection.meta as any)?.accessible_customers)
-    ? ((connection.meta as any).accessible_customers as Array<{ id: string; name: string }>)
+  // Get account information from available_customers
+  const availableAccounts = Array.isArray((connection.meta as any)?.available_customers)
+    ? ((connection.meta as any).available_customers as Array<{
+        customer_id: string;
+        descriptive_name: string;
+        is_manager: boolean;
+        manager_customer_id?: string;
+      }>)
     : []
 
-  const selectedCustomer = customers.find((c) => {
-    const cIdNormalized = c.id.replace(/-/g, '');
-    return cIdNormalized === customerIdNormalized;
+  // Find the selected account (must be a child account, not manager)
+  const selectedAccount = availableAccounts.find((a) => {
+    const aIdNormalized = a.customer_id.replace(/-/g, '');
+    return aIdNormalized === customerIdNormalized;
   });
 
-  const customerName = selectedCustomer?.name ?? formattedCustomerId;
+  if (!selectedAccount) {
+    throw new Error('Selected customer ID not found in available accounts. Please refresh the account list.');
+  }
+
+  if (selectedAccount.is_manager) {
+    throw new Error('Cannot select a manager (MCC) account. Please select a standard Google Ads account.');
+  }
+
+  const customerName = selectedAccount.descriptive_name || formattedCustomerId;
+  const managerCustomerId = selectedAccount.manager_customer_id || (connection.meta as any)?.manager_customer_id || null;
 
   const baseMeta =
     connection.meta && typeof connection.meta === 'object' && connection.meta !== null
@@ -1864,8 +1878,12 @@ export async function updateGoogleAdsSelectedCustomer(formData: FormData) {
     .update({
       meta: {
         ...baseMeta,
+        // New structure
         selected_customer_id: formattedCustomerId,
-        customer_id: formattedCustomerId, // Also update customer_id for backwards compatibility
+        selected_customer_name: customerName,
+        manager_customer_id: managerCustomerId,
+        // Legacy fields (for backwards compatibility)
+        customer_id: formattedCustomerId,
         customer_name: customerName,
       },
       updated_at: new Date().toISOString(),
@@ -1920,9 +1938,9 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
     // Continue anyway - might still work with current token
   }
 
-  // Fetch accessible customers using v21 API
-  const { fetchAccessibleGoogleAdsCustomers } = await import('@/lib/integrations/googleads')
-  const fetchResult = await fetchAccessibleGoogleAdsCustomers(tenantId)
+  // Fetch and classify all accounts (MCC and child accounts)
+  const { fetchAndClassifyGoogleAdsAccounts } = await import('@/lib/integrations/googleads')
+  const fetchResult = await fetchAndClassifyGoogleAdsAccounts(tenantId)
 
   const baseMeta =
     connection.meta && typeof connection.meta === 'object' && connection.meta !== null
@@ -1937,37 +1955,54 @@ export async function refreshGoogleAdsCustomers(formData: FormData) {
     // API call failed - set error message
     customersError = fetchResult.error
     updatedMeta.customers_error = customersError
-    updatedMeta.accessible_customers = []
+    updatedMeta.available_customers = []
     statusMessage = 'google-ads-customers-refresh-error'
-  } else if (fetchResult.customers.length === 0) {
-    // No customers found
+  } else if (fetchResult.accounts.length === 0) {
+    // No accounts found
     customersError = 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.'
     updatedMeta.customers_error = customersError
-    updatedMeta.accessible_customers = []
+    updatedMeta.available_customers = []
     updatedMeta.selected_customer_id = null
-  } else if (fetchResult.customers.length === 1) {
-    // Exactly one regular customer account - auto-select it
-    // (fetchAccessibleGoogleAdsCustomers guarantees no manager accounts)
-    const singleCustomer = fetchResult.customers[0]
-    updatedMeta.accessible_customers = fetchResult.customers
-    updatedMeta.selected_customer_id = singleCustomer.id
-    updatedMeta.customer_id = singleCustomer.id // Backwards compatibility
-    updatedMeta.customer_name = singleCustomer.name
-    updatedMeta.customers_error = null
   } else {
-    // Multiple customers (typical MCC scenario) - don't auto-select, force user to choose
-    updatedMeta.accessible_customers = fetchResult.customers
-    customersError = 'Multiple Google Ads accounts found. Please select one in the integration settings.'
-    updatedMeta.customers_error = customersError
+    // Store all accounts
+    updatedMeta.available_customers = fetchResult.accounts
+
+    // Find manager account
+    const managerAccount = fetchResult.accounts.find(a => a.is_manager)
+    if (managerAccount) {
+      updatedMeta.manager_customer_id = managerAccount.customer_id
+    }
+
+    // Check for child accounts
+    const childAccounts = fetchResult.accounts.filter(a => !a.is_manager)
     
-    // Check if previously selected customer is still in the accessible list
-    const previousSelected = typeof baseMeta.selected_customer_id === 'string' ? baseMeta.selected_customer_id : null
-    if (previousSelected && fetchResult.customers.find((c) => c.id === previousSelected)) {
-      // Keep the previously selected customer if it's still accessible
-      updatedMeta.selected_customer_id = previousSelected
-    } else {
-      // Force user to select - don't auto-select anything
+    if (childAccounts.length === 0) {
+      customersError = 'We detected only Manager (MCC) accounts. To sync data, you must have access to at least one standard Google Ads account. Please verify your permissions in Google Ads.'
+      updatedMeta.customers_error = customersError
       updatedMeta.selected_customer_id = null
+    } else {
+      // Check if previously selected customer is still in the available list
+      const previousSelected = typeof baseMeta.selected_customer_id === 'string' ? baseMeta.selected_customer_id : null
+      if (previousSelected && childAccounts.find((a) => a.customer_id === previousSelected)) {
+        // Keep the previously selected customer if it's still available
+        const selectedAccount = childAccounts.find((a) => a.customer_id === previousSelected)
+        updatedMeta.selected_customer_id = previousSelected
+        updatedMeta.selected_customer_name = selectedAccount?.descriptive_name || previousSelected
+      } else {
+        // User must select - don't auto-select
+        updatedMeta.selected_customer_id = null
+        updatedMeta.selected_customer_name = null
+        if (childAccounts.length > 1) {
+          customersError = 'Multiple Google Ads accounts found. Please select one in the integration settings.'
+          updatedMeta.customers_error = customersError
+        }
+      }
+
+      // Also update legacy fields for backwards compatibility
+      updatedMeta.accessible_customers = childAccounts.map(a => ({
+        id: a.customer_id,
+        name: a.descriptive_name,
+      }))
     }
   }
 
