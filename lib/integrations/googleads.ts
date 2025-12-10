@@ -391,7 +391,9 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
     }
 
     // Fetch customer details for each resource
-    const customers: GoogleAdsCustomer[] = [];
+    // Separate manager accounts from regular customer accounts
+    const allCustomers: GoogleAdsCustomer[] = [];
+    const managerAccountIds: string[] = [];
 
     for (const resourceName of resourceNames) {
       // Extract customer ID from resource name (e.g., "customers/1234567890")
@@ -411,29 +413,129 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
           const customerData = await customerResponse.json();
           const customer = customerData.customer;
 
-          customers.push({
+          // Debug logging
+          console.log(`[Google Ads] Customer ${customerId}:`, {
             id: customerId,
-            name: customer?.descriptiveName || customer?.companyName || customerId,
             descriptiveName: customer?.descriptiveName,
+            manager: customer?.manager,
           });
+
+          // Determine manager status ONLY via customer.manager === true
+          if (customer?.manager === true) {
+            // This is a Manager (MCC) account - don't add to customer list
+            managerAccountIds.push(customerId);
+            console.log(`[Google Ads] Manager account detected: ${customerId}`);
+          } else {
+            // Regular customer account
+            allCustomers.push({
+              id: customerId,
+              name: customer?.descriptiveName || customer?.companyName || customerId,
+              descriptiveName: customer?.descriptiveName,
+            });
+          }
         } else {
-          // If we can't fetch details, still add the ID
-          customers.push({
-            id: customerId,
-            name: customerId,
-          });
+          // If we can't fetch details, we cannot determine manager status
+          // Don't add it to either list - log a warning
+          console.warn(`[Google Ads] Failed to fetch customer ${customerId} details: ${customerResponse.status}`);
         }
       } catch (error) {
-        // If individual customer fetch fails, still add the ID
+        // If individual customer fetch fails, log and skip
         console.warn(`[Google Ads] Failed to fetch customer ${customerId} details:`, error);
-        customers.push({
-          id: customerId,
-          name: customerId,
-        });
       }
     }
 
-    return { customers };
+    // If we found manager accounts but no regular customers, fetch child accounts
+    if (managerAccountIds.length > 0 && allCustomers.length === 0) {
+      console.log(`[Google Ads] Only manager accounts found. Fetching child accounts from ${managerAccountIds.length} manager(s)...`);
+
+      for (const managerId of managerAccountIds) {
+        try {
+          // Use searchStream to get customer_client resources
+          // GAQL query to fetch non-manager child accounts
+          const query = `SELECT customer_client.client_customer, customer_client.descriptive_name, customer_client.manager FROM customer_client WHERE customer_client.status = 'ENABLED' AND customer_client.manager = false LIMIT 100`;
+
+          const searchResponse = await fetch(
+            `${GOOGLE_REPORTING_ENDPOINT}/${managerId}:googleAds:searchStream`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'developer-token': GOOGLE_DEVELOPER_TOKEN,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ query }),
+            },
+          );
+
+          if (searchResponse.ok) {
+            // Parse streaming JSON response
+            // searchStream returns newline-delimited JSON where each line is a result
+            const responseText = await searchResponse.text();
+            const lines = responseText.trim().split('\n').filter(line => line.trim());
+
+            for (const line of lines) {
+              try {
+                const result = JSON.parse(line);
+                
+                // searchStream results structure: { results: [{ customerClient: {...} }] }
+                // Or could be direct: { customerClient: {...} }
+                const client = result.results?.[0]?.customerClient || result.customerClient;
+
+                if (client && client.manager === false) {
+                  const clientCustomer = client.clientCustomer;
+                  // Extract ID from "customers/1234567890" format
+                  let clientId = '';
+                  if (typeof clientCustomer === 'string') {
+                    clientId = clientCustomer.replace('customers/', '').trim();
+                  } else if (clientCustomer?.id) {
+                    clientId = String(clientCustomer.id).replace('customers/', '').trim();
+                  }
+
+                  if (clientId) {
+                    console.log(`[Google Ads] Found child account from manager ${managerId}:`, {
+                      id: clientId,
+                      descriptiveName: client.descriptiveName,
+                      manager: client.manager,
+                    });
+
+                    allCustomers.push({
+                      id: clientId,
+                      name: client.descriptiveName || clientId,
+                      descriptiveName: client.descriptiveName,
+                    });
+                  }
+                }
+              } catch (parseError) {
+                // Skip invalid JSON lines (could be metadata or empty lines)
+                console.warn(`[Google Ads] Failed to parse searchStream result line:`, parseError);
+                continue;
+              }
+            }
+          } else {
+            const errorText = await searchResponse.text();
+            console.warn(`[Google Ads] Failed to fetch clients for manager ${managerId}: ${searchResponse.status} ${errorText}`);
+          }
+        } catch (error) {
+          console.warn(`[Google Ads] Error fetching clients for manager ${managerId}:`, error);
+        }
+      }
+    }
+
+    // Deduplicate customers by ID
+    const uniqueCustomers = Array.from(
+      new Map(allCustomers.map(c => [c.id, c])).values()
+    );
+
+    if (uniqueCustomers.length === 0) {
+      return {
+        customers: [],
+        error: 'No regular Google Ads customer accounts found. Only manager (MCC) accounts were detected.',
+      };
+    }
+
+    console.log(`[Google Ads] Returning ${uniqueCustomers.length} non-manager customer account(s):`, uniqueCustomers.map(c => ({ id: c.id, name: c.name })));
+
+    return { customers: uniqueCustomers };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     console.error('[Google Ads] Error fetching accessible customers:', error);
