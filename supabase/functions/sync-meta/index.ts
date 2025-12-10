@@ -1594,7 +1594,14 @@ async function processTenant(
     until: windowOverride?.until,
   })
 
-  await upsertJobLog(client, { tenantId, status: 'running', startedAt })
+  let jobLogInserted = false
+  try {
+    await upsertJobLog(client, { tenantId, status: 'running', startedAt })
+    jobLogInserted = true
+  } catch (logError) {
+    console.error(`Failed to insert initial job log for tenant ${tenantId}:`, logError)
+    // Continue anyway - we'll try to update it later
+  }
 
   try {
     const accessToken = await decryptAccessToken(connection.access_token_enc)
@@ -1982,6 +1989,38 @@ async function processTenant(
     })
 
     return { tenantId, status: 'failed', error: message }
+  } finally {
+    // Ensure job log is always updated, even if the try-catch above fails
+    // This is a safety net in case the job log update in the catch block also fails
+    if (jobLogInserted) {
+      try {
+        // Check if job log was already updated (has finished_at)
+        const { data: existingJob } = await client
+          .from('jobs_log')
+          .select('finished_at')
+          .eq('tenant_id', tenantId)
+          .eq('source', SOURCE)
+          .eq('status', 'running')
+          .eq('started_at', startedAt)
+          .order('started_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        // Only update if still in running status
+        if (existingJob && !existingJob.finished_at) {
+          await upsertJobLog(client, {
+            tenantId,
+            status: 'failed',
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            error: 'Job execution was interrupted or failed unexpectedly',
+          })
+        }
+      } catch (finalError) {
+        // Last resort - log but don't throw
+        console.error(`Failed to update job log in finally block for tenant ${tenantId}:`, finalError)
+      }
+    }
   }
 }
 

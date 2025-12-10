@@ -40,20 +40,41 @@ export async function aggregateDailySales(
   const client = getSupabaseServiceClient();
 
   // Fetch all transactions for the date range
-  const { data: transactions, error: transactionsError } = await client
-    .from('shopify_sales_transactions')
-    .select('event_date, gross_sales, discounts, returns, shopify_order_id, event_type')
-    .eq('tenant_id', tenantId)
-    .gte('event_date', from)
-    .lte('event_date', to);
+  // Note: Supabase has a default limit of 1000 rows, so we need to fetch in batches
+  // or use a higher limit. For daily aggregations, we'll fetch in batches.
+  const TRANSACTION_BATCH_SIZE = 10000;
+  let allTransactions: any[] = [];
+  let offset = 0;
+  let hasMore = true;
 
-  if (transactionsError) {
-    throw new Error(`Failed to fetch transactions: ${transactionsError.message}`);
+  while (hasMore) {
+    const { data: batch, error: transactionsError } = await client
+      .from('shopify_sales_transactions')
+      .select('event_date, gross_sales, discounts, returns, shopify_order_id, event_type')
+      .eq('tenant_id', tenantId)
+      .gte('event_date', from)
+      .lte('event_date', to)
+      .range(offset, offset + TRANSACTION_BATCH_SIZE - 1)
+      .order('event_date', { ascending: true });
+
+    if (transactionsError) {
+      throw new Error(`Failed to fetch transactions: ${transactionsError.message}`);
+    }
+
+    if (batch && batch.length > 0) {
+      allTransactions.push(...batch);
+      offset += TRANSACTION_BATCH_SIZE;
+      hasMore = batch.length === TRANSACTION_BATCH_SIZE;
+    } else {
+      hasMore = false;
+    }
   }
+
+  const transactions = allTransactions;
 
   // Get unique order IDs per date (only SALE events count as orders)
   const orderIdsByDate = new Map<string, Set<string>>();
-  for (const txn of transactions || []) {
+  for (const txn of transactions) {
     if (txn.event_type === 'SALE') {
       const date = txn.event_date as string;
       const orderId = txn.shopify_order_id as string;
@@ -106,7 +127,7 @@ export async function aggregateDailySales(
   // Aggregate by date
   const byDate = new Map<string, DailySalesAggregation>();
 
-  for (const transaction of transactions || []) {
+  for (const transaction of transactions) {
     const date = transaction.event_date as string;
     const grossSales = parseFloat((transaction.gross_sales || 0).toString());
     const discounts = parseFloat((transaction.discounts || 0).toString());
@@ -145,7 +166,7 @@ export async function aggregateDailySales(
         const order = ordersMap.get(orderId);
         if (order && order.is_new_customer === true) {
           // Get net sales from transactions for this order on this date (SALE events only)
-          const orderTransactions = (transactions || []).filter(
+          const orderTransactions = transactions.filter(
             (t) => t.shopify_order_id === orderId && t.event_date === date && t.event_type === 'SALE'
           );
           const orderNetSales = orderTransactions.reduce((sum, t) => {

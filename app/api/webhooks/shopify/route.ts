@@ -10,12 +10,14 @@ const WEBHOOK_ENDPOINT = '/api/webhooks/shopify';
 import {
   calculateShopifyLikeSales,
   type ShopifyOrder as SalesShopifyOrder,
+  calculateDailySales,
+  type SalesMode,
+  type OrderCustomerClassification,
 } from '@/lib/shopify/sales';
 import { fetchShopifyOrderGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
 import { mapOrderToTransactions, type SalesTransaction } from '@/lib/shopify/transaction-mapper';
-import { calculateDailySales, type SalesMode } from '@/lib/shopify/sales';
 import { convertGraphQLOrderToShopifyOrder } from '@/lib/shopify/order-converter';
-import { fetchShopifyOrdersGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
+import { fetchShopifyOrdersGraphQL } from '@/lib/integrations/shopify-graphql';
 import { getShopifyAccessToken } from '@/lib/integrations/shopify';
 
 type ShopifyRefund = {
@@ -227,10 +229,15 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     country = order.shipping_address.country;
   }
 
+  const createdAt = order.created_at
+    ? parseDateInStockholmTimezone(order.created_at)
+    : null;
+
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
+    created_at: createdAt,
     total_price: totalPrice || null,
     total_tax: totalTax || null,
     discount_total: totalDiscounts || null,
@@ -243,8 +250,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder) {
     is_refund: isRefund,
     gross_sales: grossSales,
     net_sales: netSales,
-    is_new_customer: false, // Will be determined below
+    is_new_customer: false, // Deprecated - kept for backward compatibility
     country: country || null,
+    // New fields - will be set during customer history calculation
+    is_first_order_for_customer: false,
+    customer_type_shopify_mode: null,
+    customer_type_financial_mode: null,
   };
 }
 
@@ -359,39 +370,9 @@ async function processWebhookOrder(
 ) {
   let orderRow = mapShopifyOrderToRow(tenantId, order);
 
-  // Determine if customer is new or returning
-  if (orderRow.customer_id && orderRow.processed_at) {
-    // Check if there's an earlier order for this customer
-    const { data: earlierOrders, error: lookupError } = await client
-      .from('shopify_orders')
-      .select('processed_at')
-      .eq('tenant_id', tenantId)
-      .eq('customer_id', orderRow.customer_id)
-      .not('processed_at', 'is', null)
-      .lt('processed_at', orderRow.processed_at)
-      .limit(1);
-
-    if (lookupError) {
-      logger.warn(
-        {
-          route: 'shopify_webhook',
-          action: 'lookup_customer',
-          tenantId,
-          orderId: order.id,
-          customerId: orderRow.customer_id,
-          error_message: lookupError.message,
-        },
-        'Failed to lookup customer order history',
-      );
-      // Default to false if lookup fails
-      orderRow.is_new_customer = false;
-    } else {
-      // If no earlier orders found, this is a new customer
-      orderRow.is_new_customer = !earlierOrders || earlierOrders.length === 0;
-    }
-  } else {
-    orderRow.is_new_customer = false;
-  }
+  // Determine if customer is new or returning using all-time logic from GraphQL
+  // This will be set from GraphQL numberOfOrders after we fetch the order
+  orderRow.is_new_customer = false; // Will be updated from GraphQL data
 
   // Upsert order
   const { error: upsertError } = await client.from('shopify_orders').upsert(orderRow, {
@@ -411,8 +392,55 @@ async function processWebhookOrder(
         orderId: order.id.toString(),
       });
 
-      if (graphqlOrder && !graphqlOrder.test) {
-        // Map to transactions
+      if (graphqlOrder) {
+        // Update customer classification using all-time logic from GraphQL
+        // All-time logic: numberOfOrders === 1 means this is their first order ever (new customer)
+        // This is a preliminary classification that will be corrected by backfill/cron-job
+        if (graphqlOrder.customer) {
+          const numberOfOrders = parseInt(graphqlOrder.customer.numberOfOrders || '0', 10);
+          const isFirstOrder = numberOfOrders === 1;
+          
+          orderRow.is_new_customer = isFirstOrder; // Deprecated - kept for backward compatibility
+          
+          // Set preliminary classification based on numberOfOrders
+          // This will be corrected by backfill which has full customer history
+          orderRow.is_first_order_for_customer = isFirstOrder;
+          
+          // For Shopify Mode: preliminary classification based on numberOfOrders
+          // Backfill will recalculate using full customer history + customer.createdAt
+          orderRow.customer_type_shopify_mode = isFirstOrder ? 'FIRST_TIME' : 'RETURNING';
+          
+          // DEPRECATED: Financial Mode removed - set to null for backward compatibility
+          orderRow.customer_type_financial_mode = null;
+        } else {
+          // Guest checkout - not a new customer
+          orderRow.is_new_customer = false;
+          orderRow.is_first_order_for_customer = false;
+          orderRow.customer_type_shopify_mode = 'GUEST';
+          // DEPRECATED: Financial Mode removed
+          orderRow.customer_type_financial_mode = null;
+        }
+        
+        // Re-upsert order with correct customer classification
+        const { error: reUpsertError } = await client.from('shopify_orders').upsert(orderRow, {
+          onConflict: 'tenant_id,order_id',
+        });
+        
+        if (reUpsertError) {
+          logger.warn(
+            {
+              route: 'shopify_webhook',
+              action: 're_upsert_order_with_customer',
+              tenantId,
+              orderId: order.id,
+              error_message: reUpsertError.message,
+            },
+            'Failed to re-upsert order with customer classification',
+          );
+        }
+        
+        if (!graphqlOrder.test) {
+          // Map to transactions
         const transactions = mapOrderToTransactions(graphqlOrder, 'Europe/Stockholm');
 
         // Convert to database format
@@ -466,6 +494,7 @@ async function processWebhookOrder(
             },
             'Successfully created transactions for webhook order',
           );
+        }
         }
       }
     }
@@ -555,7 +584,7 @@ async function processWebhookOrder(
       // Need to recalculate from all orders for affected dates
       if (orderRow.processed_at) {
         try {
-          // Get affected dates (created_at for Shopify mode, processed_at for Financial mode)
+          // Get affected dates (created_at for Shopify mode)
           const orderCreatedDate = order.created_at
             ? new Date(order.created_at).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' })
             : null;
@@ -592,24 +621,63 @@ async function processWebhookOrder(
               excludeTest: true,
             });
 
-            // Fetch is_new_customer from shopify_orders for all affected order IDs
+            // Build orderCustomerClassification map from database (stable classification)
+            // First, get order IDs from GraphQL
             const orderIds = graphqlOrders.map((o) => (o.legacyResourceId || o.id).toString());
-            const orderCustomerMap = new Map<string, boolean>();
             
-            if (orderIds.length > 0) {
-              // Fetch in batches if needed (Supabase limit is 1000)
-              for (let i = 0; i < orderIds.length; i += 1000) {
-                const batch = orderIds.slice(i, i + 1000);
-                const { data: ordersData } = await client
-                  .from('shopify_orders')
-                  .select('order_id, is_new_customer')
-                  .eq('tenant_id', tenantId)
-                  .in('order_id', batch);
-                
-                if (ordersData) {
-                  for (const order of ordersData) {
-                    orderCustomerMap.set(order.order_id as string, order.is_new_customer ?? false);
-                  }
+            // Fetch customer classification from database for these orders
+            const { data: orderClassifications } = await client
+              .from('shopify_orders')
+              .select('order_id, customer_type_shopify_mode, customer_type_financial_mode, is_first_order_for_customer, created_at, customer_id')
+              .eq('tenant_id', tenantId)
+              .in('order_id', orderIds);
+            
+            // Build classification map
+            const orderCustomerClassification = new Map<string, OrderCustomerClassification>();
+            const orderToCustomerCreatedAt = new Map<string, string>();
+            
+            // Get customer.createdAt from GraphQL
+            for (const graphqlOrder of graphqlOrders) {
+              const orderId = (graphqlOrder.legacyResourceId || graphqlOrder.id).toString();
+              if (graphqlOrder.customer?.createdAt) {
+                orderToCustomerCreatedAt.set(orderId, graphqlOrder.customer.createdAt);
+              }
+            }
+            
+            // Build classification map from database + GraphQL customer.createdAt
+            for (const dbOrder of orderClassifications || []) {
+              const orderId = dbOrder.order_id as string;
+              const shopifyMode = (dbOrder.customer_type_shopify_mode as 'FIRST_TIME' | 'RETURNING' | 'GUEST' | 'UNKNOWN' | null) || 'UNKNOWN';
+              
+              orderCustomerClassification.set(orderId, {
+                shopifyMode: shopifyMode === null ? 'UNKNOWN' : shopifyMode,
+                financialMode: 'RETURNING' as const, // DEPRECATED - not used anymore
+                customerCreatedAt: orderToCustomerCreatedAt.get(orderId) || null,
+                isFirstOrderForCustomer: dbOrder.is_first_order_for_customer || false,
+              });
+            }
+            
+            // For orders not in database yet (shouldn't happen, but fallback)
+            for (const graphqlOrder of graphqlOrders) {
+              const orderId = (graphqlOrder.legacyResourceId || graphqlOrder.id).toString();
+              if (!orderCustomerClassification.has(orderId)) {
+                // Fallback classification
+                if (!graphqlOrder.customer) {
+                  orderCustomerClassification.set(orderId, {
+                    shopifyMode: 'GUEST',
+                    financialMode: 'GUEST' as const, // DEPRECATED - not used
+                    customerCreatedAt: null,
+                    isFirstOrderForCustomer: false,
+                  });
+                } else {
+                  // Use numberOfOrders as fallback
+                  const numberOfOrders = parseInt(graphqlOrder.customer.numberOfOrders || '0', 10);
+                  orderCustomerClassification.set(orderId, {
+                    shopifyMode: numberOfOrders === 1 ? 'FIRST_TIME' : 'RETURNING',
+                    financialMode: 'RETURNING' as const, // DEPRECATED - not used
+                    customerCreatedAt: graphqlOrder.customer.createdAt || null,
+                    isFirstOrderForCustomer: numberOfOrders === 1,
+                  });
                 }
               }
             }
@@ -619,11 +687,18 @@ async function processWebhookOrder(
               .filter((o) => !o.test)
               .map(convertGraphQLOrderToShopifyOrder);
 
-            // Calculate daily sales for both modes, passing the customer map
-            const shopifyModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'shopify', 'Europe/Stockholm', orderCustomerMap);
-            const financialModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'financial', 'Europe/Stockholm', orderCustomerMap);
+            // Calculate daily sales for Shopify Mode only
+            const shopifyModeDaily = calculateDailySales(
+              shopifyOrdersWithTransactions,
+              'shopify',
+              'Europe/Stockholm',
+              undefined, // Legacy orderCustomerMap not used
+              orderCustomerClassification,
+              fetchStartDate.toISOString().slice(0, 10), // Reporting period start
+              fetchEndDate.toISOString().slice(0, 10), // Reporting period end
+            );
 
-            // Filter to only affected dates
+            // Filter to only affected dates (Shopify Mode only)
             const shopifyRows = shopifyModeDaily
               .filter((row) => affectedDates.has(row.date))
               .map((row) => ({
@@ -636,29 +711,16 @@ async function processWebhookOrder(
                 discounts_excl_tax: row.discountsExclTax || null,
                 orders_count: row.ordersCount,
                 currency: row.currency || null,
-                new_customer_net_sales: row.newCustomerNetSales || null,
+                new_customer_net_sales: row.newCustomerNetSales || 0,
+                returning_customer_net_sales: row.returningCustomerNetSales || 0,
+                guest_net_sales: row.guestNetSales || 0,
               }));
 
-            const financialRows = financialModeDaily
-              .filter((row) => affectedDates.has(row.date))
-              .map((row) => ({
-                tenant_id: tenantId,
-                date: row.date,
-                mode: 'financial' as SalesMode,
-                net_sales_excl_tax: row.netSalesExclTax,
-                gross_sales_excl_tax: row.grossSalesExclTax || null,
-                refunds_excl_tax: row.refundsExclTax || null,
-                discounts_excl_tax: row.discountsExclTax || null,
-                orders_count: row.ordersCount,
-                currency: row.currency || null,
-                new_customer_net_sales: row.newCustomerNetSales || null,
-              }));
-
-            // Upsert daily sales
-            if (shopifyRows.length > 0 || financialRows.length > 0) {
+            // Upsert daily sales (Shopify Mode only)
+            if (shopifyRows.length > 0) {
               const { error: dailySalesError } = await client
                 .from('shopify_daily_sales')
-                .upsert([...shopifyRows, ...financialRows], {
+                .upsert(shopifyRows, {
                   onConflict: 'tenant_id,date,mode',
                 });
 
@@ -681,9 +743,8 @@ async function processWebhookOrder(
                     tenantId,
                     orderId: order.id,
                     shopifyRows: shopifyRows.length,
-                    financialRows: financialRows.length,
                   },
-                  'Updated daily sales for both modes',
+                  'Updated daily sales (Shopify Mode)',
                 );
               }
             }

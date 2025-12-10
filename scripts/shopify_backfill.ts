@@ -75,6 +75,7 @@ import {
   type ShopifyOrder as SalesShopifyOrder,
   calculateDailySales,
   type SalesMode,
+  type OrderCustomerClassification,
 } from '@/lib/shopify/sales';
 import { fetchShopifyOrdersGraphQL, type GraphQLOrder } from '@/lib/integrations/shopify-graphql';
 import { mapOrderToTransactions, type SalesTransaction } from '@/lib/shopify/transaction-mapper';
@@ -159,6 +160,7 @@ type ShopifyOrderRow = {
   tenant_id: string;
   order_id: string;
   processed_at: string | null;
+  created_at: string | null;
   total_price: number | null;
   total_tax: number | null;
   discount_total: number | null;
@@ -171,8 +173,46 @@ type ShopifyOrderRow = {
   is_refund: boolean;
   gross_sales: number | null;
   net_sales: number | null;
-  is_new_customer: boolean;
+  is_new_customer: boolean; // Deprecated - kept for backward compatibility
   country: string | null;
+  // New customer classification fields
+  is_first_order_for_customer: boolean;
+  customer_type_shopify_mode: 'FIRST_TIME' | 'RETURNING' | 'GUEST' | 'UNKNOWN' | null;
+    // DEPRECATED: customer_type_financial_mode - kept for backward compatibility but not used
+    customer_type_financial_mode?: 'NEW' | 'RETURNING' | 'GUEST' | 'UNKNOWN' | null;
+};
+
+type CustomerOrderInfo = {
+  order_id: string;
+  created_at: string;
+  net_sales: number;
+  is_cancelled: boolean;
+  is_full_refunded: boolean;
+  financial_status: string | null;
+};
+
+type CustomerHistory = {
+  first_order_id_all_time: string;
+  first_revenue_order_id: string | null; // First order with NetSales > 0 and not cancelled/full-refunded
+  all_orders: CustomerOrderInfo[];
+  is_first_order_for_customer: boolean;
+  customer_type_shopify_mode: 'FIRST_TIME' | 'RETURNING' | 'GUEST' | 'UNKNOWN' | null;
+    // DEPRECATED: customer_type_financial_mode - kept for backward compatibility but not used
+    customer_type_financial_mode?: 'NEW' | 'RETURNING' | 'GUEST' | 'UNKNOWN' | null;
+};
+
+type CustomerOrderInfo = {
+  order_id: string;
+  created_at: string;
+  net_sales: number;
+  is_cancelled: boolean;
+  is_full_refunded: boolean;
+};
+
+type CustomerHistory = {
+  first_order_id_all_time: string;
+  first_revenue_order_id: string | null; // First order with NetSales > 0 and not cancelled/full-refunded
+  all_orders: CustomerOrderInfo[];
 };
 
 function normalizeShopDomain(domain: string): string {
@@ -289,10 +329,15 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     country = order.shipping_address.country;
   }
 
+  const createdAt = order.created_at
+    ? new Date(order.created_at).toISOString().slice(0, 10)
+    : null;
+
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
+    created_at: createdAt,
     total_price: totalPrice || null,
     total_tax: totalTax || null,
     discount_total: totalDiscounts || null,
@@ -305,8 +350,12 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     is_refund: isRefund,
     gross_sales: grossSales,
     net_sales: netSales,
-    is_new_customer: false, // Will be determined during batch processing
+    is_new_customer: false, // Deprecated - kept for backward compatibility
     country: country || null,
+    // New fields - will be set later during customer history calculation
+    is_first_order_for_customer: false,
+    customer_type_shopify_mode: null,
+    customer_type_financial_mode: null,
   };
 }
 
@@ -896,14 +945,9 @@ async function main() {
     }
   }
 
-  // Determine if customers are new or returning
-  // Sort orders by processed_at (oldest first) to process chronologically
-  orderRows.sort((a, b) => {
-    if (!a.processed_at) return 1;
-    if (!b.processed_at) return -1;
-    return a.processed_at.localeCompare(b.processed_at);
-  });
-
+  // Calculate stable customer history for all customers in this batch
+  console.log(`\n[shopify_backfill] Calculating customer history for classification...`);
+  
   // Get all unique customer IDs from this batch
   const customerIdsInBatch = new Set<string>();
   orderRows.forEach((row) => {
@@ -912,59 +956,147 @@ async function main() {
     }
   });
 
-  // Bulk check: Get earliest processed_at for each customer from database
-  const customerEarliestOrder = new Map<string, string | null>();
+  console.log(`[shopify_backfill] Found ${customerIdsInBatch.size} unique customers in batch`);
+
+  // Fetch ALL orders for these customers from database (for stable history calculation)
+  const customerHistories = new Map<string, CustomerHistory>();
+  
   if (customerIdsInBatch.size > 0) {
-    const { data: existingOrders, error: lookupError } = await supabase
+    console.log(`[shopify_backfill] Fetching all historical orders for customers...`);
+    const { data: allCustomerOrders, error: lookupError } = await supabase
       .from('shopify_orders')
-      .select('customer_id, processed_at')
+      .select('order_id, customer_id, created_at, processed_at, net_sales, gross_sales, financial_status, total_refunds')
       .eq('tenant_id', tenantId)
       .in('customer_id', Array.from(customerIdsInBatch))
       .not('customer_id', 'is', null)
-      .not('processed_at', 'is', null);
+      .not('created_at', 'is', null)
+      .order('created_at', { ascending: true });
 
     if (lookupError) {
       console.warn(`[shopify_backfill] Failed to lookup existing orders: ${lookupError.message}`);
-    } else if (existingOrders) {
-      for (const order of existingOrders) {
-        const customerId = order.customer_id as string;
-        const processedAt = order.processed_at as string;
-        const currentEarliest = customerEarliestOrder.get(customerId);
-        if (!currentEarliest || (processedAt && processedAt < currentEarliest)) {
-          customerEarliestOrder.set(customerId, processedAt);
+    } else if (allCustomerOrders) {
+      // Group orders by customer
+      const ordersByCustomer = new Map<string, CustomerOrderInfo[]>();
+      
+      for (const dbOrder of allCustomerOrders) {
+        const customerId = dbOrder.customer_id as string;
+        if (!ordersByCustomer.has(customerId)) {
+          ordersByCustomer.set(customerId, []);
         }
+        
+        const netSales = parseFloat((dbOrder.net_sales || 0).toString()) || 0;
+        const totalRefunds = parseFloat((dbOrder.total_refunds || 0).toString()) || 0;
+        // Check if cancelled based on financial_status (voided typically means cancelled)
+        const financialStatus = (dbOrder.financial_status as string) || '';
+        const isCancelled = financialStatus === 'voided' || financialStatus.toLowerCase().includes('cancelled');
+        const isFullRefunded = !isCancelled && netSales > 0 && Math.abs(totalRefunds) >= Math.abs(netSales);
+        
+        ordersByCustomer.get(customerId)!.push({
+          order_id: dbOrder.order_id as string,
+          created_at: dbOrder.created_at as string,
+          net_sales: netSales,
+          is_cancelled: isCancelled,
+          is_full_refunded: isFullRefunded,
+          financial_status: dbOrder.financial_status as string | null,
+        });
+      }
+      
+      // Add orders from current batch to history
+      for (const row of orderRows) {
+        if (row.customer_id && row.created_at) {
+          if (!ordersByCustomer.has(row.customer_id)) {
+            ordersByCustomer.set(row.customer_id, []);
+          }
+          
+          const netSales = row.net_sales || 0;
+          const totalRefunds = Math.abs(row.total_refunds || 0);
+          const isCancelled = false; // Will be checked from order data
+          const isFullRefunded = netSales > 0 && totalRefunds >= netSales;
+          
+          // Only add if not already in history
+          const existing = ordersByCustomer.get(row.customer_id)!;
+          if (!existing.find(o => o.order_id === row.order_id)) {
+            existing.push({
+              order_id: row.order_id,
+              created_at: row.created_at,
+              net_sales: netSales,
+              is_cancelled: isCancelled,
+              is_full_refunded: isFullRefunded,
+              financial_status: row.financial_status,
+            });
+          }
+        }
+      }
+      
+      // Calculate customer history for each customer
+      for (const [customerId, orders] of ordersByCustomer.entries()) {
+        // Sort by created_at ascending
+        const sortedOrders = [...orders].sort((a, b) => a.created_at.localeCompare(b.created_at));
+        
+        if (sortedOrders.length === 0) continue;
+        
+        const firstOrderAllTime = sortedOrders[0];
+        
+        // Find first revenue-generating order (NetSales > 0 and not cancelled/full-refunded)
+        let firstRevenueOrder: CustomerOrderInfo | null = null;
+        for (const order of sortedOrders) {
+          if (order.net_sales > 0 && !order.is_cancelled && !order.is_full_refunded) {
+            firstRevenueOrder = order;
+            break;
+          }
+        }
+        
+        customerHistories.set(customerId, {
+          first_order_id_all_time: firstOrderAllTime.order_id,
+          first_revenue_order_id: firstRevenueOrder?.order_id || null,
+          all_orders: sortedOrders,
+        });
       }
     }
   }
 
-  // Track customers seen in this batch chronologically
-  const customersSeenInBatch = new Map<string, string>();
+  console.log(`[shopify_backfill] Calculated history for ${customerHistories.size} customers`);
 
-  // Determine is_new_customer for each order
+  // Classify each order based on customer history
+  // We also need customer.createdAt from GraphQL - will fetch that next
+  // For now, set preliminary classifications
   orderRows = orderRows.map((row) => {
-    if (!row.customer_id || !row.processed_at) {
-      return { ...row, is_new_customer: false };
+    if (!row.customer_id) {
+      // Guest checkout
+      return {
+        ...row,
+        is_first_order_for_customer: false,
+        customer_type_shopify_mode: 'GUEST' as const,
+        customer_type_financial_mode: 'GUEST' as const,
+        is_new_customer: false,
+      };
     }
-
-    // Check if we've seen this customer earlier in this batch
-    const seenInBatchAt = customersSeenInBatch.get(row.customer_id);
-    if (seenInBatchAt && seenInBatchAt < row.processed_at) {
-      customersSeenInBatch.set(row.customer_id, seenInBatchAt);
-      return { ...row, is_new_customer: false };
+    
+    const history = customerHistories.get(row.customer_id);
+    if (!history) {
+      // No history found - this might be a new customer
+      // Will be determined more accurately after GraphQL fetch
+      return {
+        ...row,
+        is_first_order_for_customer: true, // Preliminary - might be updated
+        customer_type_shopify_mode: null,
+        customer_type_financial_mode: null,
+        is_new_customer: false,
+      };
     }
-
-    // Check if customer exists in database with earlier order
-    const earliestInDb = customerEarliestOrder.get(row.customer_id);
-    if (earliestInDb && earliestInDb < row.processed_at) {
-      customersSeenInBatch.set(row.customer_id, earliestInDb);
-      return { ...row, is_new_customer: false };
-    }
-
-    // This is a new customer (first order in batch and no earlier order in DB)
-    if (!seenInBatchAt) {
-      customersSeenInBatch.set(row.customer_id, row.processed_at);
-    }
-    return { ...row, is_new_customer: true };
+    
+    const isFirstOrderAllTime = row.order_id === history.first_order_id_all_time;
+    const isFirstRevenueOrder = history.first_revenue_order_id && row.order_id === history.first_revenue_order_id;
+    
+    // DEPRECATED: Financial mode classification removed - kept null for backward compatibility
+    return {
+      ...row,
+      is_first_order_for_customer: isFirstOrderAllTime,
+      customer_type_financial_mode: null, // DEPRECATED - not used anymore
+      // Shopify mode will be set after GraphQL fetch (needs customer.createdAt)
+      customer_type_shopify_mode: null,
+      is_new_customer: false, // Deprecated
+    };
   });
 
   console.log(`\n[shopify_backfill] Mapped ${orderRows.length} orders to database rows`);
@@ -1227,53 +1359,184 @@ async function main() {
   if (graphqlOrders.length > 0) {
     console.log(`\n[shopify_backfill] Calculating daily sales for both modes...`);
     
-    // Create map of order_id -> is_new_customer from the orderRows we just saved
-    const orderCustomerMap = new Map<string, boolean>();
-    for (const row of orderRows) {
-      if (row.order_id) {
-        orderCustomerMap.set(row.order_id, row.is_new_customer ?? false);
+    // Build orderCustomerClassification map from GraphQL data and orderRows
+    console.log(`[shopify_backfill] Building customer classification map from GraphQL data...`);
+    const orderCustomerClassification = new Map<string, OrderCustomerClassification>();
+    const fromDateObj = new Date(`${since}T00:00:00`);
+    const toDateObj = new Date(`${until}T23:59:59`);
+    
+    for (const graphqlOrder of graphqlOrders) {
+      const orderId = (graphqlOrder.legacyResourceId || graphqlOrder.id).toString();
+      const orderRow = orderRows.find(r => r.order_id === orderId);
+      
+      if (!orderRow) continue;
+      
+      if (!graphqlOrder.customer) {
+        // Guest checkout
+        orderCustomerClassification.set(orderId, {
+          shopifyMode: 'GUEST',
+          financialMode: 'GUEST', // DEPRECATED - kept for backward compatibility
+          customerCreatedAt: null,
+          isFirstOrderForCustomer: false,
+        });
+      } else {
+        const customerCreatedAt = graphqlOrder.customer.createdAt || null;
+        const numberOfOrders = parseInt(graphqlOrder.customer.numberOfOrders || '0', 10);
+        let shopifyMode: 'FIRST_TIME' | 'RETURNING' | 'GUEST' | 'UNKNOWN' = 'UNKNOWN';
+        
+        // Shopify Mode classification: Def 6 - Customer created in period OR (numberOfOrders === 1)
+        // Use GraphQL order.createdAt (original, not modified)
+        // CRITICAL: We only classify orders as NEW/FIRST_TIME if order.createdAt (from GraphQL) is in the reporting period
+        // Orders that are included via refunds or processed_at (but created_at outside period) should be RETURNING
+        const graphqlOrderCreatedAt = graphqlOrder.createdAt;
+        const orderCreatedAtDate = graphqlOrderCreatedAt 
+          ? new Date(graphqlOrderCreatedAt).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' })
+          : null;
+        const orderCreatedInPeriod = orderCreatedAtDate && orderCreatedAtDate >= since && orderCreatedAtDate <= until;
+        
+        if (orderCreatedInPeriod) {
+          // Order was created in period - check if customer is new using Def 6 logic
+          if (customerCreatedAt) {
+            const customerCreatedDate = new Date(customerCreatedAt);
+            const customerCreatedInPeriod = customerCreatedDate >= fromDateObj && customerCreatedDate <= toDateObj;
+            
+            // Def 6: NEW if (customer created in period) OR (numberOfOrders === 1)
+            if (customerCreatedInPeriod || numberOfOrders === 1) {
+              shopifyMode = 'FIRST_TIME';
+            } else {
+              shopifyMode = 'RETURNING';
+            }
+          } else if (numberOfOrders === 1) {
+            // No customer.createdAt but numberOfOrders === 1 - classify as FIRST_TIME
+            shopifyMode = 'FIRST_TIME';
+          } else {
+            shopifyMode = 'RETURNING';
+          }
+        } else {
+          // Order was NOT created in period (included via refund or processed_at) - always RETURNING
+          shopifyMode = 'RETURNING';
+        }
+        
+        // DEPRECATED: Financial mode removed - set to RETURNING for backward compatibility
+        orderCustomerClassification.set(orderId, {
+          shopifyMode,
+          financialMode: 'RETURNING' as 'NEW' | 'RETURNING' | 'GUEST' | 'UNKNOWN', // DEPRECATED - not used
+          customerCreatedAt,
+          isFirstOrderForCustomer: orderRow.is_first_order_for_customer,
+        });
       }
     }
+    
+    // Update orderRows with Shopify Mode classification (if not already set)
+    const updatedOrderRows = orderRows.map((row) => {
+      const classification = orderCustomerClassification.get(row.order_id);
+      if (classification && !row.customer_type_shopify_mode) {
+        return {
+          ...row,
+          customer_type_shopify_mode: classification.shopifyMode,
+          is_new_customer: classification.shopifyMode === 'FIRST_TIME', // Deprecated field
+        };
+      }
+      return row;
+    });
+    
+    orderRows = updatedOrderRows;
+    
+    // Log classification summary (Shopify Mode only)
+    const shopifyNew = orderRows.filter(r => r.customer_type_shopify_mode === 'FIRST_TIME').length;
+    const shopifyReturning = orderRows.filter(r => r.customer_type_shopify_mode === 'RETURNING').length;
+    const shopifyGuest = orderRows.filter(r => r.customer_type_shopify_mode === 'GUEST').length;
+    
+    console.log(`[shopify_backfill] Customer classification summary (Shopify Mode):`);
+    console.log(`[shopify_backfill]   FIRST_TIME: ${shopifyNew}, RETURNING: ${shopifyReturning}, GUEST: ${shopifyGuest}`);
     
     // Convert GraphQL orders to ShopifyOrderWithTransactions format
     const shopifyOrdersWithTransactions = graphqlOrders
       .filter((order) => !order.test) // Exclude test orders
       .map(convertGraphQLOrderToShopifyOrder);
 
-    // Calculate daily sales for both modes, passing the customer map
-    const shopifyModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'shopify', 'Europe/Stockholm', orderCustomerMap);
-    const financialModeDaily = calculateDailySales(shopifyOrdersWithTransactions, 'financial', 'Europe/Stockholm', orderCustomerMap);
+    // For Shopify Mode: Fetch orders directly with created_at filter (matches deep dive script)
+    // This ensures we get the exact same dataset as deep dive script for comparison
+    const shopifyModeGraphQLOrders = await fetchShopifyOrdersGraphQL({
+      tenantId,
+      shopDomain,
+      since,
+      until,
+      excludeTest: true,
+    });
+    
+    const shopifyModeOrdersWithTransactions = shopifyModeGraphQLOrders
+      .filter((order) => !order.test)
+      .map(convertGraphQLOrderToShopifyOrder);
+    
+    // Build classification map for Shopify Mode orders (subset of full dataset)
+    // Note: We need to ensure these orders are in our orderCustomerClassification map
+    // If not, we'll use the same classification logic but only for orders created in period
+    const shopifyModeClassification = new Map<string, OrderCustomerClassification>();
+    for (const graphqlOrder of shopifyModeGraphQLOrders) {
+      const orderId = (graphqlOrder.legacyResourceId || graphqlOrder.id).toString();
+      const existingClassification = orderCustomerClassification.get(orderId);
+      if (existingClassification) {
+        shopifyModeClassification.set(orderId, existingClassification);
+      } else {
+        // Fallback: classify on the fly if not in main map
+        if (!graphqlOrder.customer) {
+          shopifyModeClassification.set(orderId, {
+            shopifyMode: 'GUEST',
+            financialMode: 'GUEST',
+            customerCreatedAt: null,
+            isFirstOrderForCustomer: false,
+          });
+        } else {
+          const customerCreatedAt = graphqlOrder.customer.createdAt || null;
+          const numberOfOrders = parseInt(graphqlOrder.customer.numberOfOrders || '0', 10);
+          const customerCreatedDate = customerCreatedAt ? new Date(customerCreatedAt) : null;
+          const customerCreatedInPeriod = customerCreatedDate && 
+            customerCreatedDate >= fromDateObj && customerCreatedDate <= toDateObj;
+          
+          let shopifyMode: 'FIRST_TIME' | 'RETURNING' | 'GUEST' | 'UNKNOWN' = 'RETURNING';
+          if (customerCreatedInPeriod || numberOfOrders === 1) {
+            shopifyMode = 'FIRST_TIME';
+          }
+          
+          shopifyModeClassification.set(orderId, {
+            shopifyMode,
+            financialMode: 'RETURNING' as const, // DEPRECATED - not used
+            customerCreatedAt,
+            isFirstOrderForCustomer: numberOfOrders === 1,
+          });
+        }
+      }
+    }
+
+    // Calculate daily sales for Shopify Mode only
+    const shopifyModeDaily = calculateDailySales(
+      shopifyModeOrdersWithTransactions, // Only orders created in period for Shopify Mode
+      'shopify', 
+      'Europe/Stockholm', 
+      undefined, // Legacy orderCustomerMap - not used
+      shopifyModeClassification, // Classification map for Shopify Mode orders only
+      since, // Reporting period start for customer.createdAt check
+      until, // Reporting period end
+    );
 
     console.log(`[shopify_backfill] Shopify mode: ${shopifyModeDaily.length} daily rows`);
-    console.log(`[shopify_backfill] Financial mode: ${financialModeDaily.length} daily rows`);
 
-    // Prepare rows for database
-    const dailySalesRows = [
-      ...shopifyModeDaily.map((row) => ({
-        tenant_id: tenantId,
-        date: row.date,
-        mode: 'shopify' as SalesMode,
-        net_sales_excl_tax: row.netSalesExclTax,
-        gross_sales_excl_tax: row.grossSalesExclTax || null,
-        refunds_excl_tax: row.refundsExclTax || null,
-        discounts_excl_tax: row.discountsExclTax || null,
-        orders_count: row.ordersCount,
-        currency: row.currency || null,
-        new_customer_net_sales: row.newCustomerNetSales || null,
-      })),
-      ...financialModeDaily.map((row) => ({
-        tenant_id: tenantId,
-        date: row.date,
-        mode: 'financial' as SalesMode,
-        net_sales_excl_tax: row.netSalesExclTax,
-        gross_sales_excl_tax: row.grossSalesExclTax || null,
-        refunds_excl_tax: row.refundsExclTax || null,
-        discounts_excl_tax: row.discountsExclTax || null,
-        orders_count: row.ordersCount,
-        currency: row.currency || null,
-        new_customer_net_sales: row.newCustomerNetSales || null,
-      })),
-    ];
+    // Prepare rows for database (Shopify Mode only)
+    const dailySalesRows = shopifyModeDaily.map((row) => ({
+      tenant_id: tenantId,
+      date: row.date,
+      mode: 'shopify' as SalesMode,
+      net_sales_excl_tax: row.netSalesExclTax,
+      gross_sales_excl_tax: row.grossSalesExclTax || null,
+      refunds_excl_tax: row.refundsExclTax || null,
+      discounts_excl_tax: row.discountsExclTax || null,
+      orders_count: row.ordersCount,
+      currency: row.currency || null,
+      new_customer_net_sales: row.newCustomerNetSales || 0,
+      returning_customer_net_sales: row.returningCustomerNetSales || 0,
+      guest_net_sales: row.guestNetSales || 0,
+    }));
 
     // Save daily sales to database in batches
     console.log(`[shopify_backfill] Upserting ${dailySalesRows.length} daily sales rows...`);

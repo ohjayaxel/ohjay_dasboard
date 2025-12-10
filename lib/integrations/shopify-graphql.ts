@@ -10,13 +10,69 @@ import { normalizeShopDomain, getShopifyAccessToken } from './shopify';
 
 const SHOPIFY_API_VERSION = '2023-10';
 
+export type GraphQLCustomer = {
+  id: string;
+  email?: string | null;
+  numberOfOrders?: string; // Total number of orders this customer has placed (including this one) - returned as string from Shopify API
+  createdAt?: string | null; // Customer creation date
+};
+
+export type GraphQLAddress = {
+  countryCode?: string | null;
+  country?: string | null;
+};
+
 export type GraphQLOrder = {
   id: string;
   name: string;
   legacyResourceId: string; // Order ID as string (e.g., "1234567890")
   createdAt: string;
+  processedAt?: string | null;
+  updatedAt?: string | null;
+  cancelledAt?: string | null;
   test: boolean;
   currencyCode: string;
+  customer?: GraphQLCustomer | null;
+  billingAddress?: GraphQLAddress | null;
+  shippingAddress?: GraphQLAddress | null;
+  totalPriceSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
+  subtotalPriceSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
+  totalDiscountsSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
+  totalTaxSet?: {
+    shopMoney: {
+      amount: string;
+      currencyCode: string;
+    };
+  };
+  transactions?: Array<{
+    id: string;
+    kind: string;
+    status: string;
+    processedAt: string | null;
+    gateway: string | null;
+    amountSet: {
+      shopMoney: {
+        amount: string;
+        currencyCode: string;
+      };
+    };
+    paymentMethod: string | null;
+  }>;
   lineItems: {
     edges: Array<{
       node: {
@@ -30,8 +86,22 @@ export type GraphQLOrder = {
             currencyCode: string;
           };
         };
+        discountedUnitPriceSet?: {
+          shopMoney: {
+            amount: string;
+            currencyCode: string;
+          };
+        };
         discountAllocations: Array<{
           allocatedAmountSet: {
+            shopMoney: {
+              amount: string;
+              currencyCode: string;
+            };
+          };
+        }>;
+        taxLines?: Array<{
+          priceSet: {
             shopMoney: {
               amount: string;
               currencyCode: string;
@@ -48,6 +118,12 @@ export type GraphQLOrder = {
       edges: Array<{
         node: {
           quantity: number;
+          subtotalSet?: {
+            shopMoney: {
+              amount: string;
+              currencyCode: string;
+            };
+          };
           lineItem: {
             id: string;
             sku: string | null;
@@ -101,8 +177,63 @@ const ORDERS_QUERY = `
           name
           legacyResourceId
           createdAt
+          processedAt
+          updatedAt
+          cancelledAt
           test
           currencyCode
+          customer {
+            id
+            email
+            numberOfOrders
+            createdAt
+          }
+          billingAddress {
+            countryCode
+            country
+          }
+          shippingAddress {
+            countryCode
+            country
+          }
+          totalPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          subtotalPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          totalDiscountsSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          totalTaxSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          transactions(first: 50) {
+            id
+            kind
+            status
+            processedAt
+            gateway
+            amountSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            paymentMethod
+          }
           lineItems(first: 250) {
             edges {
               node {
@@ -116,8 +247,22 @@ const ORDERS_QUERY = `
                     currencyCode
                   }
                 }
+                discountedUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
                 discountAllocations {
                   allocatedAmountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+                taxLines {
+                  priceSet {
                     shopMoney {
                       amount
                       currencyCode
@@ -134,6 +279,12 @@ const ORDERS_QUERY = `
               edges {
                 node {
                   quantity
+                  subtotalSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
                   lineItem {
                     id
                     sku
@@ -168,8 +319,9 @@ export async function fetchShopifyOrdersGraphQL(params: {
   since?: string;
   until?: string;
   excludeTest?: boolean;
+  accessToken?: string; // Optional: pass directly to avoid getShopifyAccessToken call
 }): Promise<GraphQLOrder[]> {
-  const accessToken = await getShopifyAccessToken(params.tenantId);
+  const accessToken = params.accessToken || await getShopifyAccessToken(params.tenantId);
   if (!accessToken) {
     throw new Error('No access token found for this tenant');
   }
@@ -233,6 +385,22 @@ export async function fetchShopifyOrdersGraphQL(params: {
     }
 
     const data = result.data;
+    
+    // DEBUG: Log raw response for first order to verify customer data exists
+    if (data.orders.edges.length > 0 && allOrders.length === 0) {
+      const firstRawOrder = data.orders.edges[0].node;
+      console.log(`[shopify-graphql] DEBUG: First order RAW response - customer exists: ${firstRawOrder.customer ? 'YES' : 'NO'}`);
+      if (firstRawOrder.customer) {
+        console.log(`[shopify-graphql] DEBUG: First order customer data:`, JSON.stringify({
+          id: firstRawOrder.customer.id,
+          email: firstRawOrder.customer.email,
+          numberOfOrders: firstRawOrder.customer.numberOfOrders,
+        }));
+      } else {
+        console.log(`[shopify-graphql] DEBUG: First order has no customer (guest checkout)`);
+      }
+    }
+    
     const orders = data.orders.edges.map((edge) => edge.node);
 
     // Filter out test orders if excludeTest is true

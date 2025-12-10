@@ -8,7 +8,7 @@ const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:3000';
 
-const SHOPIFY_SCOPES = ['read_orders'];
+const SHOPIFY_SCOPES = ['read_orders', 'read_customers'];
 
 type ConnectionRow = {
   id: string;
@@ -251,6 +251,25 @@ export async function getShopifyAccessToken(tenantId: string): Promise<string | 
   }
 
   return decryptSecret(connection.access_token_enc);
+}
+
+export async function getShopifyConnection(tenantId: string): Promise<{
+  id: string;
+  meta: Record<string, any> | null;
+  store_domain?: string;
+  shop?: string;
+} | null> {
+  const connection = await getExistingConnection(tenantId);
+  if (!connection) {
+    return null;
+  }
+
+  return {
+    id: connection.id,
+    meta: connection.meta,
+    store_domain: connection.meta?.store_domain || connection.meta?.shop,
+    shop: connection.meta?.shop || connection.meta?.store_domain,
+  };
 }
 
 export async function registerShopifyWebhooks(shopDomain: string, accessToken: string): Promise<void> {
