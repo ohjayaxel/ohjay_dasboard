@@ -730,27 +730,35 @@ async function processTenant(client: SupabaseClient, connection: GoogleConnectio
 
     // Get selected customer ID (child account) from connection meta
     const selectedCustomerId = getSelectedCustomerId(connection.meta);
-    if (!selectedCustomerId) {
-      const meta = connection.meta || {};
-      const hasSelectedId = typeof meta.selected_customer_id === 'string' && meta.selected_customer_id.length > 0;
+    
+    // Explicit check: verify selected_customer_id is NOT a manager account
+    const meta = connection.meta || {};
+    const availableAccounts = Array.isArray(meta.available_customers) ? meta.available_customers : [];
+    const selectedAccountId = typeof meta.selected_customer_id === 'string' 
+      ? meta.selected_customer_id.replace(/-/g, '') 
+      : null;
+    
+    if (selectedAccountId) {
+      const selectedAccount = availableAccounts.find((a: any) => {
+        const aId = String(a.customer_id || '').replace(/-/g, '');
+        return aId === selectedAccountId;
+      });
       
-      if (hasSelectedId) {
-        // Check if it's a manager account
-        const availableAccounts = Array.isArray(meta.available_customers) ? meta.available_customers : [];
-        const selectedAccount = availableAccounts.find((a: any) => {
-          const aId = String(a.customer_id || '').replace(/-/g, '');
-          const selectedId = String(meta.selected_customer_id || '').replace(/-/g, '');
-          return aId === selectedId;
+      if (selectedAccount && selectedAccount.is_manager === true) {
+        const errorMsg = '[sync-googleads] selected_customer_id refers to a manager account, cannot run reporting queries. Please select a non-manager account in admin.';
+        console.error(errorMsg, {
+          tenantId,
+          selectedCustomerId: selectedAccountId,
+          accountName: selectedAccount.descriptive_name,
         });
-        
-        if (selectedAccount && selectedAccount.is_manager === true) {
-          throw new Error(
-            'Cannot run reporting queries against a Google Ads manager account. ' +
-            'Please select a standard (non-manager) account in the admin panel.',
-          );
-        }
+        throw new Error(
+          'Cannot run reporting queries against a Google Ads manager account. ' +
+          'Please select a standard (non-manager) account in the admin panel.',
+        );
       }
-      
+    }
+    
+    if (!selectedCustomerId) {
       throw new Error(
         'No customer account selected in connection meta. Please select a customer account in the integrations settings.',
       );

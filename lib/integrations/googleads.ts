@@ -564,18 +564,53 @@ export async function fetchAndClassifyGoogleAdsAccounts(tenantId: string): Promi
           // Parse response - handle multiple formats
           try {
             const parsed = JSON.parse(responseText);
+            
+            // Handle array of results
             if (Array.isArray(parsed)) {
-              customer = parsed[0]?.customer || parsed[0];
-            } else if (parsed.results?.[0]?.customer) {
-              customer = parsed.results[0].customer;
+              // Each item might have results array or direct customer
+              for (const item of parsed) {
+                if (item.customer) {
+                  customer = item.customer;
+                  break;
+                } else if (item.results && Array.isArray(item.results) && item.results[0]?.customer) {
+                  customer = item.results[0].customer;
+                  break;
+                } else if (item.id) {
+                  // Direct customer object
+                  customer = item;
+                  break;
+                }
+              }
+            } else if (parsed.results && Array.isArray(parsed.results)) {
+              // Single object with results array
+              customer = parsed.results[0]?.customer;
             } else if (parsed.customer) {
+              // Single object with customer property
               customer = parsed.customer;
+            } else if (parsed.id) {
+              // Direct customer object
+              customer = parsed;
             } else {
               // Try newline-delimited JSON
               const lines = responseText.trim().split('\n').filter(line => line.trim());
               if (lines.length > 0) {
-                const firstLine = JSON.parse(lines[0]);
-                customer = firstLine.customer || firstLine.results?.[0]?.customer || firstLine;
+                for (const line of lines) {
+                  try {
+                    const lineParsed = JSON.parse(line);
+                    if (lineParsed.customer) {
+                      customer = lineParsed.customer;
+                      break;
+                    } else if (lineParsed.results?.[0]?.customer) {
+                      customer = lineParsed.results[0].customer;
+                      break;
+                    } else if (lineParsed.id) {
+                      customer = lineParsed;
+                      break;
+                    }
+                  } catch {
+                    // Skip invalid lines
+                  }
+                }
               }
             }
           } catch (parseError) {
@@ -583,22 +618,52 @@ export async function fetchAndClassifyGoogleAdsAccounts(tenantId: string): Promi
           }
 
           if (customer) {
-            const isManager = customer.manager === true;
+            // Extract manager flag - must be explicitly true
+            // Handle different possible formats (boolean, string "true"/"false", undefined, null)
+            let managerFlag: boolean | undefined = undefined;
+            if (customer.manager !== undefined && customer.manager !== null) {
+              if (typeof customer.manager === 'boolean') {
+                managerFlag = customer.manager;
+              } else if (typeof customer.manager === 'string') {
+                managerFlag = customer.manager.toLowerCase() === 'true';
+              } else if (typeof customer.manager === 'number') {
+                managerFlag = customer.manager === 1;
+              }
+            }
+            const isManager = managerFlag === true;
+
+            // Debug logging: show raw customer record
+            console.log('[Google Ads] Customer record', {
+              customerId: customer.id || customerId,
+              descriptiveName: customer.descriptive_name || customer.descriptiveName || null,
+              currencyCode: customer.currency_code || customer.currencyCode || null,
+              timeZone: customer.time_zone || customer.timeZone || null,
+              managerFlag: managerFlag,
+              managerFlagType: typeof managerFlag,
+            });
             
             if (isManager && !managerCustomerId) {
               managerCustomerId = customerId;
             }
 
-            accounts.push({
+            const accountInfo: GoogleAdsAccountInfo = {
               customer_id: customerId,
-              descriptive_name: customer.descriptive_name || customerId,
-              currency_code: customer.currency_code || 'USD',
-              time_zone: customer.time_zone || 'UTC',
+              descriptive_name: customer.descriptive_name || customer.descriptiveName || customerId,
+              currency_code: customer.currency_code || customer.currencyCode || 'USD',
+              time_zone: customer.time_zone || customer.timeZone || 'UTC',
               is_manager: isManager,
               manager_customer_id: isManager ? undefined : managerCustomerId || undefined,
-            });
+            };
 
-            console.log(`[Google Ads] Classified account ${customerId}: ${isManager ? 'MANAGER (MCC)' : 'CHILD'} - ${customer.descriptive_name || customerId}`);
+            accounts.push(accountInfo);
+
+            // Log classification clearly
+            console.log('[Google Ads] Classified account', {
+              customerId: customerId,
+              descriptiveName: accountInfo.descriptive_name,
+              managerFlag: managerFlag,
+              classification: isManager ? 'MANAGER' : 'CHILD',
+            });
           } else {
             // If we can't get details, assume it's a manager account
             console.warn(`[Google Ads] Could not get details for ${customerId}, assuming manager account`);
@@ -764,7 +829,14 @@ export async function fetchAndClassifyGoogleAdsAccounts(tenantId: string): Promi
       });
     }
 
-    console.log(`[Google Ads] Classification complete: ${accounts.filter(a => a.is_manager).length} manager account(s), ${accounts.filter(a => !a.is_manager).length} child account(s)`);
+    // Final classification summary
+    const managerCount = accounts.filter(a => a.is_manager).length;
+    const childCount = accounts.filter(a => !a.is_manager).length;
+
+    console.log('[Google Ads] Classification complete', {
+      managerCount,
+      childCount,
+    });
 
     return { accounts };
   } catch (error) {
