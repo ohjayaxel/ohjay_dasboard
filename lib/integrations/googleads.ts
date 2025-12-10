@@ -237,16 +237,20 @@ export async function handleGoogleAdsOAuthCallback(options: {
     } else {
       try {
         // Get list of accessible customers
-        // Note: Google Ads API v16 uses gRPC transcoding, so we need to use POST with empty body
-        const customersRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${tokenResponse.access_token}`,
-            'developer-token': GOOGLE_DEVELOPER_TOKEN,
-            'Content-Type': 'application/json',
+        // Note: Google Ads API v16 uses gRPC transcoding
+        // Endpoint: POST /v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers
+        const customersRes = await fetch(
+          `https://googleads.googleapis.com/v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${tokenResponse.access_token}`,
+              'developer-token': GOOGLE_DEVELOPER_TOKEN,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
           },
-          body: JSON.stringify({}),
-        });
+        );
 
         if (customersRes.ok) {
           const customersData = await customersRes.json();
@@ -459,16 +463,20 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
 
   try {
     // Get list of accessible customers
-    // Note: Google Ads API v16 uses gRPC transcoding, so we need to use POST with empty body
-    const customersRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'developer-token': GOOGLE_DEVELOPER_TOKEN,
-        'Content-Type': 'application/json',
+    // Note: Google Ads API v16 uses gRPC transcoding
+    // Endpoint: POST /v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers
+    const customersRes = await fetch(
+      `https://googleads.googleapis.com/v16/google.ads.googleads.v16.services.CustomerService/ListAccessibleCustomers`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'developer-token': GOOGLE_DEVELOPER_TOKEN,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
       },
-      body: JSON.stringify({}),
-    });
+    );
 
     if (!customersRes.ok) {
       const errorBody = await customersRes.text();
