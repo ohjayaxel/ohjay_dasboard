@@ -386,7 +386,6 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             type="submit" 
             variant="outline" 
             className="md:w-auto"
-            disabled={!selectedGoogleCustomerId}
           >
             Save
           </Button>
