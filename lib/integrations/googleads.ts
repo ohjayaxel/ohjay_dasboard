@@ -237,12 +237,15 @@ export async function handleGoogleAdsOAuthCallback(options: {
     } else {
       try {
         // Get list of accessible customers
+        // Note: Google Ads API v16 uses gRPC transcoding, so we need to use POST with empty body
         const customersRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`, {
-          method: 'GET',
+          method: 'POST',
           headers: {
             Authorization: `Bearer ${tokenResponse.access_token}`,
             'developer-token': GOOGLE_DEVELOPER_TOKEN,
+            'Content-Type': 'application/json',
           },
+          body: JSON.stringify({}),
         });
 
         if (customersRes.ok) {
@@ -456,12 +459,15 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
 
   try {
     // Get list of accessible customers
+    // Note: Google Ads API v16 uses gRPC transcoding, so we need to use POST with empty body
     const customersRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`, {
-      method: 'GET',
+      method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'developer-token': GOOGLE_DEVELOPER_TOKEN,
+        'Content-Type': 'application/json',
       },
+      body: JSON.stringify({}),
     });
 
     if (!customersRes.ok) {
