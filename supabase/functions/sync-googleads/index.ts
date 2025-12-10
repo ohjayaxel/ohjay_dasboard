@@ -506,8 +506,7 @@ SELECT
   metrics.clicks,
   metrics.cost_micros,
   metrics.conversions,
-  metrics.conversions_value,
-  segments.conversion_action
+  metrics.conversions_value
 FROM geographic_view
 WHERE segments.date >= '${startDate}' AND segments.date <= '${endDate}'
   AND campaign.status != 'REMOVED'
@@ -778,9 +777,10 @@ function transformGeographicResults(
         continue;
       }
 
-      const conversionActionId = extractConversionActionId(
-        segments.conversionAction || segments.conversion_action
-      );
+      // Note: segments.conversion_action cannot be used with clicks, cost_micros, or impressions
+      // in the same query. We'll set conversion_action_id to null for now.
+      // TODO: If conversion action attribution is needed, query it separately.
+      const conversionActionId = null;
 
       const countryCode = countryCodeMap.get(String(countryCriterionId)) || null;
       const customerIdFormatted = customer.id ? formatCustomerIdForDisplay(String(customer.id)) : customerId;
