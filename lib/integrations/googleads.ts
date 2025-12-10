@@ -455,16 +455,26 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
 
       try {
         // Get customer details
-        // For manager accounts, we need to set login-customer-id header
-        // Use the customerId itself as login-customer-id when fetching its details
-        const customerResponse = await fetch(`${GOOGLE_REPORTING_ENDPOINT}/${customerId}`, {
+        // Try without login-customer-id first (for regular accounts)
+        let customerResponse = await fetch(`${GOOGLE_REPORTING_ENDPOINT}/${customerId}`, {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'developer-token': GOOGLE_DEVELOPER_TOKEN,
-            'login-customer-id': customerId, // Required for manager accounts
           },
         });
+
+        // If that fails with 404, try with login-customer-id (for manager accounts)
+        if (!customerResponse.ok && customerResponse.status === 404) {
+          customerResponse = await fetch(`${GOOGLE_REPORTING_ENDPOINT}/${customerId}`, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'developer-token': GOOGLE_DEVELOPER_TOKEN,
+              'login-customer-id': customerId,
+            },
+          });
+        }
 
         if (customerResponse.ok) {
           const customerData = await customerResponse.json();
@@ -491,13 +501,19 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
             });
           }
         } else {
-          // If we can't fetch details, we cannot determine manager status
-          // Don't add it to either list - log a warning
+          // If we can't fetch details even with both methods, treat as manager account
+          // Manager accounts often return 404 when queried directly
+          // We'll try to fetch child accounts from them
+          const errorText = await customerResponse.text();
           console.warn(`[Google Ads] Failed to fetch customer ${customerId} details: ${customerResponse.status}`);
+          console.log(`[Google Ads] Treating ${customerId} as potential manager account (will try to fetch child accounts)`);
+          managerAccountIds.push(customerId);
         }
       } catch (error) {
-        // If individual customer fetch fails, log and skip
+        // If individual customer fetch fails, treat as potential manager account
         console.warn(`[Google Ads] Failed to fetch customer ${customerId} details:`, error);
+        console.log(`[Google Ads] Treating ${customerId} as potential manager account (will try to fetch child accounts)`);
+        managerAccountIds.push(customerId);
       }
     }
 
