@@ -15,6 +15,7 @@ type AsyncAction<T = void> = () => Promise<T>;
 export type GoogleAdsConnectProps = {
   status: 'connected' | 'disconnected' | 'error';
   customerId?: string | null;
+  customerName?: string | null;
   lastSyncedAt?: string | null;
   onConnect?: AsyncAction<ConnectActionResult>;
   onDisconnect?: AsyncAction;
@@ -23,6 +24,7 @@ export type GoogleAdsConnectProps = {
 export function GoogleAdsConnect({
   status,
   customerId,
+  customerName,
   lastSyncedAt,
   onConnect,
   onDisconnect,
@@ -122,9 +124,11 @@ export function GoogleAdsConnect({
 
       <dl className="grid gap-2 text-sm">
         {customerId && (
-          <div className="flex items-center justify-between">
-            <dt className="text-muted-foreground">Customer ID</dt>
-            <dd className="font-mono text-xs">{customerId}</dd>
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <dt className="text-muted-foreground">Selected customer account</dt>
+            <dd className="font-medium sm:text-right">
+              {customerName && customerName !== customerId ? `${customerName} (${customerId})` : customerId}
+            </dd>
           </div>
         )}
         <div className="flex items-center justify-between">

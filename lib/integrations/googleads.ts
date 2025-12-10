@@ -224,13 +224,15 @@ export async function handleGoogleAdsOAuthCallback(options: {
     ? new Date(Date.now() + Number(tokenResponse.expires_in) * 1000).toISOString()
     : null;
 
-  // Try to fetch customer information from Google Ads API
+  // Fetch all accessible customers and save them to meta
+  let accessibleCustomers: GoogleAdsCustomer[] = [];
   let customerId = options.loginCustomerId ?? null;
   let customerName: string | null = null;
+  let customersError: string | null = null;
 
   if (tokenResponse.access_token && GOOGLE_DEVELOPER_TOKEN) {
     try {
-      // Try to get accessible customers
+      // Get list of accessible customers
       const customersRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`, {
         method: 'GET',
         headers: {
@@ -241,15 +243,12 @@ export async function handleGoogleAdsOAuthCallback(options: {
 
       if (customersRes.ok) {
         const customersData = await customersRes.json();
-        if (customersData.resourceNames && customersData.resourceNames.length > 0) {
-          // Extract customer ID from resource name (format: customers/1234567890)
-          const firstCustomer = customersData.resourceNames[0];
-          const extractedCustomerId = firstCustomer.replace('customers/', '');
-          if (extractedCustomerId && !customerId) {
-            customerId = extractedCustomerId;
-          }
+        const resourceNames = customersData.resourceNames || [];
 
-          // Try to get customer details
+        // Fetch details for each customer
+        for (const resourceName of resourceNames) {
+          const extractedCustomerId = resourceName.replace('customers/', '');
+
           try {
             const customerRes = await fetch(
               `${GOOGLE_REPORTING_ENDPOINT}/${extractedCustomerId}`,
@@ -264,20 +263,56 @@ export async function handleGoogleAdsOAuthCallback(options: {
 
             if (customerRes.ok) {
               const customerData = await customerRes.json();
-              if (customerData.customer && customerData.customer.descriptiveName) {
+              const customer = customerData.customer;
+
+              accessibleCustomers.push({
+                id: extractedCustomerId,
+                name: customer?.descriptiveName || customer?.companyName || extractedCustomerId,
+                descriptiveName: customer?.descriptiveName,
+              });
+            } else {
+              // If we can't fetch details, still add the customer ID
+              accessibleCustomers.push({
+                id: extractedCustomerId,
+                name: extractedCustomerId,
+              });
+            }
+
+            // Use first customer as default if no loginCustomerId was provided
+            if (!customerId && extractedCustomerId) {
+              customerId = extractedCustomerId;
+              if (customerData.customer?.descriptiveName) {
                 customerName = customerData.customer.descriptiveName;
               }
             }
           } catch (error) {
-            // Ignore errors when fetching customer details
-            console.warn('Failed to fetch Google Ads customer details:', error);
+            // If individual customer fetch fails, still add the ID
+            accessibleCustomers.push({
+              id: extractedCustomerId,
+              name: extractedCustomerId,
+            });
+
+            if (!customerId && extractedCustomerId) {
+              customerId = extractedCustomerId;
+            }
           }
         }
+      } else {
+        const errorBody = await customersRes.text();
+        customersError = `Failed to fetch accessible customers: ${customersRes.status} ${errorBody}`;
       }
     } catch (error) {
-      // If we can't fetch customer info, continue with loginCustomerId
+      customersError = error instanceof Error ? error.message : 'Unknown error fetching customers';
       console.warn('Failed to fetch Google Ads accessible customers:', error);
     }
+  }
+
+  // If we have a loginCustomerId but it's not in the accessible list, add it
+  if (customerId && !accessibleCustomers.find((c) => c.id === customerId)) {
+    accessibleCustomers.push({
+      id: customerId,
+      name: customerId,
+    });
   }
 
   await upsertConnection(options.tenantId, {
@@ -289,7 +324,10 @@ export async function handleGoogleAdsOAuthCallback(options: {
       token_type: tokenResponse.token_type,
       login_customer_id: customerId,
       customer_id: customerId, // Also save as customer_id for backwards compatibility
+      selected_customer_id: customerId, // The selected customer for syncing
       customer_name: customerName,
+      accessible_customers: accessibleCustomers, // Save all accessible customers
+      customers_error: customersError, // Save any error encountered
     },
   });
 }
@@ -358,6 +396,99 @@ export async function getGoogleAdsAccessToken(tenantId: string): Promise<string 
   }
 
   return decryptSecret(connection.access_token_enc);
+}
+
+export type GoogleAdsCustomer = {
+  id: string;
+  name: string;
+  descriptiveName?: string;
+};
+
+/**
+ * Fetch all accessible Google Ads customers for a tenant.
+ * Returns list of customers accessible from the MCC account.
+ */
+export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promise<{
+  customers: GoogleAdsCustomer[];
+  error?: string;
+}> {
+  const accessToken = await getGoogleAdsAccessToken(tenantId);
+
+  if (!accessToken || !GOOGLE_DEVELOPER_TOKEN) {
+    return {
+      customers: [],
+      error: 'Missing access token or developer token',
+    };
+  }
+
+  try {
+    // Get list of accessible customers
+    const customersRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'developer-token': GOOGLE_DEVELOPER_TOKEN,
+      },
+    });
+
+    if (!customersRes.ok) {
+      const errorBody = await customersRes.text();
+      return {
+        customers: [],
+        error: `Failed to fetch accessible customers: ${customersRes.status} ${errorBody}`,
+      };
+    }
+
+    const customersData = await customersRes.json();
+    const resourceNames = customersData.resourceNames || [];
+
+    // Fetch details for each customer
+    const customers: GoogleAdsCustomer[] = [];
+
+    for (const resourceName of resourceNames) {
+      const customerId = resourceName.replace('customers/', '');
+
+      try {
+        const customerRes = await fetch(`${GOOGLE_REPORTING_ENDPOINT}/${customerId}`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'developer-token': GOOGLE_DEVELOPER_TOKEN,
+          },
+        });
+
+        if (customerRes.ok) {
+          const customerData = await customerRes.json();
+          const customer = customerData.customer;
+
+          customers.push({
+            id: customerId,
+            name: customer?.descriptiveName || customer?.companyName || customerId,
+            descriptiveName: customer?.descriptiveName,
+          });
+        } else {
+          // If we can't fetch details, still add the customer ID
+          customers.push({
+            id: customerId,
+            name: customerId,
+          });
+        }
+      } catch (error) {
+        // If individual customer fetch fails, still add the ID
+        customers.push({
+          id: customerId,
+          name: customerId,
+        });
+      }
+    }
+
+    return { customers };
+  } catch (error) {
+    return {
+      customers: [],
+      error: error instanceof Error ? error.message : 'Unknown error fetching customers',
+    };
+  }
 }
 
 export async function fetchGoogleAdsInsights(params: {

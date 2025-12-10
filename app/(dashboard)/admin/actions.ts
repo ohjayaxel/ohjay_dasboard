@@ -66,6 +66,14 @@ const connectShopifySchema = connectMetaSchema
 const connectGoogleAdsSchema = connectMetaSchema
 const disconnectGoogleAdsSchema = connectMetaSchema
 
+const updateGoogleAdsCustomerSchema = z.object({
+  tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
+  tenantSlug: z
+    .string({ required_error: 'Tenant slug is required.' })
+    .min(1, { message: 'Tenant slug is required.' }),
+  customerId: z.string().min(1, { message: 'Customer ID is required.' }),
+})
+
 const connectShopifyCustomAppSchema = z.object({
   tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
   tenantSlug: z
@@ -1794,4 +1802,70 @@ export async function disconnectGoogleAds(payload: { tenantId: string; tenantSlu
   await revalidateTenantViews(tenantId, tenantSlug)
 }
 
+export async function updateGoogleAdsSelectedCustomer(formData: FormData) {
+  await requirePlatformAdmin()
+
+  const result = updateGoogleAdsCustomerSchema.safeParse({
+    tenantId: formData.get('tenantId'),
+    tenantSlug: formData.get('tenantSlug'),
+    customerId: formData.get('customerId'),
+  })
+
+  if (!result.success) {
+    throw new Error(result.error.errors[0]?.message ?? 'Invalid Google Ads customer selection.')
+  }
+
+  const client = getSupabaseServiceClient()
+
+  const { data: connection, error } = await client
+    .from('connections')
+    .select('id, meta')
+    .eq('tenant_id', result.data.tenantId)
+    .eq('source', 'google_ads')
+    .maybeSingle()
+
+  if (error) {
+    throw new Error(`Failed to load Google Ads connection: ${error.message}`)
+  }
+
+  if (!connection) {
+    throw new Error('No Google Ads connection found for this tenant.')
+  }
+
+  const customers = Array.isArray((connection.meta as any)?.accessible_customers)
+    ? ((connection.meta as any).accessible_customers as Array<{ id: string; name: string }>)
+    : []
+
+  const selectedCustomer = customers.find((c) => c.id === result.data.customerId)
+
+  if (!selectedCustomer) {
+    throw new Error('Selected customer ID is not in the list of accessible customers.')
+  }
+
+  const baseMeta =
+    connection.meta && typeof connection.meta === 'object' && connection.meta !== null
+      ? (connection.meta as Record<string, unknown>)
+      : {}
+
+  const { error: updateError } = await client
+    .from('connections')
+    .update({
+      meta: {
+        ...baseMeta,
+        selected_customer_id: result.data.customerId,
+        customer_id: result.data.customerId, // Also update customer_id for backwards compatibility
+        customer_name: selectedCustomer.name,
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', connection.id)
+
+  if (updateError) {
+    throw new Error(`Failed to update Google Ads customer selection: ${updateError.message}`)
+  }
+
+  await revalidateTenantViews(result.data.tenantId, result.data.tenantSlug)
+
+  redirect(`/admin/tenants/${result.data.tenantSlug}/integrations?status=google-ads-customer-updated&source=google_ads`)
+}
 
