@@ -147,9 +147,11 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       : null
 
   const googleCustomerId =
-    typeof googleDetails.customer_id === 'string' && googleDetails.customer_id.length > 0
-      ? (googleDetails.customer_id as string)
-      : null
+    typeof googleDetails.login_customer_id === 'string' && googleDetails.login_customer_id.length > 0
+      ? (googleDetails.login_customer_id as string)
+      : typeof googleDetails.customer_id === 'string' && googleDetails.customer_id.length > 0
+        ? (googleDetails.customer_id as string)
+        : null
 
   const shopifyStoreDomain =
     typeof shopifyDetails.store_domain === 'string' && shopifyDetails.store_domain.length > 0

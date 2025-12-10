@@ -121,10 +121,12 @@ export function GoogleAdsConnect({
       </div>
 
       <dl className="grid gap-2 text-sm">
-        <div className="flex items-center justify-between">
-          <dt className="text-muted-foreground">Customer ID</dt>
-          <dd>{customerId ?? 'Not set'}</dd>
-        </div>
+        {customerId && (
+          <div className="flex items-center justify-between">
+            <dt className="text-muted-foreground">Customer ID</dt>
+            <dd className="font-mono text-xs">{customerId}</dd>
+          </div>
+        )}
         <div className="flex items-center justify-between">
           <dt className="text-muted-foreground">Last synced</dt>
           <dd>{formattedSync}</dd>
