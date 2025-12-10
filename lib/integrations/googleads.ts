@@ -511,15 +511,23 @@ export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promi
         }
       } catch (error) {
         // If individual customer fetch fails, treat as potential manager account
-        console.warn(`[Google Ads] Failed to fetch customer ${customerId} details:`, error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        console.warn(`[Google Ads] Failed to fetch customer ${customerId} details:`, errorMsg);
         console.log(`[Google Ads] Treating ${customerId} as potential manager account (will try to fetch child accounts)`);
         managerAccountIds.push(customerId);
       }
     }
 
+    // Log summary before child account fetching
+    console.log(`[Google Ads] Summary after processing ${resourceNames.length} accessible customer(s):`);
+    console.log(`[Google Ads]   - Regular accounts found: ${allCustomers.length}`);
+    console.log(`[Google Ads]   - Manager accounts detected: ${managerAccountIds.length}`);
+    console.log(`[Google Ads]   - Manager account IDs: ${managerAccountIds.join(', ')}`);
+
     // If we found manager accounts but no regular customers, fetch child accounts
     if (managerAccountIds.length > 0 && allCustomers.length === 0) {
-      console.log(`[Google Ads] Only manager accounts found. Fetching child accounts from ${managerAccountIds.length} manager(s)...`);
+      console.log(`[Google Ads] ✅ Condition met: managerAccountIds.length (${managerAccountIds.length}) > 0 && allCustomers.length (${allCustomers.length}) === 0`);
+      console.log(`[Google Ads] Starting to fetch child accounts from ${managerAccountIds.length} manager account(s)...`);
 
       for (const managerId of managerAccountIds) {
         try {
