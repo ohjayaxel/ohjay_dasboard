@@ -27,8 +27,11 @@ function ensureEnv() {
 async function invokeWithRetry({ source, payload, attempt = 1 }: InvokeOptions): Promise<{ status: number }> {
   ensureEnv();
 
+  // Normalize source name for Edge Function URL (convert underscores to nothing)
+  // e.g., 'google_ads' -> 'googleads' to match supabase/functions/sync-googleads/
+  const functionName = source.replace(/_/g, '');
   const normalized = SUPABASE_URL!.replace(/\/$/, '');
-  const response = await fetch(`${normalized}/functions/v1/sync-${source}`, {
+  const response = await fetch(`${normalized}/functions/v1/sync-${functionName}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
