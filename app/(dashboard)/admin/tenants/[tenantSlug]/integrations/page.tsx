@@ -13,6 +13,7 @@ import {
   startGoogleAdsConnect,
   triggerMetaSyncNow,
   updateMetaSelectedAccount,
+  updateGoogleAdsSelectedCustomer,
   updateIntegrationSettings,
   triggerShopifyBackfill,
   verifyShopifyConnection,
@@ -146,12 +147,29 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       ? (metaDetails.accounts_error as string)
       : null
 
-  const googleCustomerId =
-    typeof googleDetails.login_customer_id === 'string' && googleDetails.login_customer_id.length > 0
-      ? (googleDetails.login_customer_id as string)
-      : typeof googleDetails.customer_id === 'string' && googleDetails.customer_id.length > 0
-        ? (googleDetails.customer_id as string)
-        : null
+  const googleCustomers = Array.isArray(googleDetails.accessible_customers)
+    ? (googleDetails.accessible_customers as Array<{ id: string; name: string }>)
+    : []
+
+  const selectedGoogleCustomerId =
+    typeof googleDetails.selected_customer_id === 'string' && googleDetails.selected_customer_id.length > 0
+      ? (googleDetails.selected_customer_id as string)
+      : typeof googleDetails.login_customer_id === 'string' && googleDetails.login_customer_id.length > 0
+        ? (googleDetails.login_customer_id as string)
+        : typeof googleDetails.customer_id === 'string' && googleDetails.customer_id.length > 0
+          ? (googleDetails.customer_id as string)
+          : null
+
+  const selectedGoogleCustomerName =
+    googleCustomers.find((c) => c.id === selectedGoogleCustomerId)?.name ??
+    (typeof googleDetails.customer_name === 'string' ? googleDetails.customer_name : null) ??
+    selectedGoogleCustomerId ??
+    'Not set'
+
+  const googleCustomersError =
+    typeof googleDetails.customers_error === 'string' && googleDetails.customers_error.length > 0
+      ? (googleDetails.customers_error as string)
+      : null
 
   const shopifyStoreDomain =
     typeof shopifyDetails.store_domain === 'string' && shopifyDetails.store_domain.length > 0
@@ -235,6 +253,8 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             return 'Google Ads connection removed.'
           case 'meta-account-updated':
             return 'Meta ad account selection saved.'
+          case 'google-ads-customer-updated':
+            return 'Google Ads customer selection saved.'
           default:
             return 'Changes saved.'
         }
@@ -251,9 +271,53 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
   const googleAdsConnectAction = startGoogleAdsConnect.bind(null, { 
     tenantId: tenant.id, 
     tenantSlug: tenant.slug,
-    loginCustomerId: googleCustomerId ?? undefined,
+    loginCustomerId: selectedGoogleCustomerId ?? undefined,
   })
   const googleAdsDisconnectAction = disconnectGoogleAds.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
+
+  const googleAdsCustomerForm =
+    googleCustomers.length > 0 ? (
+      <form
+        action={updateGoogleAdsSelectedCustomer}
+        className="grid gap-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+      >
+        <input type="hidden" name="tenantId" value={tenant.id} />
+        <input type="hidden" name="tenantSlug" value={tenant.slug} />
+        <div className="space-y-2">
+          <Label htmlFor="google-ads-customer">Select customer account</Label>
+          <select
+            id="google-ads-customer"
+            name="customerId"
+            defaultValue={selectedGoogleCustomerId ?? googleCustomers[0]?.id ?? ''}
+            className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            required
+          >
+            {googleCustomers.map((customer) => (
+              <option key={customer.id} value={customer.id}>
+                {customer.name} ({customer.id})
+              </option>
+            ))}
+          </select>
+        </div>
+        <Button type="submit" variant="outline" className="md:w-auto">
+          Save customer
+        </Button>
+        {googleCustomersError && (
+          <p className="md:col-span-2 text-sm text-destructive">
+            Google Ads API response: <span className="font-mono">{googleCustomersError}</span>
+          </p>
+        )}
+      </form>
+    ) : google.status === 'connected' ? (
+      <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm text-muted-foreground">
+        No customer accounts were returned for this connection. Reconnect Google Ads or verify that the account has access to customer accounts.
+        {googleCustomersError && (
+          <span className="mt-2 block text-destructive">
+            Google Ads API response: <span className="font-mono">{googleCustomersError}</span>
+          </span>
+        )}
+      </div>
+    ) : null
 
   const metaAccountForm =
     metaAccounts.length > 0 ? (
@@ -495,7 +559,8 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       connect: (
         <GoogleAdsConnect
           status={google.status}
-          customerId={googleCustomerId}
+          customerId={selectedGoogleCustomerId}
+          customerName={selectedGoogleCustomerName}
           lastSyncedAt={google.updatedAt ?? undefined}
           onConnect={googleAdsConnectAction}
           onDisconnect={googleAdsDisconnectAction}
@@ -504,7 +569,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       syncStartDate: googleSyncStartDate,
       selectedKpis: googleDisplayKpis,
       preferencesHint: 'Choose when Google Ads data should start and which KPIs to surface.',
-      extra: null,
+      extra: googleAdsCustomerForm,
     },
     {
       source: 'shopify' as const,
