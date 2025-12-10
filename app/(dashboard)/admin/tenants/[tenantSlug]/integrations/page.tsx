@@ -148,29 +148,50 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
       ? (metaDetails.accounts_error as string)
       : null
 
-  const googleCustomers = Array.isArray(googleDetails.accessible_customers)
-    ? (googleDetails.accessible_customers as Array<{ id: string; name: string }>)
+  // Get available accounts from new data model (available_customers)
+  const availableAccounts = Array.isArray(googleDetails.available_customers)
+    ? (googleDetails.available_customers as Array<{
+        customer_id: string;
+        descriptive_name: string;
+        currency_code?: string;
+        time_zone?: string;
+        is_manager: boolean;
+        manager_customer_id?: string;
+      }>)
     : []
+
+  // Filter to only child accounts (non-manager)
+  const childAccounts = availableAccounts.filter(a => !a.is_manager)
+
+  // Fallback to legacy accessible_customers if available_customers not set
+  const googleCustomers = childAccounts.length > 0
+    ? childAccounts.map(a => ({ id: a.customer_id, name: a.descriptive_name }))
+    : Array.isArray(googleDetails.accessible_customers)
+      ? (googleDetails.accessible_customers as Array<{ id: string; name: string }>)
+      : []
 
   const selectedGoogleCustomerId =
     typeof googleDetails.selected_customer_id === 'string' && googleDetails.selected_customer_id.length > 0
       ? (googleDetails.selected_customer_id as string)
-      : typeof googleDetails.login_customer_id === 'string' && googleDetails.login_customer_id.length > 0
-        ? (googleDetails.login_customer_id as string)
-        : typeof googleDetails.customer_id === 'string' && googleDetails.customer_id.length > 0
-          ? (googleDetails.customer_id as string)
-          : null
+      : typeof googleDetails.customer_id === 'string' && googleDetails.customer_id.length > 0
+        ? (googleDetails.customer_id as string)
+        : null
 
   const selectedGoogleCustomerName =
-    googleCustomers.find((c) => c.id === selectedGoogleCustomerId)?.name ??
-    (typeof googleDetails.customer_name === 'string' ? googleDetails.customer_name : null) ??
-    selectedGoogleCustomerId ??
-    'Not set'
+    typeof googleDetails.selected_customer_name === 'string'
+      ? googleDetails.selected_customer_name
+      : googleCustomers.find((c) => c.id === selectedGoogleCustomerId)?.name ??
+        (typeof googleDetails.customer_name === 'string' ? googleDetails.customer_name : null) ??
+        selectedGoogleCustomerId ??
+        'Not set'
 
   const googleCustomersError =
     typeof googleDetails.customers_error === 'string' && googleDetails.customers_error.length > 0
       ? (googleDetails.customers_error as string)
       : null
+
+  // Check if only manager accounts were found
+  const onlyManagerAccountsFound = availableAccounts.length > 0 && childAccounts.length === 0
 
   const shopifyStoreDomain =
     typeof shopifyDetails.store_domain === 'string' && shopifyDetails.store_domain.length > 0
@@ -282,8 +303,43 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
   const googleAdsDisconnectAction = disconnectGoogleAds.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
 
   const googleAdsCustomerForm = google.status === 'connected' ? (
-    googleCustomers.length > 1 ? (
-      // Multiple customers - show dropdown
+    onlyManagerAccountsFound ? (
+      // Special case: Only manager accounts found
+      <div className="space-y-3">
+        <form
+          action={refreshGoogleAdsCustomers}
+          className="flex flex-col gap-2 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm md:flex-row md:items-center md:justify-between"
+        >
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">Detect Google Ads accounts</p>
+            <p className="text-xs text-muted-foreground">
+              Automatically detect accessible Google Ads accounts for this connection.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input type="hidden" name="tenantId" value={tenant.id} />
+            <input type="hidden" name="tenantSlug" value={tenant.slug} />
+            <FormSubmitButton type="submit" variant="secondary" className="md:w-auto" pendingLabel="Detecting...">
+              Detect Google Ads accounts
+            </FormSubmitButton>
+          </div>
+        </form>
+        <div className="rounded-xl border border-dashed border-yellow-500/50 bg-yellow-500/10 p-4 text-sm">
+          <p className="font-medium text-yellow-900 dark:text-yellow-100">Only Manager (MCC) Accounts Detected</p>
+          <p className="mt-2 text-xs text-yellow-800 dark:text-yellow-200">
+            We detected only Manager (MCC) accounts. To sync data, you must have access to at least one standard Google Ads account.
+            Please verify your permissions in Google Ads.
+          </p>
+          {googleCustomersError && (
+            <div className="mt-3 rounded-md bg-yellow-500/20 p-3">
+              <p className="text-xs font-medium text-yellow-900 dark:text-yellow-100">Additional Info:</p>
+              <p className="mt-1 text-xs text-yellow-800 dark:text-yellow-200">{googleCustomersError}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    ) : googleCustomers.length > 0 ? (
+      // Child accounts available - show dropdown for selection
       <div className="space-y-3">
         <form
           action={refreshGoogleAdsCustomers}
@@ -310,7 +366,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           <input type="hidden" name="tenantId" value={tenant.id} />
           <input type="hidden" name="tenantSlug" value={tenant.slug} />
           <div className="space-y-2">
-            <Label htmlFor="google-ads-customer">Select Google Ads account</Label>
+            <Label htmlFor="google-ads-customer">Child Google Ads Account to Sync</Label>
             <select
               id="google-ads-customer"
               name="customerId"
@@ -321,7 +377,7 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
               <option value="">-- Select an account --</option>
               {googleCustomers.map((customer) => (
                 <option key={customer.id} value={customer.id}>
-                  {customer.name && customer.name !== customer.id ? `${customer.name} - ${customer.id}` : customer.id}
+                  {customer.name && customer.name !== customer.id ? `${customer.name} (${customer.id})` : customer.id}
                 </option>
               ))}
             </select>
@@ -332,8 +388,18 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
             className="md:w-auto"
             disabled={!selectedGoogleCustomerId}
           >
-            Save customer
+            Save
           </Button>
+          {selectedGoogleCustomerId && (
+            <div className="md:col-span-2 rounded-md bg-muted/50 p-3">
+              <p className="text-xs font-medium text-foreground">Selected:</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {selectedGoogleCustomerName && selectedGoogleCustomerName !== selectedGoogleCustomerId
+                  ? `${selectedGoogleCustomerName} (${selectedGoogleCustomerId})`
+                  : selectedGoogleCustomerId}
+              </p>
+            </div>
+          )}
           {googleCustomersError && (
             <div className="md:col-span-2 rounded-md bg-muted/50 p-3">
               <p className="text-sm font-medium text-foreground">Note:</p>
@@ -342,44 +408,8 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           )}
         </form>
       </div>
-    ) : googleCustomers.length === 1 && selectedGoogleCustomerId ? (
-      // Single customer auto-selected - show status
-      <div className="space-y-3">
-        <form
-          action={refreshGoogleAdsCustomers}
-          className="flex flex-col gap-2 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm md:flex-row md:items-center md:justify-between"
-        >
-          <div className="space-y-1">
-            <p className="font-medium text-foreground">Detect Google Ads accounts</p>
-            <p className="text-xs text-muted-foreground">
-              Automatically detect accessible Google Ads accounts for this connection.
-            </p>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <input type="hidden" name="tenantId" value={tenant.id} />
-            <input type="hidden" name="tenantSlug" value={tenant.slug} />
-            <FormSubmitButton type="submit" variant="secondary" className="md:w-auto" pendingLabel="Detecting...">
-              Detect Google Ads accounts
-            </FormSubmitButton>
-          </div>
-        </form>
-        <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm">
-          <p className="font-medium text-foreground">Selected account</p>
-          <p className="mt-1 text-muted-foreground">
-            {selectedGoogleCustomerName && selectedGoogleCustomerName !== selectedGoogleCustomerId
-              ? `${selectedGoogleCustomerName} (${selectedGoogleCustomerId})`
-              : selectedGoogleCustomerId}
-          </p>
-          {googleCustomersError && (
-            <div className="mt-3 rounded-md bg-muted/50 p-3">
-              <p className="text-xs font-medium text-foreground">Note:</p>
-              <p className="mt-1 text-xs text-muted-foreground">{googleCustomersError}</p>
-            </div>
-          )}
-        </div>
-      </div>
     ) : (
-      // No customers detected yet - show detect button and manual fallback
+      // No accounts detected yet - show detect button
       <div className="space-y-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm">
         <form
           action={refreshGoogleAdsCustomers}
@@ -403,35 +433,6 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
           <div className="rounded-md bg-muted/50 p-3">
             <p className="text-xs font-medium text-foreground">Note:</p>
             <p className="mt-1 text-xs text-muted-foreground">{googleCustomersError}</p>
-          </div>
-        )}
-        {googleCustomersError && googleCustomersError.includes('Multiple') === false && (
-          // Manual fallback only if detection failed (not if multiple found)
-          <div className="mt-3 space-y-2 border-t border-muted/60 pt-3">
-            <p className="text-xs text-muted-foreground">
-              If automatic detection failed, you can enter your Customer ID manually:
-            </p>
-            <form
-              action={updateGoogleAdsSelectedCustomer}
-              className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
-            >
-              <input type="hidden" name="tenantId" value={tenant.id} />
-              <input type="hidden" name="tenantSlug" value={tenant.slug} />
-              <div className="space-y-2">
-                <Label htmlFor="google-ads-customer-manual" className="text-xs">Google Ads Customer ID</Label>
-                <Input
-                  id="google-ads-customer-manual"
-                  name="customerId"
-                  type="text"
-                  placeholder="123-456-7890"
-                  defaultValue={selectedGoogleCustomerId ?? ''}
-                  className="font-mono text-xs"
-                />
-              </div>
-              <Button type="submit" variant="outline" size="sm" className="md:w-auto">
-                Save
-              </Button>
-            </form>
           </div>
         )}
       </div>

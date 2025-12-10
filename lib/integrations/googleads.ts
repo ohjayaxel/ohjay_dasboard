@@ -69,15 +69,37 @@ async function upsertConnection(
   const client = getSupabaseServiceClient();
   const existing = await getExistingConnection(tenantId);
 
+  // Merge existing meta with new meta if updating
+  const existingMeta =
+    existing && existing.meta && typeof existing.meta === 'object'
+      ? (existing.meta as Record<string, unknown>)
+      : {};
+
+  const mergedMeta = payload.meta
+    ? { ...existingMeta, ...payload.meta }
+    : existingMeta;
+
   const row = {
     tenant_id: tenantId,
     source: 'google_ads',
     status: payload.status,
-    access_token_enc: payload.accessToken ? encryptSecret(payload.accessToken) : null,
-    refresh_token_enc: payload.refreshToken ? encryptSecret(payload.refreshToken) : null,
-    expires_at: payload.expiresAt ?? null,
-    meta: payload.meta ?? {},
+    access_token_enc: payload.accessToken ? encryptSecret(payload.accessToken) : undefined,
+    refresh_token_enc: payload.refreshToken ? encryptSecret(payload.refreshToken) : undefined,
+    expires_at: payload.expiresAt ?? undefined,
+    meta: mergedMeta,
+    updated_at: new Date().toISOString(),
   };
+
+  // Remove undefined fields
+  if (!payload.accessToken && existing) {
+    delete (row as any).access_token_enc;
+  }
+  if (!payload.refreshToken && existing) {
+    delete (row as any).refresh_token_enc;
+  }
+  if (!payload.expiresAt && existing) {
+    delete (row as any).expires_at;
+  }
 
   if (existing) {
     const { error } = await client
@@ -91,7 +113,15 @@ async function upsertConnection(
     return;
   }
 
-  const { error } = await client.from('connections').insert(row);
+  // For insert, ensure required fields
+  const insertRow = {
+    ...row,
+    access_token_enc: row.access_token_enc ?? null,
+    refresh_token_enc: row.refresh_token_enc ?? null,
+    expires_at: row.expires_at ?? null,
+  };
+
+  const { error } = await client.from('connections').insert(insertRow);
   if (error) {
     throw new Error(`Failed to insert Google Ads connection: ${error.message}`);
   }
@@ -224,18 +254,15 @@ export async function handleGoogleAdsOAuthCallback(options: {
     ? new Date(Date.now() + Number(tokenResponse.expires_in) * 1000).toISOString()
     : null;
 
-  // After OAuth, automatically fetch accessible customers
-  // This improves UX by detecting accounts immediately instead of requiring manual click
-  let accessibleCustomers: GoogleAdsCustomer[] = [];
+  // After OAuth, fetch and classify all accessible accounts (MCC and child accounts)
+  let availableAccounts: GoogleAdsAccountInfo[] = [];
+  let managerCustomerId: string | null = null;
   let customersError: string | null = null;
-  let selectedCustomerId: string | null = options.loginCustomerId ?? null;
-  let selectedCustomerName: string | null = null;
-  let loginCustomerId: string | null = options.loginCustomerId ?? null;
 
-  // If we have a real access token (not mock), try to fetch customers automatically
+  // If we have a real access token (not mock), fetch accounts
   if (tokenResponse.access_token && !tokenResponse.access_token.startsWith('mock-')) {
     try {
-      // Temporarily save connection to enable fetchAccessibleGoogleAdsCustomers to get token
+      // Temporarily save connection to enable fetchAndClassifyGoogleAdsAccounts to get token
       await upsertConnection(options.tenantId, {
         status: 'connected',
         accessToken: tokenResponse.access_token,
@@ -243,43 +270,38 @@ export async function handleGoogleAdsOAuthCallback(options: {
         expiresAt,
         meta: {
           token_type: tokenResponse.token_type,
-          login_customer_id: loginCustomerId,
+          login_customer_id: options.loginCustomerId ?? null,
         },
       });
 
-      // Fetch accessible customers
-      const fetchResult = await fetchAccessibleGoogleAdsCustomers(options.tenantId);
+      // Fetch and classify all accounts
+      const fetchResult = await fetchAndClassifyGoogleAdsAccounts(options.tenantId);
 
       if (fetchResult.error) {
         customersError = fetchResult.error;
       } else {
-        accessibleCustomers = fetchResult.customers;
+        availableAccounts = fetchResult.accounts;
 
-        // Auto-select if only one customer found
-        if (accessibleCustomers.length === 1) {
-          selectedCustomerId = accessibleCustomers[0].id;
-          selectedCustomerName = accessibleCustomers[0].name;
-        } else if (accessibleCustomers.length > 1) {
-          // Multiple customers - don't auto-select, user must choose
-          customersError = 'Multiple Google Ads accounts found. Please select one in the integration settings.';
-          // If loginCustomerId was provided and matches one of the accessible customers, select it
-          if (loginCustomerId) {
-            const matchingCustomer = accessibleCustomers.find(c => c.id === loginCustomerId || c.id.replace(/-/g, '') === loginCustomerId.replace(/-/g, ''));
-            if (matchingCustomer) {
-              selectedCustomerId = matchingCustomer.id;
-              selectedCustomerName = matchingCustomer.name;
-              customersError = null; // Clear error if we found a match
-            }
-          }
+        // Find manager account ID
+        const managerAccount = availableAccounts.find(a => a.is_manager);
+        if (managerAccount) {
+          managerCustomerId = managerAccount.customer_id;
+        }
+
+        // Check if we have child accounts
+        const childAccounts = availableAccounts.filter(a => !a.is_manager);
+        if (childAccounts.length === 0) {
+          customersError = 'We detected only Manager (MCC) accounts. To sync data, you must have access to at least one standard Google Ads account. Please verify your permissions in Google Ads.';
         } else {
-          // No customers found
-          customersError = 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.';
+          // We have child accounts - user must select one (do NOT auto-select)
+          console.log(`[Google Ads] OAuth complete: Found ${childAccounts.length} child account(s). User must select one in admin UI.`);
         }
       }
     } catch (error) {
       // If automatic detection fails, log but don't fail the OAuth callback
       // User can manually trigger detection later
-      console.error('[Google Ads] Automatic account detection failed during OAuth callback:', error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error('[Google Ads] Automatic account detection failed during OAuth callback:', errorMsg);
       customersError = 'Failed to automatically detect accounts. Please click "Detect Google Ads accounts" to try again.';
     }
   } else {
@@ -287,19 +309,36 @@ export async function handleGoogleAdsOAuthCallback(options: {
     customersError = 'Using mock tokens. Real account detection requires valid OAuth credentials.';
   }
 
-  // Final connection save with all customer information
+  // Get existing meta to preserve other fields
+  const existing = await getExistingConnection(options.tenantId);
+  const existingMeta =
+    existing && existing.meta && typeof existing.meta === 'object'
+      ? (existing.meta as Record<string, unknown>)
+      : {};
+
+  // Final connection save with all account information
   await upsertConnection(options.tenantId, {
     status: 'connected',
     accessToken: tokenResponse.access_token,
     refreshToken: tokenResponse.refresh_token ?? null,
     expiresAt,
     meta: {
+      ...existingMeta,
       token_type: tokenResponse.token_type,
-      login_customer_id: loginCustomerId,
-      customer_id: selectedCustomerId, // Also save as customer_id for backwards compatibility
-      selected_customer_id: selectedCustomerId,
-      customer_name: selectedCustomerName,
-      accessible_customers: accessibleCustomers,
+      login_customer_id: options.loginCustomerId ?? null,
+      // New structure
+      manager_customer_id: managerCustomerId,
+      available_customers: availableAccounts,
+      // Do NOT set selected_customer_id here - user must select in admin UI
+      selected_customer_id: null,
+      selected_customer_name: null,
+      // Legacy fields (for backwards compatibility, but deprecated)
+      customer_id: null,
+      customer_name: null,
+      accessible_customers: availableAccounts.filter(a => !a.is_manager).map(a => ({
+        id: a.customer_id,
+        name: a.descriptive_name,
+      })),
       customers_error: customersError,
     },
   });
@@ -383,11 +422,368 @@ export type FetchAccessibleCustomersResult = {
   error?: string | null;
 };
 
+// Data model for connections.meta - Google Ads account information
+export type GoogleAdsAccountInfo = {
+  customer_id: string;
+  descriptive_name: string;
+  currency_code: string;
+  time_zone: string;
+  is_manager: boolean;
+  manager_customer_id?: string;
+};
+
+export type GoogleAdsConnectionMeta = {
+  // OAuth state
+  oauth_state?: string | null;
+  oauth_state_created_at?: string | null;
+  oauth_redirect_path?: string | null;
+  login_customer_id?: string | null;
+
+  // Account selection (new structure)
+  manager_customer_id?: string | null;
+  selected_customer_id?: string | null;
+  selected_customer_name?: string | null;
+  available_customers?: GoogleAdsAccountInfo[];
+
+  // Legacy fields (for backwards compatibility)
+  customer_id?: string | null;
+  customer_name?: string | null;
+  accessible_customers?: Array<{ id: string; name: string }>;
+  customers_error?: string | null;
+
+  // Token info
+  token_type?: string | null;
+};
+
+/**
+ * Fetch and classify all accessible Google Ads accounts (MCC and child accounts).
+ * Returns detailed account information including manager status.
+ * 
+ * Uses Google Ads API v21 REST endpoint: GET /v21/customers:listAccessibleCustomers
+ * Then queries each account to determine if it's a manager account.
+ */
+export async function fetchAndClassifyGoogleAdsAccounts(tenantId: string): Promise<{
+  accounts: GoogleAdsAccountInfo[];
+  error?: string | null;
+}> {
+  const accessToken = await getGoogleAdsAccessToken(tenantId);
+
+  if (!accessToken || !GOOGLE_DEVELOPER_TOKEN) {
+    return {
+      accounts: [],
+      error: 'Missing access token or developer token',
+    };
+  }
+
+  try {
+    // Step 1: List all accessible customers
+    const listResponse = await fetch(
+      `${GOOGLE_REPORTING_ENDPOINT}:listAccessibleCustomers`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'developer-token': GOOGLE_DEVELOPER_TOKEN,
+        },
+      },
+    );
+
+    if (!listResponse.ok) {
+      const errorBody = await listResponse.text();
+      let cleanError = `Failed to fetch accessible customers: ${listResponse.status}`;
+      if (errorBody && !errorBody.includes('<!DOCTYPE')) {
+        try {
+          const errorJson = JSON.parse(errorBody);
+          cleanError = errorJson.message || errorJson.error?.message || cleanError;
+        } catch {
+          if (errorBody.length < 500 && !errorBody.includes('<html')) {
+            cleanError = `${cleanError} - ${errorBody.substring(0, 200)}`;
+          }
+        }
+      }
+      return { accounts: [], error: cleanError };
+    }
+
+    const listData = await listResponse.json();
+    const resourceNames = listData.resourceNames || [];
+
+    if (resourceNames.length === 0) {
+      return {
+        accounts: [],
+        error: 'No customer accounts found. The OAuth account may not have access to any Google Ads accounts.',
+      };
+    }
+
+    console.log(`[Google Ads] Found ${resourceNames.length} accessible account(s), classifying...`);
+
+    // Step 2: For each account, fetch details using GAQL query
+    const accounts: GoogleAdsAccountInfo[] = [];
+    let managerCustomerId: string | null = null;
+
+    for (const resourceName of resourceNames) {
+      const customerId = resourceName.replace('customers/', '');
+
+      try {
+        // Use GAQL query to get customer details - works better than direct GET for manager accounts
+        const query = `SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager FROM customer LIMIT 1`;
+
+        let customerResponse = await fetch(
+          `${GOOGLE_REPORTING_ENDPOINT}/${customerId}/googleAds:searchStream`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'developer-token': GOOGLE_DEVELOPER_TOKEN,
+              'login-customer-id': customerId,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ query }),
+          },
+        );
+
+        // If that fails, try without login-customer-id (for regular accounts)
+        if (!customerResponse.ok) {
+          customerResponse = await fetch(
+            `${GOOGLE_REPORTING_ENDPOINT}/${customerId}/googleAds:searchStream`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'developer-token': GOOGLE_DEVELOPER_TOKEN,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ query }),
+            },
+          );
+        }
+
+        if (customerResponse.ok) {
+          const responseText = await customerResponse.text();
+          let customer: any = null;
+
+          // Parse response - handle multiple formats
+          try {
+            const parsed = JSON.parse(responseText);
+            if (Array.isArray(parsed)) {
+              customer = parsed[0]?.customer || parsed[0];
+            } else if (parsed.results?.[0]?.customer) {
+              customer = parsed.results[0].customer;
+            } else if (parsed.customer) {
+              customer = parsed.customer;
+            } else {
+              // Try newline-delimited JSON
+              const lines = responseText.trim().split('\n').filter(line => line.trim());
+              if (lines.length > 0) {
+                const firstLine = JSON.parse(lines[0]);
+                customer = firstLine.customer || firstLine.results?.[0]?.customer || firstLine;
+              }
+            }
+          } catch (parseError) {
+            console.warn(`[Google Ads] Failed to parse customer details for ${customerId}:`, parseError);
+          }
+
+          if (customer) {
+            const isManager = customer.manager === true;
+            
+            if (isManager && !managerCustomerId) {
+              managerCustomerId = customerId;
+            }
+
+            accounts.push({
+              customer_id: customerId,
+              descriptive_name: customer.descriptive_name || customerId,
+              currency_code: customer.currency_code || 'USD',
+              time_zone: customer.time_zone || 'UTC',
+              is_manager: isManager,
+              manager_customer_id: isManager ? undefined : managerCustomerId || undefined,
+            });
+
+            console.log(`[Google Ads] Classified account ${customerId}: ${isManager ? 'MANAGER (MCC)' : 'CHILD'} - ${customer.descriptive_name || customerId}`);
+          } else {
+            // If we can't get details, assume it's a manager account
+            console.warn(`[Google Ads] Could not get details for ${customerId}, assuming manager account`);
+            accounts.push({
+              customer_id: customerId,
+              descriptive_name: customerId,
+              currency_code: 'USD',
+              time_zone: 'UTC',
+              is_manager: true,
+            });
+            if (!managerCustomerId) {
+              managerCustomerId = customerId;
+            }
+          }
+        } else {
+          // If both attempts fail, treat as manager account
+          console.warn(`[Google Ads] Failed to fetch details for ${customerId} (${customerResponse.status}), assuming manager account`);
+          accounts.push({
+            customer_id: customerId,
+            descriptive_name: customerId,
+            currency_code: 'USD',
+            time_zone: 'UTC',
+            is_manager: true,
+          });
+          if (!managerCustomerId) {
+            managerCustomerId = customerId;
+          }
+        }
+      } catch (error) {
+        console.warn(`[Google Ads] Error fetching details for ${customerId}:`, error);
+        // Treat as manager account on error
+        accounts.push({
+          customer_id: customerId,
+          descriptive_name: customerId,
+          currency_code: 'USD',
+          time_zone: 'UTC',
+          is_manager: true,
+        });
+        if (!managerCustomerId) {
+          managerCustomerId = customerId;
+        }
+      }
+    }
+
+    // Step 3: If we only found manager accounts, fetch child accounts
+    const managerAccounts = accounts.filter(a => a.is_manager);
+    const childAccounts = accounts.filter(a => !a.is_manager);
+
+    if (managerAccounts.length > 0 && childAccounts.length === 0) {
+      console.log(`[Google Ads] Only manager accounts found, fetching child accounts from ${managerAccounts.length} manager(s)...`);
+
+      for (const managerAccount of managerAccounts) {
+        try {
+          const query = `SELECT customer_client.client_customer, customer_client.descriptive_name, customer_client.currency_code, customer_client.time_zone, customer_client.manager FROM customer_client WHERE customer_client.status = 'ENABLED' AND customer_client.manager = false LIMIT 100`;
+
+          let searchResponse = await fetch(
+            `${GOOGLE_REPORTING_ENDPOINT}/${managerAccount.customer_id}/googleAds:searchStream`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'developer-token': GOOGLE_DEVELOPER_TOKEN,
+                'login-customer-id': managerAccount.customer_id,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ query }),
+            },
+          );
+
+          if (!searchResponse.ok) {
+            searchResponse = await fetch(
+              `${GOOGLE_REPORTING_ENDPOINT}/${managerAccount.customer_id}:googleAds:searchStream`,
+              {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  'developer-token': GOOGLE_DEVELOPER_TOKEN,
+                  'login-customer-id': managerAccount.customer_id,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ query }),
+              },
+            );
+          }
+
+          if (searchResponse.ok) {
+            const responseText = await searchResponse.text();
+            let results: any[] = [];
+
+            // Parse response
+            try {
+              const parsed = JSON.parse(responseText);
+              if (Array.isArray(parsed)) {
+                results = parsed;
+              } else if (parsed.results && Array.isArray(parsed.results)) {
+                results = parsed.results;
+              } else {
+                results = [parsed];
+              }
+            } catch {
+              const lines = responseText.trim().split('\n').filter(line => line.trim());
+              for (const line of lines) {
+                try {
+                  const parsed = JSON.parse(line);
+                  if (parsed.results && Array.isArray(parsed.results)) {
+                    results.push(...parsed.results);
+                  } else {
+                    results.push(parsed);
+                  }
+                } catch {
+                  // Skip invalid lines
+                }
+              }
+            }
+
+            for (const result of results) {
+              const client = result.customerClient || result.results?.[0]?.customerClient;
+
+              if (client && client.manager === false) {
+                const clientCustomer = client.clientCustomer;
+                let clientId = '';
+                if (typeof clientCustomer === 'string') {
+                  clientId = clientCustomer.replace('customers/', '').trim();
+                } else if (clientCustomer?.id) {
+                  clientId = String(clientCustomer.id).replace('customers/', '').trim();
+                } else if (clientCustomer && typeof clientCustomer === 'object' && 'resourceName' in clientCustomer) {
+                  clientId = String(clientCustomer.resourceName || '').replace('customers/', '').trim();
+                }
+
+                if (clientId) {
+                  // Check if we already have this account
+                  if (!accounts.find(a => a.customer_id === clientId)) {
+                    accounts.push({
+                      customer_id: clientId,
+                      descriptive_name: client.descriptive_name || clientId,
+                      currency_code: client.currency_code || 'USD',
+                      time_zone: client.time_zone || 'UTC',
+                      is_manager: false,
+                      manager_customer_id: managerAccount.customer_id,
+                    });
+                    console.log(`[Google Ads] Found child account: ${clientId} - ${client.descriptive_name || clientId}`);
+                  }
+                }
+              }
+            }
+          } else {
+            const errorText = await searchResponse.text();
+            console.warn(`[Google Ads] Failed to fetch child accounts from manager ${managerAccount.customer_id}: ${searchResponse.status} ${errorText.substring(0, 200)}`);
+          }
+        } catch (error) {
+          console.warn(`[Google Ads] Error fetching child accounts from manager ${managerAccount.customer_id}:`, error);
+        }
+      }
+    }
+
+    // Update manager_customer_id for all child accounts
+    const finalManagerId = managerCustomerId || managerAccounts[0]?.customer_id;
+    if (finalManagerId) {
+      accounts.forEach(account => {
+        if (!account.is_manager && !account.manager_customer_id) {
+          account.manager_customer_id = finalManagerId;
+        }
+      });
+    }
+
+    console.log(`[Google Ads] Classification complete: ${accounts.filter(a => a.is_manager).length} manager account(s), ${accounts.filter(a => !a.is_manager).length} child account(s)`);
+
+    return { accounts };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error('[Google Ads] Error fetching and classifying accounts:', error);
+    return {
+      accounts: [],
+      error: `Failed to fetch accounts: ${errorMessage}`,
+    };
+  }
+}
+
 /**
  * Fetch all accessible Google Ads customers for a tenant.
  * Returns list of customers accessible from the MCC account.
  * 
  * Uses Google Ads API v21 REST endpoint: GET /v21/customers:listAccessibleCustomers
+ * 
+ * @deprecated Use fetchAndClassifyGoogleAdsAccounts instead for better MCC support
  */
 export async function fetchAccessibleGoogleAdsCustomers(tenantId: string): Promise<FetchAccessibleCustomersResult> {
   const accessToken = await getGoogleAdsAccessToken(tenantId);
