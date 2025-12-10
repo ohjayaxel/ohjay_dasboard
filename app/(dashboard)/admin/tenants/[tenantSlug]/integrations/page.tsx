@@ -281,77 +281,156 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
   })
   const googleAdsDisconnectAction = disconnectGoogleAds.bind(null, { tenantId: tenant.id, tenantSlug: tenant.slug })
 
-  const googleAdsCustomerForm =
-    googleCustomers.length > 0 ? (
-      <form
-        action={updateGoogleAdsSelectedCustomer}
-        className="grid gap-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
-      >
-        <input type="hidden" name="tenantId" value={tenant.id} />
-        <input type="hidden" name="tenantSlug" value={tenant.slug} />
-        <div className="space-y-2">
-          <Label htmlFor="google-ads-customer">Select customer account</Label>
-          <select
-            id="google-ads-customer"
-            name="customerId"
-            defaultValue={selectedGoogleCustomerId ?? googleCustomers[0]?.id ?? ''}
-            className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            required
-          >
-            {googleCustomers.map((customer) => (
-              <option key={customer.id} value={customer.id}>
-                {customer.name} ({customer.id})
-              </option>
-            ))}
-          </select>
-        </div>
-        <Button type="submit" variant="outline" className="md:w-auto">
-          Save customer
-        </Button>
-        {googleCustomersError && (
-          <p className="md:col-span-2 text-sm text-destructive">
-            Google Ads API response: <span className="font-mono">{googleCustomersError}</span>
-          </p>
-        )}
-      </form>
-    ) : google.status === 'connected' ? (
-      <div className="space-y-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm">
-        <p className="text-muted-foreground">
-          Please enter your Google Ads Customer ID manually. The Customer ID can be found in your Google Ads account settings.
-        </p>
-        {googleCustomersError && (
-          <div className="rounded-md bg-muted/50 p-3">
-            <p className="font-medium text-foreground">Note:</p>
-            <p className="mt-1 text-xs text-muted-foreground">{googleCustomersError}</p>
+  const googleAdsCustomerForm = google.status === 'connected' ? (
+    googleCustomers.length > 1 ? (
+      // Multiple customers - show dropdown
+      <div className="space-y-3">
+        <form
+          action={refreshGoogleAdsCustomers}
+          className="flex flex-col gap-2 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm md:flex-row md:items-center md:justify-between"
+        >
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">Detect Google Ads accounts</p>
+            <p className="text-xs text-muted-foreground">
+              Automatically detect accessible Google Ads accounts for this connection.
+            </p>
           </div>
-        )}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input type="hidden" name="tenantId" value={tenant.id} />
+            <input type="hidden" name="tenantSlug" value={tenant.slug} />
+            <FormSubmitButton type="submit" variant="secondary" className="md:w-auto" pendingLabel="Detecting...">
+              Detect Google Ads accounts
+            </FormSubmitButton>
+          </div>
+        </form>
         <form
           action={updateGoogleAdsSelectedCustomer}
-          className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+          className="grid gap-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
         >
           <input type="hidden" name="tenantId" value={tenant.id} />
           <input type="hidden" name="tenantSlug" value={tenant.slug} />
           <div className="space-y-2">
-            <Label htmlFor="google-ads-customer-manual">Google Ads Customer ID</Label>
-            <Input
-              id="google-ads-customer-manual"
+            <Label htmlFor="google-ads-customer">Select customer account</Label>
+            <select
+              id="google-ads-customer"
               name="customerId"
-              type="text"
-              placeholder="123-456-7890"
-              defaultValue={selectedGoogleCustomerId ?? ''}
-              className="font-mono text-xs"
+              defaultValue={selectedGoogleCustomerId ?? googleCustomers[0]?.id ?? ''}
+              className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               required
-            />
-            <p className="text-xs text-muted-foreground">
-              Format: XXX-XXX-XXXX (found in Google Ads account settings)
-            </p>
+            >
+              {googleCustomers.map((customer) => (
+                <option key={customer.id} value={customer.id}>
+                  {customer.name} ({customer.id})
+                </option>
+              ))}
+            </select>
           </div>
           <Button type="submit" variant="outline" className="md:w-auto">
-            Save customer ID
+            Save customer
           </Button>
+          {googleCustomersError && (
+            <div className="md:col-span-2 rounded-md bg-muted/50 p-3">
+              <p className="text-sm font-medium text-foreground">Note:</p>
+              <p className="mt-1 text-xs text-muted-foreground">{googleCustomersError}</p>
+            </div>
+          )}
         </form>
       </div>
-    ) : null
+    ) : googleCustomers.length === 1 && selectedGoogleCustomerId ? (
+      // Single customer auto-selected - show status
+      <div className="space-y-3">
+        <form
+          action={refreshGoogleAdsCustomers}
+          className="flex flex-col gap-2 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm md:flex-row md:items-center md:justify-between"
+        >
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">Detect Google Ads accounts</p>
+            <p className="text-xs text-muted-foreground">
+              Automatically detect accessible Google Ads accounts for this connection.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input type="hidden" name="tenantId" value={tenant.id} />
+            <input type="hidden" name="tenantSlug" value={tenant.slug} />
+            <FormSubmitButton type="submit" variant="secondary" className="md:w-auto" pendingLabel="Detecting...">
+              Detect Google Ads accounts
+            </FormSubmitButton>
+          </div>
+        </form>
+        <div className="rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm">
+          <p className="font-medium text-foreground">Selected account</p>
+          <p className="mt-1 text-muted-foreground">
+            {selectedGoogleCustomerName && selectedGoogleCustomerName !== selectedGoogleCustomerId
+              ? `${selectedGoogleCustomerName} (${selectedGoogleCustomerId})`
+              : selectedGoogleCustomerId}
+          </p>
+          {googleCustomersError && (
+            <div className="mt-3 rounded-md bg-muted/50 p-3">
+              <p className="text-xs font-medium text-foreground">Note:</p>
+              <p className="mt-1 text-xs text-muted-foreground">{googleCustomersError}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    ) : (
+      // No customers detected yet - show detect button and manual fallback
+      <div className="space-y-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm">
+        <form
+          action={refreshGoogleAdsCustomers}
+          className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between"
+        >
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">Detect Google Ads accounts</p>
+            <p className="text-xs text-muted-foreground">
+              Automatically detect accessible Google Ads accounts for this connection.
+            </p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input type="hidden" name="tenantId" value={tenant.id} />
+            <input type="hidden" name="tenantSlug" value={tenant.slug} />
+            <FormSubmitButton type="submit" variant="default" className="md:w-auto" pendingLabel="Detecting...">
+              Detect Google Ads accounts
+            </FormSubmitButton>
+          </div>
+        </form>
+        {googleCustomersError && (
+          <div className="rounded-md bg-muted/50 p-3">
+            <p className="text-xs font-medium text-foreground">Note:</p>
+            <p className="mt-1 text-xs text-muted-foreground">{googleCustomersError}</p>
+          </div>
+        )}
+        {googleCustomersError && googleCustomersError.includes('Multiple') === false && (
+          // Manual fallback only if detection failed (not if multiple found)
+          <div className="mt-3 space-y-2 border-t border-muted/60 pt-3">
+            <p className="text-xs text-muted-foreground">
+              If automatic detection failed, you can enter your Customer ID manually:
+            </p>
+            <form
+              action={updateGoogleAdsSelectedCustomer}
+              className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+            >
+              <input type="hidden" name="tenantId" value={tenant.id} />
+              <input type="hidden" name="tenantSlug" value={tenant.slug} />
+              <div className="space-y-2">
+                <Label htmlFor="google-ads-customer-manual" className="text-xs">Google Ads Customer ID</Label>
+                <Input
+                  id="google-ads-customer-manual"
+                  name="customerId"
+                  type="text"
+                  placeholder="123-456-7890"
+                  defaultValue={selectedGoogleCustomerId ?? ''}
+                  className="font-mono text-xs"
+                />
+              </div>
+              <Button type="submit" variant="outline" size="sm" className="md:w-auto">
+                Save
+              </Button>
+            </form>
+          </div>
+        )}
+      </div>
+    )
+  ) : null
 
   const metaAccountForm =
     metaAccounts.length > 0 ? (
