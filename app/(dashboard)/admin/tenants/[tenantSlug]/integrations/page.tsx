@@ -316,19 +316,37 @@ export default async function AdminTenantIntegrationsPage(props: PageProps) {
     ) : google.status === 'connected' ? (
       <div className="space-y-3 rounded-xl border border-dashed border-muted/60 bg-background/80 p-4 text-sm">
         <p className="text-muted-foreground">
-          No customer accounts were returned for this connection. Reconnect Google Ads or verify that the account has access to customer accounts.
+          Please enter your Google Ads Customer ID manually. The Customer ID can be found in your Google Ads account settings.
         </p>
         {googleCustomersError && (
-          <div className="rounded-md bg-destructive/10 p-3">
-            <p className="font-medium text-destructive">Error:</p>
-            <p className="mt-1 font-mono text-xs">{googleCustomersError}</p>
+          <div className="rounded-md bg-muted/50 p-3">
+            <p className="font-medium text-foreground">Note:</p>
+            <p className="mt-1 text-xs text-muted-foreground">{googleCustomersError}</p>
           </div>
         )}
-        <form action={refreshGoogleAdsCustomers}>
+        <form
+          action={updateGoogleAdsSelectedCustomer}
+          className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+        >
           <input type="hidden" name="tenantId" value={tenant.id} />
           <input type="hidden" name="tenantSlug" value={tenant.slug} />
-          <Button type="submit" variant="outline" size="sm">
-            Retry fetch customers
+          <div className="space-y-2">
+            <Label htmlFor="google-ads-customer-manual">Google Ads Customer ID</Label>
+            <Input
+              id="google-ads-customer-manual"
+              name="customerId"
+              type="text"
+              placeholder="123-456-7890"
+              defaultValue={selectedGoogleCustomerId ?? ''}
+              className="font-mono text-xs"
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              Format: XXX-XXX-XXXX (found in Google Ads account settings)
+            </p>
+          </div>
+          <Button type="submit" variant="outline" className="md:w-auto">
+            Save customer ID
           </Button>
         </form>
       </div>
