@@ -519,30 +519,20 @@ LIMIT 10000
 /**
  * Build GAQL query for conversion_action data.
  * 
- * This query fetches conversion_action per date, campaign, ad_group, and country.
- * Note: segments.conversion_action cannot be used with clicks, cost_micros, or impressions,
- * so we query it separately and merge with geographic data.
+ * NOTE: This function is currently disabled because segments.conversion_action
+ * cannot be used with geographic_view at all, even if we don't explicitly
+ * select clicks/cost_micros/impressions. The geographic_view resource
+ * appears to implicitly include these metrics.
+ * 
+ * TODO: Investigate alternative views (e.g., conversion_action_view) or
+ * separate queries without geographic breakdown to get conversion_action data.
+ * 
+ * For now, conversion_action_id will be set to null in the results.
  */
 function buildConversionActionQuery(startDate: string, endDate: string): string {
-  return `
-SELECT
-  segments.date,
-  customer.id,
-  campaign.id,
-  ad_group.id,
-  geographic_view.country_criterion_id,
-  geographic_view.location_type,
-  segments.conversion_action,
-  metrics.conversions,
-  metrics.conversions_value
-FROM geographic_view
-WHERE segments.date >= '${startDate}' AND segments.date <= '${endDate}'
-  AND campaign.status != 'REMOVED'
-  AND ad_group.status != 'REMOVED'
-  AND metrics.conversions > 0
-ORDER BY segments.date DESC, campaign.id, ad_group.id, geographic_view.country_criterion_id
-LIMIT 10000
-  `.trim();
+  // Return empty result - conversion_action cannot be queried with geographic_view
+  // This query would fail with PROHIBITED_SEGMENT_WITH_METRIC_IN_SELECT_OR_WHERE_CLAUSE
+  return '';
 }
 
 /**
@@ -728,54 +718,14 @@ async function fetchConversionActionInsights(
   endDate: string,
   loginCustomerId: string | null,
 ): Promise<any[]> {
-  const developerToken = Deno.env.get('GOOGLE_DEVELOPER_TOKEN');
-  if (!developerToken) {
-    throw new Error('Missing GOOGLE_DEVELOPER_TOKEN environment variable');
-  }
-
-  const query = buildConversionActionQuery(startDate, endDate);
-  const url = `${GOOGLE_ADS_ENDPOINT}/customers/${customerId}/googleAds:searchStream`;
-
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
-    'developer-token': developerToken,
-    'Content-Type': 'application/json',
-  };
-
-  // Add login-customer-id header if we have a manager account
-  if (loginCustomerId && loginCustomerId !== customerId) {
-    headers['login-customer-id'] = loginCustomerId;
-  }
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ query }),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    let errorMessage = `Google Ads API error (conversion action query): ${response.status}`;
-    
-    // Try to extract useful error details from response
-    try {
-      const errorJson = JSON.parse(errorBody);
-      if (errorJson.error?.message) {
-        errorMessage += ` ${errorJson.error.message}`;
-      }
-      console.error('[sync-googleads] Conversion action query error:', JSON.stringify(errorJson, null, 2));
-    } catch {
-      if (errorBody && errorBody.length < 500 && !errorBody.includes('<!DOCTYPE')) {
-        errorMessage += ` ${errorBody.substring(0, 200)}`;
-      }
-    }
-    
-    // Log error but don't fail the entire sync - conversion_action is optional
-    console.warn(`[sync-googleads] Failed to fetch conversion action data: ${errorMessage}`);
-    return [];
-  }
-
-  return await parseSearchStreamResponse(response);
+  // Conversion action query is currently disabled because segments.conversion_action
+  // cannot be used with geographic_view (even without explicitly selecting clicks/cost_micros/impressions).
+  // This would cause PROHIBITED_SEGMENT_WITH_METRIC_IN_SELECT_OR_WHERE_CLAUSE error.
+  // 
+  // TODO: Implement alternative approach (e.g., using conversion_action_view or separate
+  // queries without geographic breakdown) if conversion_action attribution is needed.
+  console.log('[sync-googleads] Conversion action query skipped - not compatible with geographic_view');
+  return [];
 }
 
 /**
