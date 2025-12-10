@@ -72,3 +72,68 @@ export async function getDailyMetricsFromView(
 
   return (data as DailyMetricsRow[]) ?? [];
 }
+
+/**
+ * Marketing Spend Aggregation Result
+ */
+export type MarketingSpendAggregation = {
+  meta_spend: number;
+  google_ads_spend: number;
+  total_marketing_spend: number;
+};
+
+/**
+ * Parameters for fetching marketing spend from the semantic layer view
+ */
+export type GetMarketingSpendFromViewParams = {
+  tenantId: string;
+  from: string; // 'YYYY-MM-DD'
+  to: string;   // 'YYYY-MM-DD'
+};
+
+/**
+ * Fetches aggregated marketing spend from the v_marketing_spend_daily semantic layer view.
+ * 
+ * This view aggregates:
+ * - Meta Ads spend (from kpi_daily where source='meta')
+ * - Google Ads spend (from kpi_daily where source='google_ads')
+ * - Total marketing spend (sum of both)
+ * 
+ * @param params - Query parameters
+ * @returns Aggregated marketing spend totals for the date range
+ */
+export async function getMarketingSpendFromView(
+  params: GetMarketingSpendFromViewParams,
+): Promise<MarketingSpendAggregation> {
+  const client = getSupabaseServiceClient();
+
+  const { data, error } = await client
+    .from('v_marketing_spend_daily')
+    .select('meta_spend, google_ads_spend, total_marketing_spend')
+    .eq('tenant_id', params.tenantId)
+    .gte('date', params.from)
+    .lte('date', params.to);
+
+  if (error) {
+    throw new Error(
+      `Failed to fetch marketing spend from semantic layer view: ${error.message}`,
+    );
+  }
+
+  // Aggregate across all dates in the range
+  const rows = (data as Array<{
+    meta_spend: number | null;
+    google_ads_spend: number | null;
+    total_marketing_spend: number | null;
+  }>) ?? [];
+
+  const metaSpend = rows.reduce((sum, row) => sum + (row.meta_spend ?? 0), 0);
+  const googleAdsSpend = rows.reduce((sum, row) => sum + (row.google_ads_spend ?? 0), 0);
+  const totalMarketingSpend = rows.reduce((sum, row) => sum + (row.total_marketing_spend ?? 0), 0);
+
+  return {
+    meta_spend: metaSpend,
+    google_ads_spend: googleAdsSpend,
+    total_marketing_spend: totalMarketingSpend,
+  };
+}

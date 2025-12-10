@@ -1,8 +1,15 @@
 /**
  * Aggregation queries for shopify_sales_transactions table
  * 
- * Provides functions to aggregate daily and monthly sales from the
- * shopify_sales_transactions table for 100% matching with Shopify Sales reports.
+ * DEPRECATED: This module is no longer used by the current analytics pipeline.
+ * 
+ * The platform now uses:
+ * - shopify_daily_sales (pre-aggregated table) for daily sales metrics
+ * - v_daily_metrics (semantic layer view) for unified sales + marketing metrics
+ * 
+ * This file is kept temporarily for historical reference. Do not use for new logic.
+ * 
+ * @deprecated Use lib/data/daily-metrics.ts and semantic layer views instead
  */
 
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
@@ -31,6 +38,8 @@ export type MonthlySalesAggregation = {
 /**
  * Aggregates daily sales from shopify_sales_transactions table
  * Includes orders count and new customer metrics by joining with shopify_orders
+ * 
+ * @deprecated Not used by current analytics pipeline. Use getDailyMetricsFromView() from lib/data/daily-metrics.ts instead.
  */
 export async function aggregateDailySales(
   tenantId: string,
