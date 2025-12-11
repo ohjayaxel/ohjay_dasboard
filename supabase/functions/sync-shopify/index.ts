@@ -125,6 +125,11 @@ const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
+// Retry logic constants
+const RETRIABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]); // Request Timeout, Conflict, Too Early, Too Many Requests, Internal Server Error, Bad Gateway, Service Unavailable, Gateway Timeout
+const BASE_DELAY_MS = 500; // Base delay for exponential backoff (500ms)
+const MAX_ATTEMPTS = 6; // Maximum retry attempts
+
 function parseEncryptionKey(): Uint8Array {
   const rawKey = getEnvVar('ENCRYPTION_KEY');
 
@@ -256,6 +261,71 @@ async function decryptSecret(payload: Uint8Array | string | BufferJson | null): 
   }
 }
 
+/**
+ * Fetch with retry logic for Shopify API calls
+ * Implements exponential backoff for retriable errors
+ */
+async function fetchWithRetry(
+  url: string,
+  options: { headers: Record<string, string> },
+  attempt = 1,
+): Promise<Response> {
+  try {
+    const response = await fetch(url, { headers: options.headers });
+
+    if (response.ok) {
+      return response;
+    }
+
+    // Check if status is retriable and we haven't exceeded max attempts
+    if (RETRIABLE_STATUS.has(response.status) && attempt < MAX_ATTEMPTS) {
+      // Calculate exponential backoff delay: BASE_DELAY_MS * 2^(attempt-1)
+      const delayMs = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      
+      // Handle rate limiting (429 Too Many Requests) - Shopify uses this
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After');
+        const waitTime = retryAfter ? parseInt(retryAfter, 10) * 1000 : delayMs;
+        console.log(
+          `[sync-shopify] Rate limited (429) on attempt ${attempt}/${MAX_ATTEMPTS}. ` +
+          `Waiting ${waitTime}ms before retry...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+      } else {
+        console.log(
+          `[sync-shopify] Request failed with retriable status ${response.status} (attempt ${attempt}/${MAX_ATTEMPTS}). ` +
+          `Retrying after ${delayMs}ms...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+
+      return fetchWithRetry(url, options, attempt + 1);
+    }
+
+    // Non-retriable error or max attempts reached
+    if (attempt >= MAX_ATTEMPTS) {
+      const body = await response.text();
+      throw new Error(
+        `Shopify API request failed after ${MAX_ATTEMPTS} attempts: ${response.status} ${body}`,
+      );
+    }
+
+    return response;
+  } catch (error) {
+    // Network errors or exceptions - retry if we haven't exceeded max attempts
+    if (attempt >= MAX_ATTEMPTS) {
+      throw error;
+    }
+
+    const delayMs = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+    console.log(
+      `[sync-shopify] Request exception on attempt ${attempt}/${MAX_ATTEMPTS}. Retrying after ${delayMs}ms...`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return fetchWithRetry(url, options, attempt + 1);
+  }
+}
+
 async function fetchShopifyOrders(params: {
   shopDomain: string;
   accessToken: string;
@@ -270,7 +340,8 @@ async function fetchShopifyOrders(params: {
     url.searchParams.set('created_at_min', params.since);
   }
 
-  const res = await fetch(url.toString(), {
+  // Use fetchWithRetry for automatic retry on transient errors
+  const res = await fetchWithRetry(url.toString(), {
     headers: {
       'X-Shopify-Access-Token': params.accessToken,
     },
