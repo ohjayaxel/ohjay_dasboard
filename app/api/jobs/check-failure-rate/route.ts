@@ -10,6 +10,10 @@ const TIME_WINDOW_HOURS = 24; // Check last 24 hours
 const SLACK_ALERTS_ENABLED = !!process.env.SLACK_WEBHOOK_URL && process.env.SLACK_WEBHOOK_URL.trim().length > 0;
 
 async function handleRequest(request: Request) {
+  // Early logging to verify function is being called
+  console.log('[jobs/check-failure-rate] Function started');
+  console.log('[jobs/check-failure-rate] SLACK_WEBHOOK_URL configured:', !!process.env.SLACK_WEBHOOK_URL);
+  
   try {
     const url = new URL(request.url);
     const source = url.searchParams.get('source'); // Optional: filter by source
@@ -143,6 +147,12 @@ async function handleRequest(request: Request) {
       time_window_hours: TIME_WINDOW_HOURS,
     };
 
+    // Log result before sending alerts
+    console.log(`[jobs/check-failure-rate] Result status: ${result.status}`);
+    console.log(`[jobs/check-failure-rate] Alerts found: ${alerts.length}, Consecutive failures: ${consecutiveFailures.length}`);
+    console.log(`[jobs/check-failure-rate] SLACK_ALERTS_ENABLED: ${SLACK_ALERTS_ENABLED}`);
+    console.log(`[jobs/check-failure-rate] SLACK_WEBHOOK_URL available: ${!!process.env.SLACK_WEBHOOK_URL}`);
+
     // Send Slack alerts if there are issues and Slack is configured
     console.log(`[jobs/check-failure-rate] Slack alerts enabled: ${SLACK_ALERTS_ENABLED}, Status: ${result.status}, Alerts: ${alerts.length}, Consecutive: ${consecutiveFailures.length}`);
     
@@ -201,11 +211,15 @@ async function handleRequest(request: Request) {
       console.warn('[jobs/check-failure-rate] SLACK_WEBHOOK_URL not configured, skipping Slack notifications');
     }
 
-    return NextResponse.json(result, {
+    console.log(`[jobs/check-failure-rate] Returning response with status: ${result.status === 'alert' ? 503 : 200}`);
+    const response = NextResponse.json(result, {
       status: result.status === 'alert' ? 503 : 200,
     });
+    console.log('[jobs/check-failure-rate] Function completed successfully');
+    return response;
   } catch (error) {
     console.error('[jobs/check-failure-rate] Failed to check failure rate', error);
+    console.error('[jobs/check-failure-rate] Error details:', error instanceof Error ? error.stack : String(error));
     return NextResponse.json(
       { error: 'Failed to check failure rate.', details: error instanceof Error ? error.message : String(error) },
       { status: 500 },
