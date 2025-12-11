@@ -198,6 +198,8 @@ type ProcessOptions = {
 
 const SOURCE = 'meta'
 const META_API_VERSION = Deno.env.get('META_API_VERSION') ?? 'v18.0'
+const META_GRAPH_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+const META_TOKEN_ENDPOINT = `${META_GRAPH_BASE}/oauth/access_token`
 const ENCRYPTION_KEY = Deno.env.get('ENCRYPTION_KEY')
 
 const KEY_LENGTH = 32
@@ -536,6 +538,80 @@ async function decryptAccessToken(payload: unknown): Promise<string | null> {
     console.error('Failed to decrypt Meta access token:', error)
     throw new Error('Unable to decrypt Meta access token for tenant.')
   }
+}
+
+async function decryptRefreshToken(payload: unknown): Promise<string | null> {
+  return decryptAccessToken(payload); // Same decryption logic
+}
+
+// Token refresh function for Meta
+async function refreshMetaToken(
+  client: SupabaseClient,
+  connection: MetaConnection,
+): Promise<string | null> {
+  const refreshTokenEnc = connection.refresh_token_enc;
+  if (!refreshTokenEnc) {
+    return null;
+  }
+
+  const refreshToken = await decryptRefreshToken(refreshTokenEnc);
+  if (!refreshToken) {
+    return null;
+  }
+
+  const metaAppId = Deno.env.get('META_APP_ID');
+  const metaAppSecret = Deno.env.get('META_APP_SECRET');
+
+  if (!metaAppId || !metaAppSecret) {
+    console.warn('[sync-meta] Missing META_APP_ID or META_APP_SECRET for token refresh');
+    return null;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      grant_type: 'fb_exchange_token',
+      client_id: metaAppId,
+      client_secret: metaAppSecret,
+      fb_exchange_token: refreshToken,
+    });
+
+    const res = await fetch(`${META_TOKEN_ENDPOINT}?${params.toString()}`);
+
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`[sync-meta] Token refresh failed: ${res.status} ${body}`);
+      return null;
+    }
+
+    const tokenData = await res.json();
+    // Note: We don't update the connection here - that should be done by refreshMetaTokenIfNeeded
+    // in lib/integrations/meta.ts. This is just for getting a fresh token for this sync.
+    return tokenData.access_token || null;
+  } catch (error) {
+    console.error('[sync-meta] Token refresh exception:', error);
+    return null;
+  }
+}
+
+// Get access token, refreshing if needed
+async function getAccessToken(client: SupabaseClient, connection: MetaConnection): Promise<string | null> {
+  // Check if token is expired or about to expire
+  const expiresAt = connection.expires_at ? new Date(connection.expires_at).getTime() : null;
+  const now = Date.now();
+  const fiveMinutesFromNow = now + 5 * 60 * 1000;
+
+  let accessToken: string | null = null;
+
+  if (expiresAt && expiresAt > fiveMinutesFromNow) {
+    // Token is still valid, decrypt and use it
+    accessToken = await decryptAccessToken(connection.access_token_enc);
+  } else {
+    // Token expired or about to expire, try to refresh
+    console.log(`[sync-meta] Token expired or expiring soon, attempting refresh for tenant ${connection.tenant_id}`);
+    accessToken = await refreshMetaToken(client, connection);
+  }
+
+  return accessToken;
 }
 
 function getPreferredAccountId(meta: JsonRecord): string | null {
@@ -1604,9 +1680,27 @@ async function processTenant(
   }
 
   try {
-    const accessToken = await decryptAccessToken(connection.access_token_enc)
+    // Get access token (refresh if needed)
+    let accessToken: string | null = null;
+    try {
+      accessToken = await getAccessToken(client, connection);
+    } catch (decryptError) {
+      const errorMsg = decryptError instanceof Error ? decryptError.message : String(decryptError);
+      console.error(`[sync-meta] Failed to get access token for tenant ${tenantId}:`, errorMsg);
+      
+      // If decryption fails, provide helpful error
+      if (errorMsg.includes('decrypt') || errorMsg.includes('Unable to decrypt')) {
+        throw new Error(
+          `Unable to decrypt Meta access token for tenant ${tenantId}. ` +
+          `This usually means ENCRYPTION_KEY in Edge Function environment does not match the key used to encrypt the token. ` +
+          `Please re-authenticate Meta connection by disconnecting and reconnecting in the integrations settings.`
+        );
+      }
+      throw decryptError;
+    }
+    
     if (!accessToken) {
-      throw new Error('No Meta access token stored for tenant. Connect Meta to enable syncing.')
+      throw new Error('No access token available. Token may be expired and refresh failed.');
     }
 
     const requestedAccountId = options?.accountId ? ensureActPrefix(options.accountId) : null
