@@ -91,6 +91,8 @@ const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 const INCREMENTAL_WINDOW_DAYS = 30; // Sync last 30 days by default
 const INITIAL_SYNC_DAYS = 30; // Initial sync: last 30 days
+const REINGEST_OVERLAP_DAYS = 3; // Re-sync last 3 days to catch updated data (attribution windows, conversions)
+const API_LATENCY_DAYS = 2; // Google Ads API has 24-48h latency, sync data from 2 days ago
 
 function getEnvVar(key: string) {
   const value = Deno.env.get(key);
@@ -498,8 +500,10 @@ SELECT
   customer.id,
   campaign.id,
   campaign.name,
+  campaign.status,
   ad_group.id,
   ad_group.name,
+  ad_group.status,
   geographic_view.country_criterion_id,
   geographic_view.location_type,
   metrics.impressions,
@@ -927,25 +931,106 @@ function transformGeographicResults(
   return rows;
 }
 
-async function upsertJobLog(client: SupabaseClient, payload: {
-  tenantId: string;
-  status: 'pending' | 'running' | 'succeeded' | 'failed';
-  error?: string;
-  startedAt: string;
-  finishedAt?: string;
-}) {
-  const { error } = await client.from('jobs_log').insert({
-    tenant_id: payload.tenantId,
-    source: SOURCE,
-    status: payload.status,
-    started_at: payload.startedAt,
-    finished_at: payload.finishedAt ?? null,
-    error: payload.error ?? null,
+/**
+ * Aggregate geographic daily rows into daily KPIs for kpi_daily table.
+ * Groups by date and sums metrics, then calculates derived metrics (aov, cos, roas).
+ * Includes currency code to ensure consistent currency display across the platform.
+ */
+function aggregateKpis(rows: GeographicDailyRow[], currencyCode: string) {
+  const byDate = new Map<
+    string,
+    {
+      spend: number;
+      clicks: number;
+      conversions: number;
+      revenue: number;
+    }
+  >();
+
+  for (const row of rows) {
+    const spend = (row.cost_micros || 0) / 1000000; // Convert micros to dollars
+    const bucket = byDate.get(row.date) ?? {
+      spend: 0,
+      clicks: 0,
+      conversions: 0,
+      revenue: 0,
+    };
+    bucket.spend += spend;
+    bucket.clicks += row.clicks || 0;
+    bucket.conversions += row.conversions || 0;
+    bucket.revenue += row.conversions_value || 0;
+    byDate.set(row.date, bucket);
+  }
+
+  return Array.from(byDate.entries()).map(([date, values]) => {
+    const aov = values.conversions > 0 ? values.revenue / values.conversions : null;
+    const cos = values.revenue > 0 ? values.spend / values.revenue : null;
+    const roas = values.spend > 0 ? values.revenue / values.spend : null;
+
+    return {
+      date,
+      spend: values.spend || null,
+      clicks: values.clicks || null,
+      conversions: values.conversions || null,
+      revenue: values.revenue || null,
+      aov,
+      cos,
+      roas,
+      currency: currencyCode,
+    };
   });
+}
+
+async function upsertJobLog(
+  client: SupabaseClient,
+  payload: {
+    tenantId: string;
+    status: 'pending' | 'running' | 'succeeded' | 'failed';
+    error?: string;
+    startedAt: string;
+    finishedAt?: string;
+    jobLogId?: string; // If provided, update this specific job log entry
+  },
+): Promise<string | null> {
+  // If we have a jobLogId, update the existing entry
+  if (payload.jobLogId) {
+    const { error, data } = await client
+      .from('jobs_log')
+      .update({
+        status: payload.status,
+        finished_at: payload.finishedAt ?? null,
+        error: payload.error ?? null,
+      })
+      .eq('id', payload.jobLogId)
+      .select('id')
+      .single();
+
+    if (error) {
+      console.error(`Failed to update jobs_log ${payload.jobLogId} for tenant ${payload.tenantId}:`, error);
+      return null;
+    }
+    return data?.id ?? null;
+  }
+
+  // Otherwise, insert new entry (for initial 'running' status)
+  const { error, data } = await client
+    .from('jobs_log')
+    .insert({
+      tenant_id: payload.tenantId,
+      source: SOURCE,
+      status: payload.status,
+      started_at: payload.startedAt,
+      finished_at: payload.finishedAt ?? null,
+      error: payload.error ?? null,
+    })
+    .select('id')
+    .single();
 
   if (error) {
-    console.error(`Failed to write jobs_log for tenant ${payload.tenantId}:`, error);
+    console.error(`Failed to insert jobs_log for tenant ${payload.tenantId}:`, error);
+    return null;
   }
+  return data?.id ?? null;
 }
 
 /**
@@ -1076,19 +1161,61 @@ async function resolveSyncWindow(
     };
   }
 
-  // Default/cron mode: existing logic
+  // Default/cron mode: smart incremental sync with overlap and API latency handling
   const syncStartDate = connection.meta?.sync_start_date
     ? new Date(connection.meta.sync_start_date)
     : null;
 
+  // Base start date: last 30 days
   let startDate = new Date(today);
   startDate.setDate(startDate.getDate() - (INCREMENTAL_WINDOW_DAYS - 1));
 
+  // Apply sync_start_date if earlier
   if (syncStartDate && syncStartDate < startDate) {
     startDate = new Date(syncStartDate);
   }
 
+  // Check for last_synced_range to implement overlap (re-sync last 3 days for updated data)
+  const meta = connection.meta || {};
+  const lastRange =
+    meta && typeof meta.last_synced_range === 'object'
+      ? (meta.last_synced_range as { since?: string; until?: string })
+      : null;
+
+  let reingestCandidate: Date | null = null;
+  if (lastRange && typeof lastRange.until === 'string') {
+    const parsed = new Date(lastRange.until + 'T00:00:00Z');
+    if (!isNaN(parsed.getTime())) {
+      // Re-sync from (last_synced_range.until - OVERLAP_DAYS) to catch updated data
+      reingestCandidate = new Date(parsed);
+      reingestCandidate.setDate(reingestCandidate.getDate() - (REINGEST_OVERLAP_DAYS - 1));
+    }
+  }
+
+  // Use overlap start date if it's earlier than the base start date
+  if (reingestCandidate) {
+    if (syncStartDate && reingestCandidate < syncStartDate) {
+      reingestCandidate = new Date(syncStartDate);
+    }
+    if (reingestCandidate < startDate) {
+      startDate = reingestCandidate;
+    }
+  }
+
+  // Clamp startDate to not be in the future
+  if (startDate > today) {
+    startDate = new Date(today);
+  }
+
+  // End date: today - API_LATENCY_DAYS to avoid syncing incomplete data
+  // Google Ads API has 24-48h latency, so we sync data from 2 days ago
   const endDate = new Date(today);
+  endDate.setDate(endDate.getDate() - API_LATENCY_DAYS);
+
+  // Ensure endDate is not before startDate
+  if (endDate < startDate) {
+    endDate.setTime(startDate.getTime());
+  }
 
   return {
     startDate: startDate.toISOString().slice(0, 10),
@@ -1104,58 +1231,44 @@ async function updateLastSyncTimestamps(
   tenantId: string,
   mode: SyncMode,
   endDate: string,
+  startDate?: string, // Required for default mode to save last_synced_range
 ): Promise<void> {
+  const { data: conn } = await client
+    .from('connections')
+    .select('meta')
+    .eq('tenant_id', tenantId)
+    .eq('source', SOURCE)
+    .single();
+
+  if (!conn) {
+    console.warn(`[sync-googleads] Connection not found for tenant ${tenantId}, skipping meta update`);
+    return;
+  }
+
+  const meta = (conn.meta as Record<string, any>) || {};
+  const finishedAt = new Date().toISOString();
+
   if (mode === 'hourly_test') {
-    const { error } = await client
-      .from('connections')
-      .update({
-        meta: client.rpc('jsonb_set', {
-          base: client.select('meta').from('connections').eq('tenant_id', tenantId).eq('source', SOURCE).single(),
-          path: '{last_hourly_sync_at}',
-          new_value: new Date().toISOString(),
-        }),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('tenant_id', tenantId)
-      .eq('source', SOURCE);
-
-    // Simpler approach: read, update, write
-    const { data: conn } = await client
-      .from('connections')
-      .select('meta')
-      .eq('tenant_id', tenantId)
-      .eq('source', SOURCE)
-      .single();
-
-    if (conn) {
-      const meta = (conn.meta as Record<string, any>) || {};
-      meta.last_hourly_sync_at = new Date().toISOString();
-
-      await client
-        .from('connections')
-        .update({ meta, updated_at: new Date().toISOString() })
-        .eq('tenant_id', tenantId)
-        .eq('source', SOURCE);
-    }
+    meta.last_hourly_sync_at = finishedAt;
   } else if (mode === 'daily_test') {
-    const { data: conn } = await client
-      .from('connections')
-      .select('meta')
-      .eq('tenant_id', tenantId)
-      .eq('source', SOURCE)
-      .single();
-
-    if (conn) {
-      const meta = (conn.meta as Record<string, any>) || {};
-      meta.last_daily_sync_at = endDate;
-
-      await client
-        .from('connections')
-        .update({ meta, updated_at: new Date().toISOString() })
-        .eq('tenant_id', tenantId)
-        .eq('source', SOURCE);
+    meta.last_daily_sync_at = endDate;
+  } else {
+    // Default mode: save last_synced_at and last_synced_range (similar to sync-meta)
+    meta.last_synced_at = finishedAt;
+    if (startDate) {
+      meta.last_synced_range = {
+        since: startDate,
+        until: endDate,
+      };
     }
   }
+
+  // Update connection meta
+  await client
+    .from('connections')
+    .update({ meta, updated_at: finishedAt })
+    .eq('tenant_id', tenantId)
+    .eq('source', SOURCE);
 }
 
 async function processTenant(
@@ -1168,13 +1281,13 @@ async function processTenant(
   const tenantId = connection.tenant_id;
   const startedAt = new Date().toISOString();
 
-  let jobLogInserted = false;
+  // Insert initial 'running' job log entry and save the ID for updates
+  let jobLogId: string | null = null;
   try {
-    await upsertJobLog(client, { tenantId, status: 'running', startedAt });
-    jobLogInserted = true;
+    jobLogId = await upsertJobLog(client, { tenantId, status: 'running', startedAt });
   } catch (logError) {
     console.error(`Failed to insert initial job log for tenant ${tenantId}:`, logError);
-    // Continue anyway - we'll try to update it later
+    // Continue anyway - we'll try to create it later if needed
   }
 
   try {
@@ -1340,6 +1453,55 @@ async function processTenant(
       console.log(`[sync-googleads] Upserted ${upserted} rows to google_ads_geographic_daily`);
     }
 
+    // Get currency code from connection meta (for consistent currency across platform)
+    let currencyCode = 'USD'; // Default fallback
+    try {
+      const availableCustomers = Array.isArray(connection.meta?.available_customers) 
+        ? connection.meta.available_customers 
+        : [];
+      const selectedCustomerIdNormalized = selectedCustomerId.replace(/-/g, '');
+      
+      const selectedAccount = availableCustomers.find((a: any) => {
+        const aId = String(a.customer_id || '').replace(/-/g, '');
+        return aId === selectedCustomerIdNormalized;
+      });
+      
+      if (selectedAccount && selectedAccount.currency_code) {
+        currencyCode = selectedAccount.currency_code;
+      }
+      console.log(`[sync-googleads] Using currency code: ${currencyCode} for customer ${selectedCustomerId}`);
+    } catch (error) {
+      console.warn(`[sync-googleads] Failed to get currency code from connection meta, using default USD:`, error);
+    }
+
+    // Aggregate KPIs and upsert to kpi_daily (required for semantic layer views)
+    const aggregates = aggregateKpis(rows, currencyCode);
+    let upsertedKpi = 0;
+    if (aggregates.length > 0) {
+      const kpiRows = aggregates.map((row) => ({
+        tenant_id: tenantId,
+        date: row.date,
+        source: SOURCE,
+        spend: row.spend,
+        clicks: row.clicks,
+        conversions: row.conversions,
+        revenue: row.revenue,
+        aov: row.aov,
+        cos: row.cos,
+        roas: row.roas,
+        currency: row.currency,
+      }));
+
+      const { error: kpiError } = await client.from('kpi_daily').upsert(kpiRows, {
+        onConflict: 'tenant_id,date,source',
+      });
+      if (kpiError) {
+        throw new Error(`Failed to upsert kpi_daily rows: ${kpiError.message}`);
+      }
+      upsertedKpi = kpiRows.length;
+      console.log(`[sync-googleads] Upserted ${upsertedKpi} rows to kpi_daily`);
+    }
+
     // Structured logging: database write complete
     console.log(JSON.stringify({
       event: 'database_write_complete',
@@ -1347,19 +1509,19 @@ async function processTenant(
       mode: mode || 'default',
       table: 'google_ads_geographic_daily',
       rowsInserted: rows.length,
+      kpiRowsInserted: upsertedKpi,
       timestamp: new Date().toISOString(),
     }));
 
-    // Update last sync timestamps if in hourly/daily test mode
-    if (mode === 'hourly_test' || mode === 'daily_test') {
-      await updateLastSyncTimestamps(client, tenantId, mode, endDateStr);
-    }
+    // Update last sync timestamps (for all modes, including default mode)
+    await updateLastSyncTimestamps(client, tenantId, mode, endDateStr, startDateStr);
 
     await upsertJobLog(client, {
       tenantId,
       status: 'succeeded',
       startedAt,
       finishedAt: new Date().toISOString(),
+      jobLogId,
     });
 
     // Structured logging: sync complete
@@ -1405,6 +1567,7 @@ async function processTenant(
       startedAt,
       finishedAt: new Date().toISOString(),
       error: message,
+      jobLogId,
     });
 
     return {
@@ -1415,21 +1578,16 @@ async function processTenant(
     };
   } finally {
     // Ensure job log is always updated, even if the try-catch above fails
-    if (jobLogInserted) {
+    if (jobLogId) {
       try {
         // Check if job log was already updated (has finished_at)
         const { data: existingJob } = await client
           .from('jobs_log')
-          .select('finished_at')
-          .eq('tenant_id', tenantId)
-          .eq('source', SOURCE)
-          .eq('status', 'running')
-          .eq('started_at', startedAt)
-          .order('started_at', { ascending: false })
-          .limit(1)
+          .select('id, finished_at')
+          .eq('id', jobLogId)
           .maybeSingle();
 
-        // Only update if still in running status
+        // Only update if still in running status (hasn't been updated to succeeded/failed)
         if (existingJob && !existingJob.finished_at) {
           await upsertJobLog(client, {
             tenantId,
@@ -1437,6 +1595,7 @@ async function processTenant(
             startedAt,
             finishedAt: new Date().toISOString(),
             error: 'Job execution was interrupted or failed unexpectedly',
+            jobLogId: existingJob.id,
           });
         }
       } catch (finalError) {
@@ -1452,7 +1611,7 @@ serve(async (req) => {
     const client = createSupabaseClient();
 
     // Parse optional payload (for tenant-specific syncs)
-    let payload: { tenantId?: string } = {};
+    let payload: SyncRequestPayload = {};
     try {
       if (req.body) {
         const bodyText = await req.text();
@@ -1497,7 +1656,14 @@ serve(async (req) => {
     const results: JobResult[] = [];
 
     for (const connection of connections) {
-      const result = await processTenant(client, connection);
+      // Use payload mode/dateFrom/dateTo if provided, otherwise default to undefined (default mode)
+      const result = await processTenant(
+        client,
+        connection,
+        payload.mode,
+        payload.dateFrom,
+        payload.dateTo,
+      );
       results.push(result);
     }
 

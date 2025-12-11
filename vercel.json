@@ -10,7 +10,7 @@
     },
     {
       "path": "/api/jobs/sync?source=google_ads",
-      "schedule": "15 3 * * *"
+      "schedule": "5 * * * *"
     },
     {
       "path": "/api/jobs/cleanup-stuck-jobs?source=google_ads",

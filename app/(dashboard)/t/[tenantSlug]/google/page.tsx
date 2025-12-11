@@ -21,8 +21,9 @@ export default async function GoogleAdsDashboardPage(props: PageProps) {
 
   const { totals, series, currency } = await getKpiDaily({ tenantId, from, to, source: 'google_ads' })
 
-  const numberLocale = 'en-US'
-  const currencyCode = currency ?? 'USD'
+  // Use Swedish locale for SEK, otherwise fallback to en-US
+  const currencyCode = currency ?? 'SEK' // Default to SEK for Swedish stores
+  const numberLocale = currencyCode === 'SEK' ? 'sv-SE' : 'en-US'
 
   const formatCurrency = (value: number | null) =>
     value !== null && Number.isFinite(value)
