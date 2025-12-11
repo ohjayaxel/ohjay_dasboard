@@ -1,98 +1,95 @@
 import { NextResponse } from 'next/server';
 
+import { formatTokenExpirationWarning, sendSlackMessage } from '@/lib/notifications/slack';
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
 
-const TOKEN_EXPIRATION_WARNING_DAYS = 7; // Warn if token expires within 7 days
+const TOKEN_EXPIRATION_WARNING_HOURS = 24; // Warn if token expires within 24 hours
+const SLACK_ALERTS_ENABLED = process.env.SLACK_WEBHOOK_URL !== undefined;
 
 async function handleRequest(request: Request) {
   try {
     const client = getSupabaseServiceClient();
-    const warningThreshold = new Date();
-    warningThreshold.setDate(warningThreshold.getDate() + TOKEN_EXPIRATION_WARNING_DAYS);
 
-    // Check all connected sources for token expiration
+    // Get all active connections
     const { data: connections, error: connectionsError } = await client
       .from('connections')
-      .select('id, tenant_id, source, status, expires_at')
+      .select('id, tenant_id, source, expires_at')
       .eq('status', 'connected')
-      .not('expires_at', 'is', null)
-      .lt('expires_at', warningThreshold.toISOString());
+      .not('expires_at', 'is', null);
 
     if (connectionsError) {
-      throw new Error(`Failed to check connections: ${connectionsError.message}`);
+      throw new Error(`Failed to fetch connections: ${connectionsError.message}`);
     }
 
     const warnings: Array<{
-      tenant_id: string;
       source: string;
-      expires_at: string;
-      days_until_expiration: number;
+      tenantId: string;
+      tenantName?: string;
+      expiresAt: string;
+      hoursUntilExpiration: number;
     }> = [];
+
+    const now = new Date();
+    const warningThreshold = new Date(now.getTime() + TOKEN_EXPIRATION_WARNING_HOURS * 60 * 60 * 1000);
 
     if (connections && connections.length > 0) {
-      const now = new Date();
-      for (const conn of connections) {
-        if (conn.expires_at) {
-          const expiresAt = new Date(conn.expires_at);
-          const daysUntilExpiration = Math.ceil(
-            (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
-          );
+      // Get tenant names for better context
+      const tenantIds = new Set<string>(connections.map(c => c.tenant_id));
+      const { data: tenants } = await client
+        .from('tenants')
+        .select('id, name')
+        .in('id', Array.from(tenantIds));
+
+      const tenantMap = new Map<string, string>();
+      tenants?.forEach(t => tenantMap.set(t.id, t.name));
+
+      for (const connection of connections) {
+        const expiresAt = connection.expires_at ? new Date(connection.expires_at) : null;
+        
+        if (expiresAt && expiresAt <= warningThreshold && expiresAt > now) {
+          const hoursUntilExpiration = (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60);
           
-          if (daysUntilExpiration < TOKEN_EXPIRATION_WARNING_DAYS) {
-            warnings.push({
-              tenant_id: conn.tenant_id as string,
-              source: conn.source as string,
-              expires_at: conn.expires_at,
-              days_until_expiration: daysUntilExpiration,
-            });
-          }
-        }
-      }
-    }
-
-    // Check for recent failures that might indicate token issues
-    const recentFailureThreshold = new Date();
-    recentFailureThreshold.setHours(recentFailureThreshold.getHours() - 24);
-
-    const { data: recentFailures, error: failuresError } = await client
-      .from('jobs_log')
-      .select('tenant_id, source, error, finished_at')
-      .eq('status', 'failed')
-      .gte('finished_at', recentFailureThreshold.toISOString());
-
-    // Filter in-memory for token-related errors (Supabase .or() doesn't work well with ilike)
-    const tokenRelatedFailures: Array<{
-      tenant_id: string;
-      source: string;
-      error: string;
-      finished_at: string;
-    }> = [];
-
-    if (recentFailures && recentFailures.length > 0) {
-      const tokenErrorKeywords = ['token', 'expired', 'unauthorized', 'authentication', '401', '403', 'invalid_grant'];
-      for (const failure of recentFailures) {
-        const errorText = ((failure.error as string) || '').toLowerCase();
-        if (tokenErrorKeywords.some(keyword => errorText.includes(keyword))) {
-          tokenRelatedFailures.push({
-            tenant_id: failure.tenant_id as string,
-            source: failure.source as string,
-            error: (failure.error as string) || 'Unknown error',
-            finished_at: failure.finished_at as string,
+          warnings.push({
+            source: connection.source as string,
+            tenantId: connection.tenant_id,
+            tenantName: tenantMap.get(connection.tenant_id),
+            expiresAt: connection.expires_at as string,
+            hoursUntilExpiration,
           });
         }
       }
     }
 
+    // Send Slack alerts for warnings
+    console.log(`[jobs/check-token-health] Slack alerts enabled: ${SLACK_ALERTS_ENABLED}, Warnings: ${warnings.length}`);
+    
+    if (SLACK_ALERTS_ENABLED && warnings.length > 0) {
+      console.log(`[jobs/check-token-health] Sending ${warnings.length} token expiration warnings to Slack`);
+      for (const warning of warnings) {
+        const slackMessage = formatTokenExpirationWarning({
+          source: warning.source,
+          tenantId: warning.tenantId,
+          tenantName: warning.tenantName,
+          expiresAt: warning.expiresAt,
+          hoursUntilExpiration: warning.hoursUntilExpiration,
+        });
+
+        const sent = await sendSlackMessage(slackMessage);
+        console.log(`[jobs/check-token-health] Sent warning for ${warning.source}:${warning.tenantId} - Success: ${sent}`);
+      }
+    } else if (!SLACK_ALERTS_ENABLED) {
+      console.warn('[jobs/check-token-health] SLACK_WEBHOOK_URL not configured, skipping Slack notifications');
+    }
 
     const result = {
-      status: warnings.length > 0 || tokenRelatedFailures.length > 0 ? 'warning' : 'ok',
-      expiring_tokens: warnings,
-      token_related_failures: tokenRelatedFailures,
+      status: warnings.length > 0 ? 'warning' : 'ok',
+      warnings,
       checked_at: new Date().toISOString(),
+      warning_threshold_hours: TOKEN_EXPIRATION_WARNING_HOURS,
     };
 
     return NextResponse.json(result, {
-      status: result.status === 'warning' ? 200 : 200, // Return 200 but with warning status
+      status: warnings.length > 0 ? 200 : 200, // Always 200, warnings are not errors
     });
   } catch (error) {
     console.error('[jobs/check-token-health] Failed to check token health', error);
@@ -106,4 +103,3 @@ async function handleRequest(request: Request) {
 export async function GET(request: Request) {
   return handleRequest(request);
 }
-

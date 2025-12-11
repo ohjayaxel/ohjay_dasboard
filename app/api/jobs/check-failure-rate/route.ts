@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 
+import { formatSyncFailureAlert, sendSlackMessage } from '@/lib/notifications/slack';
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
 
 const FAILURE_RATE_THRESHOLD = 0.5; // Alert if more than 50% of jobs fail
 const MIN_JOBS_FOR_ALERT = 3; // Need at least 3 jobs to trigger alert
 const TIME_WINDOW_HOURS = 24; // Check last 24 hours
+const SLACK_ALERTS_ENABLED = process.env.SLACK_WEBHOOK_URL !== undefined;
 
 async function handleRequest(request: Request) {
   try {
@@ -139,6 +141,64 @@ async function handleRequest(request: Request) {
       checked_at: new Date().toISOString(),
       time_window_hours: TIME_WINDOW_HOURS,
     };
+
+    // Send Slack alerts if there are issues and Slack is configured
+    console.log(`[jobs/check-failure-rate] Slack alerts enabled: ${SLACK_ALERTS_ENABLED}, Status: ${result.status}, Alerts: ${alerts.length}, Consecutive: ${consecutiveFailures.length}`);
+    
+    if (SLACK_ALERTS_ENABLED && result.status === 'alert') {
+      try {
+        // Get tenant names for better alert context
+        const tenantIds = new Set<string>();
+        alerts.forEach(a => tenantIds.add(a.tenant_id));
+        consecutiveFailures.forEach(c => tenantIds.add(c.tenant_id));
+
+        const { data: tenants } = await client
+          .from('tenants')
+          .select('id, name')
+          .in('id', Array.from(tenantIds));
+
+        const tenantMap = new Map<string, string>();
+        tenants?.forEach(t => tenantMap.set(t.id, t.name));
+
+        // Send alert for each high failure rate
+        console.log(`[jobs/check-failure-rate] Sending ${alerts.length} high failure rate alerts to Slack`);
+        for (const alert of alerts) {
+          const tenantName = tenantMap.get(alert.tenant_id);
+          const slackMessage = formatSyncFailureAlert({
+            source: alert.source,
+            tenantId: alert.tenant_id,
+            tenantName,
+            failureRate: alert.failure_rate,
+            totalJobs: alert.total_jobs,
+            failedJobs: alert.failed_jobs,
+          });
+
+          const sent = await sendSlackMessage(slackMessage);
+          console.log(`[jobs/check-failure-rate] Sent alert for ${alert.source}:${alert.tenant_id} - Success: ${sent}`);
+        }
+
+        // Send alert for each consecutive failure
+        console.log(`[jobs/check-failure-rate] Sending ${consecutiveFailures.length} consecutive failure alerts to Slack`);
+        for (const failure of consecutiveFailures) {
+          const tenantName = tenantMap.get(failure.tenant_id);
+          const slackMessage = formatSyncFailureAlert({
+            source: failure.source,
+            tenantId: failure.tenant_id,
+            tenantName,
+            consecutiveFailures: failure.consecutive_count,
+            lastFailureAt: failure.last_failure_at,
+          });
+
+          const sent = await sendSlackMessage(slackMessage);
+          console.log(`[jobs/check-failure-rate] Sent consecutive failure alert for ${failure.source}:${failure.tenant_id} - Success: ${sent}`);
+        }
+      } catch (slackError) {
+        // Don't fail the endpoint if Slack fails, just log
+        console.error('[jobs/check-failure-rate] Failed to send Slack alerts:', slackError);
+      }
+    } else if (!SLACK_ALERTS_ENABLED) {
+      console.warn('[jobs/check-failure-rate] SLACK_WEBHOOK_URL not configured, skipping Slack notifications');
+    }
 
     return NextResponse.json(result, {
       status: result.status === 'alert' ? 503 : 200,
