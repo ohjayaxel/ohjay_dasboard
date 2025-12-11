@@ -6,7 +6,8 @@ import { getSupabaseServiceClient } from '@/lib/supabase/server';
 const FAILURE_RATE_THRESHOLD = 0.5; // Alert if more than 50% of jobs fail
 const MIN_JOBS_FOR_ALERT = 3; // Need at least 3 jobs to trigger alert
 const TIME_WINDOW_HOURS = 24; // Check last 24 hours
-const SLACK_ALERTS_ENABLED = process.env.SLACK_WEBHOOK_URL !== undefined;
+// Check if Slack webhook URL is configured (check for both undefined and empty string)
+const SLACK_ALERTS_ENABLED = !!process.env.SLACK_WEBHOOK_URL && process.env.SLACK_WEBHOOK_URL.trim().length > 0;
 
 async function handleRequest(request: Request) {
   try {

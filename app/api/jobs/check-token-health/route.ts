@@ -4,7 +4,8 @@ import { formatTokenExpirationWarning, sendSlackMessage } from '@/lib/notificati
 import { getSupabaseServiceClient } from '@/lib/supabase/server';
 
 const TOKEN_EXPIRATION_WARNING_HOURS = 24; // Warn if token expires within 24 hours
-const SLACK_ALERTS_ENABLED = process.env.SLACK_WEBHOOK_URL !== undefined;
+// Check if Slack webhook URL is configured (check for both undefined and empty string)
+const SLACK_ALERTS_ENABLED = !!process.env.SLACK_WEBHOOK_URL && process.env.SLACK_WEBHOOK_URL.trim().length > 0;
 
 async function handleRequest(request: Request) {
   try {
