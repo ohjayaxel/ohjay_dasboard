@@ -131,9 +131,9 @@ const BASE_DELAY_MS = 500; // Base delay for exponential backoff (500ms)
 const MAX_ATTEMPTS = 6; // Maximum retry attempts
 
 function parseEncryptionKey(): Uint8Array {
-  const rawKey = getEnvVar('ENCRYPTION_KEY');
+  const rawKey = getEnvVar('ENCRYPTION_KEY').trim();
 
-  // Try hex
+  // Try hex (64 characters for 32 bytes)
   if (/^[0-9a-fA-F]+$/.test(rawKey) && rawKey.length === KEY_LENGTH * 2) {
     return new Uint8Array(
       rawKey.match(/.{1,2}/g)!.map((byte) => parseInt(byte, 16))
@@ -156,7 +156,11 @@ function parseEncryptionKey(): Uint8Array {
     return utf8;
   }
 
-  throw new Error(`ENCRYPTION_KEY must be ${KEY_LENGTH} bytes after decoding.`);
+  throw new Error(
+    `ENCRYPTION_KEY must be ${KEY_LENGTH} bytes after decoding. ` +
+    `Got ${rawKey.length} characters. ` +
+    `Expected: ${KEY_LENGTH * 2} hex chars, ${Math.ceil(KEY_LENGTH * 4 / 3)} base64 chars, or ${KEY_LENGTH} UTF-8 bytes.`
+  );
 }
 
 function hexToUint8Array(hex: string): Uint8Array {

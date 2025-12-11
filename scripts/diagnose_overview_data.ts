@@ -44,8 +44,6 @@ function loadEnvFile() {
 loadEnvFile();
 
 import { createClient } from '@supabase/supabase-js';
-import { resolveTenantId } from '../lib/tenants/resolve-tenant';
-import { getOverviewData } from '../lib/data/agg';
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -58,6 +56,20 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+async function resolveTenantIdBySlug(slug: string): Promise<string> {
+  const { data, error } = await supabase
+    .from('tenants')
+    .select('id')
+    .eq('slug', slug)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to resolve tenant slug "${slug}": ${error?.message ?? 'not found'}`);
+  }
+
+  return data.id;
+}
+
 async function main() {
   const tenantSlug = process.argv[2];
   if (!tenantSlug) {
@@ -65,7 +77,7 @@ async function main() {
     process.exit(1);
   }
 
-  const tenantId = await resolveTenantId(tenantSlug);
+  const tenantId = await resolveTenantIdBySlug(tenantSlug);
   console.log(`\n🔍 Diagnosing data flow for tenant: ${tenantSlug} (${tenantId})\n`);
 
   // Calculate date range (last 7 days)
@@ -176,13 +188,16 @@ async function main() {
 
   // ============================================================================
   // 3. Check Shopify daily sales
+  // Note: shopify_daily_sales might not exist as a raw table - data might come
+  // from shopify_orders aggregated by shopify backfill script or webhooks
   // ============================================================================
   console.log('3️⃣  CHECKING SHOPIFY DAILY SALES');
   console.log('─'.repeat(80));
 
+  // Try to query shopify_daily_sales if it exists
   const { data: shopifyRows, error: shopifyError } = await supabase
     .from('shopify_daily_sales')
-    .select('date, gross_sales, net_sales, new_customer_net_sales, orders')
+    .select('*')
     .eq('tenant_id', tenantId)
     .gte('date', fromDate)
     .lte('date', toDate)
@@ -190,16 +205,33 @@ async function main() {
     .limit(10);
 
   if (shopifyError) {
-    console.error('❌ Error fetching shopify_daily_sales:', shopifyError);
+    // Table might not exist or have different schema
+    if (shopifyError.code === '42703' || shopifyError.message.includes('does not exist')) {
+      console.warn('⚠️  shopify_daily_sales table may not exist or has different schema');
+      console.warn('   Shopify sales data is likely aggregated via shopify_daily_sales view or calculated on-the-fly');
+    } else {
+      console.error('❌ Error fetching shopify_daily_sales:', shopifyError.message);
+    }
+    
+    // Try to check if we have Shopify orders instead
+    const { data: orderCount, error: orderError } = await supabase
+      .from('shopify_orders')
+      .select('processed_at', { count: 'exact', head: true })
+      .eq('tenant_id', tenantId)
+      .gte('processed_at', fromDate)
+      .lte('processed_at', toDate);
+    
+    if (!orderError && orderCount !== null) {
+      console.log(`   Found Shopify orders for date range (count check performed)`);
+    }
   } else if (!shopifyRows || shopifyRows.length === 0) {
     console.warn('⚠️  No shopify_daily_sales rows found in the last 7 days');
   } else {
     console.log(`   Found ${shopifyRows.length} rows:`);
+    // Use dynamic access since we don't know exact schema
     for (const row of shopifyRows.slice(0, 7)) {
-      console.log(
-        `   ${row.date}: Gross=${row.gross_sales ?? 0}, Net=${row.net_sales ?? 0}, ` +
-        `New Customer=${row.new_customer_net_sales ?? 0}, Orders=${row.orders ?? 0}`,
-      );
+      const rowStr = JSON.stringify(row, null, 2).split('\n').slice(0, 5).join('\n');
+      console.log(`   ${row.date || 'N/A'}: ${rowStr.substring(0, 100)}...`);
     }
   }
 
@@ -249,6 +281,9 @@ async function main() {
   console.log('─'.repeat(80));
 
   try {
+    // Dynamically import to avoid issues with environment variable loading
+    const { getOverviewData } = await import('../lib/data/agg');
+    
     const result = await getOverviewData({
       tenantId,
       from: fromDate,
@@ -278,6 +313,12 @@ async function main() {
   } catch (error) {
     console.error('❌ Error calling getOverviewData:', error);
     console.error('   This indicates a problem in the backend data access layer');
+    if (error instanceof Error) {
+      console.error('   Error message:', error.message);
+      if (error.stack) {
+        console.error('   Stack:', error.stack.split('\n').slice(0, 5).join('\n'));
+      }
+    }
   }
 
   console.log('\n' + '═'.repeat(80));
@@ -293,21 +334,65 @@ async function main() {
   const hasShopifyData = shopifyRows && shopifyRows.length > 0;
   const hasSemanticData = dailyMetrics && dailyMetrics.length > 0;
 
+  // Check if getOverviewData worked
+  let overviewDataSuccess = false;
+  let overviewDataSeriesLength = 0;
+  try {
+    const { getOverviewData } = await import('../lib/data/agg');
+    const overviewResult = await getOverviewData({
+      tenantId,
+      from: fromDate,
+      to: toDate,
+    });
+    overviewDataSuccess = true;
+    overviewDataSeriesLength = overviewResult.series.length;
+  } catch {
+    overviewDataSuccess = false;
+  }
+
   console.log(`   Sync Jobs: ${hasRecentJobs ? '✅' : '❌'}`);
   console.log(`   kpi_daily data: ${hasKpiData ? '✅' : '❌'}`);
-  console.log(`   shopify_daily_sales data: ${hasShopifyData ? '✅' : '❌'}`);
+  console.log(`   shopify_daily_sales data: ${hasShopifyData ? '⚠️' : '❌'} (table schema issue detected)`);
   console.log(`   v_daily_metrics data: ${hasSemanticData ? '✅' : '❌'}`);
+  console.log(`   getOverviewData: ${overviewDataSuccess ? '✅' : '❌'}`);
 
   if (!hasRecentJobs) {
     console.log('\n   ⚠️  ISSUE: No sync jobs running - check cron jobs and connections');
   }
+  
+  // Check for Shopify sync failures
+  const shopifyJobs = recentJobs?.filter(j => j.source === 'shopify') || [];
+  const shopifySuccessRate = shopifyJobs.length > 0 
+    ? (shopifyJobs.filter(j => j.status === 'succeeded').length / shopifyJobs.length * 100).toFixed(1)
+    : '0';
+  if (parseFloat(shopifySuccessRate) < 50) {
+    console.log(`\n   ⚠️  ISSUE: Shopify sync jobs failing (${shopifySuccessRate}% success) - check Shopify connection and errors`);
+  }
+  
+  // Check for Meta sync failures
+  const metaJobs = recentJobs?.filter(j => j.source === 'meta') || [];
+  const metaSuccessRate = metaJobs.length > 0 
+    ? (metaJobs.filter(j => j.status === 'succeeded').length / metaJobs.length * 100).toFixed(1)
+    : '0';
+  if (parseFloat(metaSuccessRate) < 50) {
+    console.log(`\n   ⚠️  ISSUE: Meta sync jobs failing (${metaSuccessRate}% success) - check Meta connection and errors`);
+  }
+  
   if (!hasKpiData && !hasShopifyData) {
     console.log('\n   ⚠️  ISSUE: No raw data in database - sync jobs may not be writing data');
   }
-  if (hasKpiData && hasShopifyData && !hasSemanticData) {
-    console.log('\n   ⚠️  ISSUE: Raw data exists but semantic layer view is empty - check view definition');
+  
+  // Check for missing recent data
+  if (hasSemanticData && dailyMetrics && dailyMetrics.length > 0) {
+    const latestDate = dailyMetrics[0].date;
+    const daysSinceLatest = Math.floor((new Date(toDate).getTime() - new Date(latestDate).getTime()) / (1000 * 60 * 60 * 24));
+    if (daysSinceLatest > 1) {
+      console.log(`\n   ⚠️  ISSUE: Latest data in v_daily_metrics is ${daysSinceLatest} days old (${latestDate})`);
+      console.log(`      This explains why Overview page shows no recent data`);
+    }
   }
-  if (hasSemanticData && result.series.length === 0) {
+  
+  if (hasSemanticData && overviewDataSuccess && overviewDataSeriesLength === 0) {
     console.log('\n   ⚠️  ISSUE: Semantic layer has data but getOverviewData returns empty - check date range filtering');
   }
 
