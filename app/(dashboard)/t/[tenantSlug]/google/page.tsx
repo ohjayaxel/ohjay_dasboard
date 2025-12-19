@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { getKpiDaily } from '@/lib/data/agg'
 import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
+import { GoogleTable } from '@/components/tenant/google-table'
 
 export const revalidate = 60
 
@@ -84,38 +85,7 @@ export default async function GoogleAdsDashboardPage(props: PageProps) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[600px] text-sm">
-              <thead className="bg-muted/50 text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-2 text-left font-medium">Date</th>
-                  <th className="px-4 py-2 text-left font-medium">Spend</th>
-                  <th className="px-4 py-2 text-left font-medium">Revenue</th>
-                  <th className="px-4 py-2 text-left font-medium">Conversions</th>
-                  <th className="px-4 py-2 text-left font-medium">ROAS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {series.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="px-4 py-6 text-center text-muted-foreground">
-                      No Google Ads KPI data available.
-                    </td>
-                  </tr>
-                ) : (
-                  series.map((point) => (
-                    <tr key={point.date} className="border-t">
-                      <td className="px-4 py-2 font-medium">{point.date}</td>
-                      <td className="px-4 py-2">{formatCurrency(point.spend)}</td>
-                      <td className="px-4 py-2">{formatCurrency(point.revenue)}</td>
-                      <td className="px-4 py-2">{formatNumber(point.conversions)}</td>
-                      <td className="px-4 py-2">{formatRatio(point.roas)}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <GoogleTable data={series} currencyCode={currencyCode} numberLocale={numberLocale} />
         </CardContent>
       </Card>
     </div>

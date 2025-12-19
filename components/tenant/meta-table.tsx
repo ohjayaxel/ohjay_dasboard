@@ -20,21 +20,21 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
-import type { OverviewDataPoint } from "@/lib/data/agg"
+import type { KpiSeriesPoint } from "@/lib/data/agg"
 
-type OverviewTableProps = {
-  data: OverviewDataPoint[]
+type MetaTableProps = {
+  data: KpiSeriesPoint[]
   currencyCode: string
   numberLocale: string
 }
 
-const STORAGE_KEY = 'overview-table-sorting'
+const STORAGE_KEY = 'meta-table-sorting'
 
-export function OverviewTable({
+export function MetaTable({
   data,
   currencyCode,
   numberLocale,
-}: OverviewTableProps) {
+}: MetaTableProps) {
   // Load initial sorting from localStorage, default to date descending
   const [sorting, setSorting] = React.useState<SortingState>(() => {
     if (typeof window === 'undefined') {
@@ -82,7 +82,7 @@ export function OverviewTable({
     return value === null || Number.isNaN(value) ? '—' : value.toFixed(2)
   }, [])
 
-  const columns: ColumnDef<OverviewDataPoint>[] = React.useMemo(
+  const columns: ColumnDef<KpiSeriesPoint>[] = React.useMemo(
     () => [
       {
         accessorKey: "date",
@@ -101,7 +101,7 @@ export function OverviewTable({
         cell: ({ row }) => <div className="font-medium">{row.getValue("date")}</div>,
       },
       {
-        accessorKey: "gross_sales",
+        accessorKey: "spend",
         header: ({ column }) => {
           return (
             <Button
@@ -109,15 +109,15 @@ export function OverviewTable({
               onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
               className="h-8 px-2 lg:px-3"
             >
-              Gross Sales
+              Spend
               <ArrowUpDown className="ml-2 h-4 w-4" />
             </Button>
           )
         },
-        cell: ({ row }) => formatCurrency(row.getValue("gross_sales")),
+        cell: ({ row }) => formatCurrency(row.getValue("spend")),
       },
       {
-        accessorKey: "net_sales",
+        accessorKey: "revenue",
         header: ({ column }) => {
           return (
             <Button
@@ -125,15 +125,15 @@ export function OverviewTable({
               onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
               className="h-8 px-2 lg:px-3"
             >
-              Net Sales
+              Revenue
               <ArrowUpDown className="ml-2 h-4 w-4" />
             </Button>
           )
         },
-        cell: ({ row }) => formatCurrency(row.getValue("net_sales")),
+        cell: ({ row }) => formatCurrency(row.getValue("revenue")),
       },
       {
-        accessorKey: "new_customer_net_sales",
+        accessorKey: "conversions",
         header: ({ column }) => {
           return (
             <Button
@@ -141,15 +141,15 @@ export function OverviewTable({
               onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
               className="h-8 px-2 lg:px-3"
             >
-              New Customer Net Sales
+              Results
               <ArrowUpDown className="ml-2 h-4 w-4" />
             </Button>
           )
         },
-        cell: ({ row }) => formatCurrency(row.getValue("new_customer_net_sales")),
+        cell: ({ row }) => formatNumber(row.getValue("conversions")),
       },
       {
-        accessorKey: "marketing_spend",
+        accessorKey: "clicks",
         header: ({ column }) => {
           return (
             <Button
@@ -157,15 +157,15 @@ export function OverviewTable({
               onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
               className="h-8 px-2 lg:px-3"
             >
-              Marketing Spend
+              Link clicks
               <ArrowUpDown className="ml-2 h-4 w-4" />
             </Button>
           )
         },
-        cell: ({ row }) => formatCurrency(row.getValue("marketing_spend")),
+        cell: ({ row }) => formatNumber(row.getValue("clicks")),
       },
       {
-        accessorKey: "amer",
+        accessorKey: "roas",
         header: ({ column }) => {
           return (
             <Button
@@ -173,15 +173,15 @@ export function OverviewTable({
               onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
               className="h-8 px-2 lg:px-3"
             >
-              aMER
+              ROAS
               <ArrowUpDown className="ml-2 h-4 w-4" />
             </Button>
           )
         },
-        cell: ({ row }) => formatRatio(row.getValue("amer")),
+        cell: ({ row }) => formatRatio(row.getValue("roas")),
       },
       {
-        accessorKey: "orders",
+        accessorKey: "cpa",
         header: ({ column }) => {
           return (
             <Button
@@ -189,28 +189,12 @@ export function OverviewTable({
               onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
               className="h-8 px-2 lg:px-3"
             >
-              Orders
+              CPA
               <ArrowUpDown className="ml-2 h-4 w-4" />
             </Button>
           )
         },
-        cell: ({ row }) => formatNumber(row.getValue("orders")),
-      },
-      {
-        accessorKey: "aov",
-        header: ({ column }) => {
-          return (
-            <Button
-              variant="ghost"
-              onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-              className="h-8 px-2 lg:px-3"
-            >
-              AOV
-              <ArrowUpDown className="ml-2 h-4 w-4" />
-            </Button>
-          )
-        },
-        cell: ({ row }) => formatCurrency(row.getValue("aov")),
+        cell: ({ row }) => formatRatio(row.getValue("cpa")),
       },
     ],
     [formatCurrency, formatNumber, formatRatio]
@@ -262,7 +246,7 @@ export function OverviewTable({
           ) : (
             <TableRow>
               <TableCell colSpan={columns.length} className="h-24 text-center">
-                No data available.
+                No Meta KPI data available in the selected window.
               </TableCell>
             </TableRow>
           )}

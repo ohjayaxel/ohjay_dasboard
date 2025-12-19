@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { getKpiDaily, type KpiSeriesPoint, type KpiTotals } from '@/lib/data/agg'
 import { resolveTenantId } from '@/lib/tenants/resolve-tenant'
+import { MetaTable } from '@/components/tenant/meta-table'
 
 export const revalidate = 60
 
@@ -147,40 +148,7 @@ export default async function MetaDashboardPage(props: PageProps) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[500px] text-sm">
-              <thead className="bg-muted/50 text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-2 text-left font-medium">Date</th>
-                  {visibleMetrics.map((metric) => (
-                    <th key={metric.key} className="px-4 py-2 text-left font-medium">
-                      {metric.label}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {series.length === 0 ? (
-                  <tr>
-                    <td colSpan={visibleMetrics.length + 1} className="px-4 py-6 text-center text-muted-foreground">
-                      No Meta KPI data available in the selected window.
-                    </td>
-                  </tr>
-                ) : (
-                  series.map((point) => (
-                    <tr key={point.date} className="border-t">
-                      <td className="px-4 py-2 font-medium">{point.date}</td>
-                      {visibleMetrics.map((metric) => (
-                        <td key={metric.key} className="px-4 py-2">
-                          {metric.format(metric.extractPoint(point))}
-                        </td>
-                      ))}
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <MetaTable data={series} currencyCode={currencyCode} numberLocale={numberLocale} />
         </CardContent>
       </Card>
 
