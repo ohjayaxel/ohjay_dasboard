@@ -92,7 +92,8 @@ const AUTH_TAG_LENGTH = 16;
 const INCREMENTAL_WINDOW_DAYS = 30; // Sync last 30 days by default
 const INITIAL_SYNC_DAYS = 30; // Initial sync: last 30 days
 const REINGEST_OVERLAP_DAYS = 3; // Re-sync last 3 days to catch updated data (attribution windows, conversions)
-const API_LATENCY_DAYS = 2; // Google Ads API has 24-48h latency, sync data from 2 days ago
+const API_LATENCY_HOURS = 3; // Google Ads API has ~3 hours latency, sync data from 3 hours ago
+const API_LATENCY_DAYS_SAFE = 0; // For conservative mode: days to subtract (now 0 since we use hours)
 
 function getEnvVar(key: string) {
   const value = Deno.env.get(key);
@@ -1151,9 +1152,17 @@ async function resolveSyncWindow(
       startDate.setDate(startDate.getDate() - 30);
     }
 
-    // End date: yesterday (to avoid syncing incomplete current day)
-    const endDate = new Date(today);
-    endDate.setDate(endDate.getDate() - 1);
+    // End date: now - API_LATENCY_HOURS (allows same-day data)
+    // Google Ads API has ~3 hours latency, so we can sync data from today
+    const endDate = new Date();
+    endDate.setHours(endDate.getHours() - API_LATENCY_HOURS, 0, 0, 0);
+    
+    // Clamp to today if calculated date is in the future
+    const todayEnd = new Date(today);
+    todayEnd.setHours(23, 59, 59, 999);
+    if (endDate > todayEnd) {
+      endDate.setTime(todayEnd.getTime());
+    }
 
     return {
       startDate: startDate.toISOString().slice(0, 10),
@@ -1207,10 +1216,18 @@ async function resolveSyncWindow(
     startDate = new Date(today);
   }
 
-  // End date: today - API_LATENCY_DAYS to avoid syncing incomplete data
-  // Google Ads API has 24-48h latency, so we sync data from 2 days ago
-  const endDate = new Date(today);
-  endDate.setDate(endDate.getDate() - API_LATENCY_DAYS);
+  // End date: now - API_LATENCY_HOURS to avoid syncing incomplete data
+  // Google Ads API has ~3 hours latency, so we sync data from 3 hours ago
+  // This allows us to sync same-day data (much fresher than the old 2-day delay)
+  const endDate = new Date();
+  endDate.setHours(endDate.getHours() - API_LATENCY_HOURS, 0, 0, 0);
+  
+  // If the calculated end date is later than today, clamp to today
+  const todayEnd = new Date(today);
+  todayEnd.setHours(23, 59, 59, 999);
+  if (endDate > todayEnd) {
+    endDate.setTime(todayEnd.getTime());
+  }
 
   // Ensure endDate is not before startDate
   if (endDate < startDate) {
