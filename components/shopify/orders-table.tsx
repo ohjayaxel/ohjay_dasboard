@@ -42,12 +42,18 @@ import {
 type ShopifyOrder = {
   order_id: string
   processed_at: string | null
-  total_price: number | null
+  total_sales: number | null
+  tax: number | null
   total_tax: number | null
   gross_sales: number | null
   net_sales: number | null
-  discount_total: number | null
-  total_refunds: number | null
+  revenue: number | null
+  // Backwards compatibility: older schema used discount_total/total_refunds.
+  // Current schema (migration 041) uses discount/refunds.
+  discount?: number | null
+  refunds?: number | null
+  discount_total?: number | null
+  total_refunds?: number | null
   currency: string | null
   financial_status: string | null
   fulfillment_status: string | null
@@ -81,6 +87,12 @@ const getNumericValue = (value: number | null | undefined) => {
   }
   return 0
 }
+
+const getDiscountValue = (order: ShopifyOrder) =>
+  getNumericValue(order.discount ?? order.discount_total)
+
+const getRefundsValue = (order: ShopifyOrder) =>
+  getNumericValue(order.refunds ?? order.total_refunds)
 
 const formatDate = (date: string | null) => {
   if (!date) return '—'
@@ -174,10 +186,10 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
         },
       },
       {
-        accessorKey: 'discount_total',
+        id: 'discount',
         header: 'Discounts',
         cell: ({ row }) => {
-          const discount = row.getValue('discount_total') as number | null
+          const discount = getDiscountValue(row.original)
           const currency = row.original.currency || 'SEK'
           return (
             <div className="text-muted-foreground">
@@ -187,10 +199,10 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
         },
       },
       {
-        accessorKey: 'total_refunds',
+        id: 'refunds',
         header: 'Returns',
         cell: ({ row }) => {
-          const refunds = row.getValue('total_refunds') as number | null
+          const refunds = getRefundsValue(row.original)
           const currency = row.original.currency || 'SEK'
           return (
             <div className="text-muted-foreground">
@@ -273,14 +285,12 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
   })
 
   // Calculate totals: add all included orders (both regular orders and refunds)
-  // Total Sales = gross_sales + tax (gross_sales is now total_price)
+  // Total Sales = gross_sales + tax (or use total_sales directly if available)
   const totalSalesSum = includedOrders.reduce((sum, order) => {
-    const grossSales = getNumericValue(order.gross_sales)
-    const tax = getNumericValue(order.total_tax)
-    return sum + (grossSales + tax)
+    return sum + getNumericValue(order.total_sales ?? (order.gross_sales && order.tax ? order.gross_sales + order.tax : null))
   }, 0)
 
-  // Gross Sales = gross_sales (which is now total_price)
+  // Gross Sales = gross_sales (exklusive skatt)
   const totalGrossSales = includedOrders.reduce((sum, order) => {
     return sum + getNumericValue(order.gross_sales)
   }, 0)
@@ -295,11 +305,11 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
   }, 0)
 
   const totalDiscounts = includedOrders.reduce((sum, order) => {
-    return sum + getNumericValue(order.discount_total)
+    return sum + getDiscountValue(order)
   }, 0)
 
   const totalReturns = includedOrders.reduce((sum, order) => {
-    return sum + getNumericValue(order.total_refunds)
+    return sum + getRefundsValue(order)
   }, 0)
 
   return (
@@ -348,7 +358,7 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
         <div className="rounded-lg border p-4">
           <div className="text-sm font-medium text-muted-foreground">Gross Sales</div>
           <div className="text-2xl font-semibold">{formatCurrency(totalGrossSales)}</div>
-          <p className="mt-1 text-xs text-muted-foreground">Shopify's total_price (order total before tax).</p>
+          <p className="mt-1 text-xs text-muted-foreground">Produkter före rabatter, exklusive skatt.</p>
         </div>
         <div className="rounded-lg border p-4">
           <div className="text-sm font-medium text-muted-foreground">Tax</div>

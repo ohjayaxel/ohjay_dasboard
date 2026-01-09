@@ -6,11 +6,35 @@
 
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+function loadEnvFile() {
+  const fs = require('fs');
+  const envFiles = ['.env.local', 'env/local.prod.sh'].filter(Boolean) as string[];
+  for (const envFile of envFiles) {
+    try {
+      const content = fs.readFileSync(envFile, 'utf-8');
+      const envVars: Record<string, string> = {};
+      content.split('\n').forEach((line: string) => {
+        const exportMatch = line.match(/^export\s+(\w+)=(.+)$/);
+        const directMatch = line.match(/^(\w+)=(.+)$/);
+        const match = exportMatch || directMatch;
+        if (match && !line.trim().startsWith('#')) {
+          const [, key, value] = match;
+          envVars[key] = value.replace(/^["']|["']$/g, '').trim();
+        }
+      });
+      Object.assign(process.env, envVars);
+      break;
+    } catch {}
+  }
+}
+
+loadEnvFile();
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!supabaseUrl || !supabaseServiceKey) {
-  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables');
+  throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables');
 }
 
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
@@ -165,7 +189,7 @@ async function main() {
   // Fetch orders from database
   let ordersQuery = supabase
     .from('shopify_orders')
-    .select('tenant_id, order_id, processed_at, gross_sales, net_sales, total_price, total_tax, currency, is_new_customer, is_refund')
+    .select('tenant_id, order_id, processed_at, gross_sales, net_sales, total_sales, tax, revenue, total_tax, currency, is_new_customer, is_refund')
     .eq('tenant_id', tenant.id)
     .not('processed_at', 'is', null);
 

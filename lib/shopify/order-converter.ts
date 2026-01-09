@@ -27,11 +27,30 @@ export function convertGraphQLOrderToShopifyOrder(
       totalDiscount += parseFloat(allocation.allocatedAmountSet.shopMoney.amount);
     }
 
+    // Sum tax lines for this line item (Shopify provides tax per line item)
+    let totalTax = 0;
+    for (const taxLine of node.taxLines || []) {
+      totalTax += parseFloat(taxLine.priceSet.shopMoney.amount);
+    }
+
+    // Extract product ID - use variant ID if available, otherwise product ID
+    // read_products scope is now available
+    let productId: string | undefined;
+    if (node.variant?.id) {
+      // Extract numeric ID from GID (e.g., "gid://shopify/ProductVariant/123456" -> "123456")
+      productId = node.variant.id.split('/').pop();
+    } else if (node.product?.id) {
+      // Extract numeric ID from GID (e.g., "gid://shopify/Product/123456" -> "123456")
+      productId = node.product.id.split('/').pop();
+    }
+
     return {
       id: node.id,
+      product_id: productId, // Product ID for matching with CSV
       price: node.originalUnitPriceSet.shopMoney.amount,
       quantity: node.quantity,
       total_discount: totalDiscount.toFixed(2),
+      tax: totalTax.toFixed(2),
     };
   });
 
@@ -39,6 +58,12 @@ export function convertGraphQLOrderToShopifyOrder(
   const refunds = graphqlOrder.refunds.map((refund) => ({
     id: refund.id,
     created_at: refund.createdAt,
+    total_refunded: refund.totalRefundedSet?.shopMoney?.amount ?? undefined,
+    adjustments: refund.orderAdjustments?.edges.map((e) => ({
+      reason: e.node.reason ?? null,
+      amount: e.node.amountSet?.shopMoney?.amount ?? null,
+      tax_amount: e.node.taxAmountSet?.shopMoney?.amount ?? null,
+    })),
     refund_line_items: refund.refundLineItems.edges.map((refundEdge) => {
       const refundNode = refundEdge.node;
       const originalLineItem = refundNode.lineItem;
@@ -54,13 +79,24 @@ export function convertGraphQLOrderToShopifyOrder(
         },
       };
     }),
+    transactions: refund.transactions?.edges.map((edge) => ({
+      id: edge.node.id,
+      kind: edge.node.kind,
+      status: edge.node.status,
+      processed_at: edge.node.processedAt || null,
+      amount: edge.node.amountSet?.shopMoney.amount,
+      currency: edge.node.amountSet?.shopMoney.currencyCode,
+    })),
   }));
 
-  // Calculate total discounts
-  let totalDiscounts = 0;
-  for (const item of lineItems) {
-    totalDiscounts += parseFloat(item.total_discount);
-  }
+  // Discounts:
+  // Prefer order-level totalDiscountsSet when available (includes shipping/order-level discounts that may not appear in line-item allocations).
+  // Fallback to summing line item discount allocations.
+  const totalDiscounts =
+    graphqlOrder.totalDiscountsSet?.shopMoney?.amount !== undefined &&
+    graphqlOrder.totalDiscountsSet?.shopMoney?.amount !== null
+      ? parseFloat(graphqlOrder.totalDiscountsSet.shopMoney.amount)
+      : lineItems.reduce((sum, item) => sum + (parseFloat(item.total_discount) || 0), 0);
 
   // Infer financial_status from transactions
   let financialStatus = 'pending';
@@ -92,7 +128,7 @@ export function convertGraphQLOrderToShopifyOrder(
     cancelled_at: graphqlOrder.cancelledAt || null,
     subtotal_price: graphqlOrder.subtotalPriceSet?.shopMoney.amount,
     total_tax: graphqlOrder.totalTaxSet?.shopMoney.amount,
-    total_discounts: totalDiscounts.toFixed(2),
+    total_discounts: (Number.isFinite(totalDiscounts) ? totalDiscounts : 0).toFixed(2),
     line_items: lineItems,
     refunds,
     processed_at: graphqlOrder.processedAt || null,
