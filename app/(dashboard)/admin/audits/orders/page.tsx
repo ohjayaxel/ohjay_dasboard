@@ -23,6 +23,26 @@ function coerceIdDimension(value: unknown): IdDimension {
   return 'order_id'
 }
 
+async function supportsShopifyOrdersColumn(params: {
+  supabase: ReturnType<typeof getSupabaseServiceClient>
+  tenantId: string
+  column: string
+}): Promise<boolean> {
+  try {
+    const { error } = await params.supabase
+      .from('shopify_orders')
+      .select(params.column)
+      .eq('tenant_id', params.tenantId)
+      .limit(1)
+    if (error && (error as any).code === '42703') {
+      return false
+    }
+    return !error
+  } catch {
+    return false
+  }
+}
+
 async function fetchAllShopifyOrdersForRange(params: {
   supabase: ReturnType<typeof getSupabaseServiceClient>
   tenantId: string
@@ -126,14 +146,37 @@ export default async function AdminOrdersPage(props: PageProps) {
 
   let orders: any[] = []
   let selectedTenant = tenants.find((t) => t.id === selectedTenantId) ?? null
+  let supportsUpdatedAt = false
+  let supportsCreatedAtTs = false
+  let effectiveDateField: DateDimension = dateField
 
   if (selectedTenantId && selectedTenant) {
     // Fetch orders for selected tenant
     try {
+      // Some environments don't have updated_at / created_at_ts columns on shopify_orders.
+      // Detect support and fall back to processed_at to avoid hard failures.
+      supportsUpdatedAt = await supportsShopifyOrdersColumn({
+        supabase,
+        tenantId: selectedTenantId,
+        column: 'updated_at',
+      })
+      supportsCreatedAtTs = await supportsShopifyOrdersColumn({
+        supabase,
+        tenantId: selectedTenantId,
+        column: 'created_at_ts',
+      })
+
+      if (effectiveDateField === 'updated_at' && !supportsUpdatedAt) {
+        effectiveDateField = 'processed_at'
+      }
+      if (effectiveDateField === 'created_at_ts' && !supportsCreatedAtTs) {
+        effectiveDateField = 'created_at'
+      }
+
       orders = await fetchAllShopifyOrdersForRange({
         supabase,
         tenantId: selectedTenantId,
-        dateField,
+        dateField: effectiveDateField,
         from,
         to,
       })
@@ -174,8 +217,10 @@ export default async function AdminOrdersPage(props: PageProps) {
           from={from}
           to={to}
           tenantSlug={selectedTenant.slug}
-          dateField={dateField}
+          dateField={effectiveDateField}
           idField={idField}
+          supportsUpdatedAt={supportsUpdatedAt}
+          supportsCreatedAtTs={supportsCreatedAtTs}
         />
       ) : selectedTenant && orders.length === 0 ? (
         <div className="text-center text-muted-foreground py-8">

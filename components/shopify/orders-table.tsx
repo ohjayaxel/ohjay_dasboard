@@ -73,6 +73,8 @@ type OrdersTableProps = {
   dateField?: 'processed_at' | 'created_at' | 'created_at_ts' | 'updated_at'
   idField?: 'order_id' | 'order_number'
   groupBy?: 'date_order' | 'date' | 'order'
+  supportsUpdatedAt?: boolean
+  supportsCreatedAtTs?: boolean
 }
 
 const formatCurrency = (value: number | null, currency: string = 'SEK') => {
@@ -223,6 +225,22 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
   const groupBy =
     groupByProp ?? ((searchParams.get('groupBy') as OrdersTableProps['groupBy']) ?? 'date_order')
 
+  const supportsUpdatedAt =
+    typeof (arguments[0] as any)?.supportsUpdatedAt === 'boolean'
+      ? (arguments[0] as any).supportsUpdatedAt
+      : orders.some((o) => typeof o.updated_at === 'string' && o.updated_at)
+  const supportsCreatedAtTs =
+    typeof (arguments[0] as any)?.supportsCreatedAtTs === 'boolean'
+      ? (arguments[0] as any).supportsCreatedAtTs
+      : orders.some((o) => typeof o.created_at_ts === 'string' && o.created_at_ts)
+
+  const effectiveDateField: OrdersTableProps['dateField'] =
+    dateField === 'updated_at' && !supportsUpdatedAt
+      ? 'processed_at'
+      : dateField === 'created_at_ts' && !supportsCreatedAtTs
+        ? 'created_at'
+        : dateField
+
   // If the DB schema doesn't include order_number (older schema), fall back to order_id.
   // We detect that by checking if any row has a numeric order_number.
   const effectiveIdField: OrdersTableProps['idField'] =
@@ -267,10 +285,10 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
     () =>
       groupOrders(orders, {
         groupBy: (groupBy as any) || 'date_order',
-        dateField: (dateField as any) || 'processed_at',
+        dateField: (effectiveDateField as any) || 'processed_at',
         idField: (effectiveIdField as any) || 'order_id',
       }),
-    [orders, groupBy, dateField, effectiveIdField],
+    [orders, groupBy, effectiveDateField, effectiveIdField],
   )
 
   const includedOrders = displayRows.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
@@ -437,7 +455,7 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
 
       return cols
     },
-    [dateField, effectiveIdField, groupBy]
+    [effectiveDateField, effectiveIdField, groupBy]
   )
 
   const table = useReactTable({
@@ -520,7 +538,7 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
         <div className="flex items-center gap-2">
           <label className="text-sm font-medium">Date field:</label>
           <Select
-            value={dateField ?? 'processed_at'}
+            value={effectiveDateField ?? 'processed_at'}
             onValueChange={(value) => setQueryParam('dateField', value)}
           >
             <SelectTrigger className="w-[180px]">
@@ -529,8 +547,12 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
             <SelectContent>
               <SelectItem value="processed_at">processed_at (report day)</SelectItem>
               <SelectItem value="created_at">created_at (date)</SelectItem>
-              <SelectItem value="created_at_ts">created_at_ts (timestamp)</SelectItem>
-              <SelectItem value="updated_at">updated_at (timestamp)</SelectItem>
+              {supportsCreatedAtTs ? (
+                <SelectItem value="created_at_ts">created_at_ts (timestamp)</SelectItem>
+              ) : null}
+              {supportsUpdatedAt ? (
+                <SelectItem value="updated_at">updated_at (timestamp)</SelectItem>
+              ) : null}
             </SelectContent>
           </Select>
         </div>
