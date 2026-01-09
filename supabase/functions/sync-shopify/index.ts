@@ -304,11 +304,11 @@ async function decryptSecret(payload: Uint8Array | string | BufferJson | null): 
  */
 async function fetchWithRetry(
   url: string,
-  options: { headers: Record<string, string> },
+  init: RequestInit,
   attempt = 1,
 ): Promise<Response> {
   try {
-    const response = await fetch(url, { headers: options.headers });
+    const response = await fetch(url, init);
 
     if (response.ok) {
       return response;
@@ -336,7 +336,7 @@ async function fetchWithRetry(
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
 
-      return fetchWithRetry(url, options, attempt + 1);
+      return fetchWithRetry(url, init, attempt + 1);
     }
 
     // Non-retriable error or max attempts reached
@@ -359,7 +359,7 @@ async function fetchWithRetry(
       `[sync-shopify] Request exception on attempt ${attempt}/${MAX_ATTEMPTS}. Retrying after ${delayMs}ms...`,
     );
     await new Promise((resolve) => setTimeout(resolve, delayMs));
-    return fetchWithRetry(url, options, attempt + 1);
+    return fetchWithRetry(url, init, attempt + 1);
   }
 }
 
