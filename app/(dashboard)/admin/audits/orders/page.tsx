@@ -32,6 +32,7 @@ function coerceGroupBy(value: unknown): GroupBy {
 
 type ShopifySalesTransactionRow = {
   shopify_order_id: string
+  shopify_order_number: number | null
   event_date: string // YYYY-MM-DD
   gross_sales: number | null
   discounts: number | null
@@ -55,7 +56,7 @@ async function fetchAllShopifySalesTransactionsForRange(params: {
   while (all.length < maxRows) {
     const { data, error } = await params.supabase
       .from('shopify_sales_transactions')
-      .select('shopify_order_id,event_date,gross_sales,discounts,returns,currency')
+      .select('shopify_order_id,shopify_order_number,event_date,gross_sales,discounts,returns,currency')
       .eq('tenant_id', params.tenantId)
       .gte('event_date', params.from)
       .lte('event_date', params.to)
@@ -88,6 +89,7 @@ function buildSyntheticOrdersFromTransactions(rows: ShopifySalesTransactionRow[]
       map.get(key) ??
       ({
         order_id: orderId,
+        order_number: r.shopify_order_number ?? null,
         processed_at: date,
         created_at: date,
         gross_sales: 0,
