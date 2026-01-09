@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import {
   ColumnDef,
   flexRender,
@@ -12,6 +13,14 @@ import {
 } from '@tanstack/react-table'
 
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -47,12 +56,59 @@ const formatCurrency = (value: number | null, currency: string = 'SEK') => {
   }).format(value)
 }
 
-export function ShopifyDailySalesTable(props: { rows: ShopifyDailySalesRow[] }) {
+function sum(values: Array<number | null | undefined>) {
+  return values.reduce((acc, v) => acc + (v ?? 0), 0)
+}
+
+export function ShopifyDailySalesTable(props: {
+  rows: ShopifyDailySalesRow[]
+  from: string
+  to: string
+  supportsUpdatedAt?: boolean
+  supportsCreatedAtTs?: boolean
+}) {
+  const router = useRouter()
+  const searchParams = useSearchParams()
   const [sorting, setSorting] = React.useState<SortingState>([
     { id: 'date', desc: true },
   ])
 
   const currency = props.rows.find((r) => r.currency)?.currency ?? 'SEK'
+
+  const supportsUpdatedAt = props.supportsUpdatedAt === true
+  const supportsCreatedAtTs = props.supportsCreatedAtTs === true
+
+  const groupBy = (searchParams.get('groupBy') as 'date_order' | 'date' | 'order') ?? 'date'
+  const dateField =
+    (searchParams.get('dateField') as 'processed_at' | 'created_at' | 'created_at_ts' | 'updated_at') ??
+    'processed_at'
+  const idField = (searchParams.get('idField') as 'order_id' | 'order_number') ?? 'order_id'
+
+  const setQueryParam = (key: string, value: string) => {
+    const params = new URLSearchParams(searchParams.toString())
+    params.set(key, value)
+    // Preserve tenant param in admin context
+    const tenant = searchParams.get('tenant')
+    if (tenant) params.set('tenant', tenant)
+    router.push(`/admin/audits/orders?${params.toString()}`)
+  }
+
+  const handleDateChange = (field: 'from' | 'to', value: string) => {
+    const params = new URLSearchParams(searchParams.toString())
+    params.set(field, value)
+    const tenant = searchParams.get('tenant')
+    if (tenant) params.set('tenant', tenant)
+    router.push(`/admin/audits/orders?${params.toString()}`)
+  }
+
+  const totals = React.useMemo(() => {
+    const gross = sum(props.rows.map((r) => r.gross_sales_excl_tax))
+    const discounts = sum(props.rows.map((r) => r.discounts_excl_tax))
+    const returns = sum(props.rows.map((r) => r.refunds_excl_tax))
+    const net = sum(props.rows.map((r) => r.net_sales_excl_tax))
+    const orders = sum(props.rows.map((r) => r.orders_count))
+    return { gross, discounts, returns, net, orders }
+  }, [props.rows])
 
   const columns: ColumnDef<ShopifyDailySalesRow>[] = React.useMemo(
     () => [
@@ -110,6 +166,106 @@ export function ShopifyDailySalesTable(props: { rows: ShopifyDailySalesRow[] }) 
 
   return (
     <div className="space-y-4">
+      {/* Controls (match audits/orders UX) */}
+      <div className="flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-2">
+          <label htmlFor="from" className="text-sm font-medium">
+            From:
+          </label>
+          <Input
+            id="from"
+            type="date"
+            value={props.from}
+            onChange={(e) => handleDateChange('from', e.target.value)}
+            className="w-40"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <label htmlFor="to" className="text-sm font-medium">
+            To:
+          </label>
+          <Input
+            id="to"
+            type="date"
+            value={props.to}
+            onChange={(e) => handleDateChange('to', e.target.value)}
+            className="w-40"
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium">Date field:</label>
+          <Select value={dateField} onValueChange={(value) => setQueryParam('dateField', value)}>
+            <SelectTrigger className="w-[180px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="processed_at">processed_at (report day)</SelectItem>
+              <SelectItem value="created_at">created_at (date)</SelectItem>
+              {supportsCreatedAtTs ? (
+                <SelectItem value="created_at_ts">created_at_ts (timestamp)</SelectItem>
+              ) : null}
+              {supportsUpdatedAt ? (
+                <SelectItem value="updated_at">updated_at (timestamp)</SelectItem>
+              ) : null}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium">ID field:</label>
+          <Select value={idField} onValueChange={(value) => setQueryParam('idField', value)}>
+            <SelectTrigger className="w-[170px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="order_id">order_id</SelectItem>
+              <SelectItem value="order_number">order_number</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium">Group by:</label>
+          <Select value={groupBy} onValueChange={(value) => setQueryParam('groupBy', value)}>
+            <SelectTrigger className="w-[190px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="date_order">Date + Order</SelectItem>
+              <SelectItem value="date">Date only</SelectItem>
+              <SelectItem value="order">Order only</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      {/* Summary (match audits/orders metrics) */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Gross Sales</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totals.gross, currency)}</div>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Discounts</div>
+          <div className="text-2xl font-semibold">
+            {formatCurrency(totals.discounts, currency)}
+          </div>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Returns</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totals.returns, currency)}</div>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Net Sales</div>
+          <div className="text-2xl font-semibold">{formatCurrency(totals.net, currency)}</div>
+        </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">Orders</div>
+          <div className="text-2xl font-semibold">{Math.round(totals.orders)}</div>
+        </div>
+      </div>
+
       <div className="rounded-md border">
         <Table>
           <TableHeader>
