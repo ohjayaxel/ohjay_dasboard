@@ -80,8 +80,6 @@ async function fetchAllShopifyOrdersForRange(params: {
     'tax',
     'discount',
     'refunds',
-    'discount_total',
-    'total_refunds',
     'currency',
     'financial_status',
     'fulfillment_status',
