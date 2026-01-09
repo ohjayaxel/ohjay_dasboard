@@ -489,7 +489,9 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
     return sum + getNumericValue(order.gross_sales)
   }, 0)
 
-  const totalNetSales = includedOrders.reduce((sum, order) => {
+  // Net sales should reflect refunds even if those rows are excluded from "Included Orders" count.
+  // We keep the order count logic (gross_sales > 0) but totals should include refund-only rows.
+  const totalNetSales = displayRows.reduce((sum, order) => {
     return sum + getNumericValue(order.net_sales)
   }, 0)
 
@@ -502,7 +504,8 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
     return sum + getDiscountValue(order)
   }, 0)
 
-  const totalReturns = includedOrders.reduce((sum, order) => {
+  // Returns should be visible even when refund rows have gross_sales = 0 and are excluded from order count.
+  const totalReturns = displayRows.reduce((sum, order) => {
     return sum + getRefundsValue(order)
   }, 0)
 
