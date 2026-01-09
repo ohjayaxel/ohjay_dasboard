@@ -32,6 +32,18 @@ Senast uppdaterad: 2026-01-09
 - **Verifiering**
   - Efter redeploy av Edge Function ska samma curl-trigger inte längre ge 404 från Shopify.
 
+### 2.2 `sync-shopify` Edge Function: GraphQL schema mismatch (`totalDutiesSet` saknas)
+
+- **Symptom**
+  - `Shopify GraphQL errors: Field 'totalDutiesSet' doesn't exist on type 'Order'`
+
+- **Root cause**
+  - Vår GraphQL-query i Edge Functionen frågade efter `totalDutiesSet`, men fältet finns inte i vissa butikers Admin GraphQL-schema (beroende på API-version/feature-set).
+  - Shopify returnerar då ett GraphQL error och vi failar hela sync-jobbet.
+
+- **Fix**
+  - Ta bort `totalDutiesSet` från query + mapping och låt `duties_amount` vara `null` tills vi har en kompatibel, schema-säker lösning.
+
 # Shopify Analytics Calculation Knowledge Base
 
 **Uppdaterad:** 2025-01-27  
