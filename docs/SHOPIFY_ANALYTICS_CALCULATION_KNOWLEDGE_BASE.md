@@ -44,6 +44,32 @@ Senast uppdaterad: 2026-01-09
 - **Fix**
   - Ta bort `totalDutiesSet` från query + mapping och låt `duties_amount` vara `null` tills vi har en kompatibel, schema-säker lösning.
 
+## 3) Admin audits: Orders dimensioner (order-id + datum)
+
+`/admin/audits/orders` kan nu växla vilka dimensioner som används för:
+- **Datumfilter/sort** (vilket fält som används i WHERE/ORDER BY)
+- **Order-identifierare** (vilket fält som visas som “Order ID/Order Number”)
+
+### 3.1 Query params
+
+- **`dateField`** (default: `processed_at`)
+  - `processed_at`: datumsträng (YYYY-MM-DD), Shopify “report day”
+  - `created_at`: datumsträng (YYYY-MM-DD)
+  - `created_at_ts`: timestamp (ISO) – filtreras som `[fromT00:00:00Z, toT23:59:59Z]`
+  - `updated_at`: timestamp (ISO) – filtreras som `[fromT00:00:00Z, toT23:59:59Z]`
+
+- **`idField`** (default: `order_id`)
+  - `order_id`
+  - `order_number`
+
+### 3.2 UI
+
+På sidan finns två Selects:
+- **Date field**: styr `dateField`
+- **ID field**: styr `idField`
+
+När du ändrar dem uppdateras URL:en och sidan refetchar med nya dimensioner.
+
 # Shopify Analytics Calculation Knowledge Base
 
 **Uppdaterad:** 2025-01-27  

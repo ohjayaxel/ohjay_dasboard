@@ -10,6 +10,19 @@ type PageProps = {
   searchParams?: Promise<Record<string, string | string[] | undefined>>
 }
 
+type DateDimension = 'processed_at' | 'created_at' | 'created_at_ts' | 'updated_at'
+type IdDimension = 'order_id' | 'order_number'
+
+function coerceDateDimension(value: unknown): DateDimension {
+  if (value === 'created_at' || value === 'created_at_ts' || value === 'updated_at') return value
+  return 'processed_at'
+}
+
+function coerceIdDimension(value: unknown): IdDimension {
+  if (value === 'order_number') return 'order_number'
+  return 'order_id'
+}
+
 export default async function AdminOrdersPage(props: PageProps) {
   await requirePlatformAdmin()
   const rawSearchParams = await (props.searchParams ?? Promise.resolve({}))
@@ -19,6 +32,8 @@ export default async function AdminOrdersPage(props: PageProps) {
   const fromParam = rawSearchParams?.from
   const toParam = rawSearchParams?.to
   const tenantParam = rawSearchParams?.tenant
+  const dateFieldParam = rawSearchParams?.dateField
+  const idFieldParam = rawSearchParams?.idField
 
   // Default to last 30 days
   const today = new Date()
@@ -31,19 +46,30 @@ export default async function AdminOrdersPage(props: PageProps) {
   const from = typeof fromParam === 'string' && fromParam.length > 0 ? fromParam : defaultFrom
   const to = typeof toParam === 'string' && toParam.length > 0 ? toParam : defaultTo
   const selectedTenantId = typeof tenantParam === 'string' && tenantParam.length > 0 ? tenantParam : null
+  const dateField = coerceDateDimension(typeof dateFieldParam === 'string' ? dateFieldParam : undefined)
+  const idField = coerceIdDimension(typeof idFieldParam === 'string' ? idFieldParam : undefined)
 
   let orders: any[] = []
   let selectedTenant = tenants.find((t) => t.id === selectedTenantId) ?? null
 
   if (selectedTenantId && selectedTenant) {
     // Fetch orders for selected tenant
+    const fromValue =
+      dateField === 'created_at_ts' || dateField === 'updated_at'
+        ? `${from}T00:00:00.000Z`
+        : from
+    const toValue =
+      dateField === 'created_at_ts' || dateField === 'updated_at'
+        ? `${to}T23:59:59.999Z`
+        : to
+
     const { data, error } = await supabase
       .from('shopify_orders')
       .select('*')
       .eq('tenant_id', selectedTenantId)
-      .gte('processed_at', from)
-      .lte('processed_at', to)
-      .order('processed_at', { ascending: false })
+      .gte(dateField, fromValue)
+      .lte(dateField, toValue)
+      .order(dateField, { ascending: false })
       .limit(1000)
 
     if (error) {
@@ -84,6 +110,8 @@ export default async function AdminOrdersPage(props: PageProps) {
           from={from}
           to={to}
           tenantSlug={selectedTenant.slug}
+          dateField={dateField}
+          idField={idField}
         />
       ) : selectedTenant && orders.length === 0 ? (
         <div className="text-center text-muted-foreground py-8">

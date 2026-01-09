@@ -41,7 +41,11 @@ import {
 
 type ShopifyOrder = {
   order_id: string
+  order_number?: number | null
   processed_at: string | null
+  created_at?: string | null
+  created_at_ts?: string | null
+  updated_at?: string | null
   total_sales: number | null
   tax: number | null
   total_tax: number | null
@@ -66,6 +70,8 @@ type OrdersTableProps = {
   from: string
   to: string
   tenantSlug?: string // Optional for admin context
+  dateField?: 'processed_at' | 'created_at' | 'created_at_ts' | 'updated_at'
+  idField?: 'order_id' | 'order_number'
 }
 
 const formatCurrency = (value: number | null, currency: string = 'SEK') => {
@@ -99,11 +105,36 @@ const formatDate = (date: string | null) => {
   return new Date(date).toLocaleDateString('sv-SE')
 }
 
+const formatDateTime = (date: string | null) => {
+  if (!date) return '—'
+  return new Date(date).toLocaleString('sv-SE')
+}
+
 export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [globalFilter, setGlobalFilter] = React.useState('')
+
+  const dateField =
+    (searchParams.get('dateField') as OrdersTableProps['dateField']) ?? 'processed_at'
+  const idField = (searchParams.get('idField') as OrdersTableProps['idField']) ?? 'order_id'
+
+  const setQueryParam = (key: string, value: string) => {
+    const params = new URLSearchParams(searchParams.toString())
+    params.set(key, value)
+    // Support both tenant context and admin context
+    const isAdminContext =
+      typeof window !== 'undefined' &&
+      window.location.pathname.includes('/admin/audits/orders')
+    if (isAdminContext) {
+      const tenant = searchParams.get('tenant')
+      if (tenant) params.set('tenant', tenant)
+      router.push(`/admin/audits/orders?${params.toString()}`)
+    } else if (tenantSlug) {
+      router.push(`/t/${tenantSlug}/shopify/orders?${params.toString()}`)
+    }
+  }
 
   const handleDateChange = (field: 'from' | 'to', value: string) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -128,16 +159,30 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
   const columns: ColumnDef<ShopifyOrder>[] = React.useMemo(
     () => [
       {
-        accessorKey: 'order_id',
-        header: 'Order ID',
+        accessorKey: idField,
+        header: idField === 'order_number' ? 'Order Number' : 'Order ID',
         cell: ({ row }) => (
-          <div className="font-mono text-sm">{row.getValue('order_id')}</div>
+          <div className="font-mono text-sm">
+            {row.getValue(idField) ?? '—'}
+          </div>
         ),
       },
       {
-        accessorKey: 'processed_at',
-        header: 'Date',
-        cell: ({ row }) => formatDate(row.getValue('processed_at')),
+        accessorKey: dateField,
+        header:
+          dateField === 'created_at'
+            ? 'Created Date'
+            : dateField === 'created_at_ts'
+              ? 'Created At'
+              : dateField === 'updated_at'
+                ? 'Updated At'
+                : 'Processed Date',
+        cell: ({ row }) => {
+          const raw = row.getValue(dateField) as string | null
+          return dateField === 'created_at_ts' || dateField === 'updated_at'
+            ? formatDateTime(raw)
+            : formatDate(raw)
+        },
       },
       {
         id: 'total_sales',
@@ -261,7 +306,7 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
         },
       },
     ],
-    []
+    [dateField, idField]
   )
 
   const table = useReactTable({
@@ -339,6 +384,40 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
             onChange={(e) => handleDateChange('to', e.target.value)}
             className="w-40"
           />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium">Date field:</label>
+          <Select
+            value={dateField ?? 'processed_at'}
+            onValueChange={(value) => setQueryParam('dateField', value)}
+          >
+            <SelectTrigger className="w-[180px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="processed_at">processed_at (report day)</SelectItem>
+              <SelectItem value="created_at">created_at (date)</SelectItem>
+              <SelectItem value="created_at_ts">created_at_ts (timestamp)</SelectItem>
+              <SelectItem value="updated_at">updated_at (timestamp)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium">ID field:</label>
+          <Select
+            value={idField ?? 'order_id'}
+            onValueChange={(value) => setQueryParam('idField', value)}
+          >
+            <SelectTrigger className="w-[170px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="order_id">order_id</SelectItem>
+              <SelectItem value="order_number">order_number</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
