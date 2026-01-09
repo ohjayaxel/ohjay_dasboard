@@ -62,11 +62,17 @@ Senast uppdaterad: 2026-01-09
   - `order_id`
   - `order_number`
 
+ - **`groupBy`** (default: `date_order`)
+   - `date_order`: gruppera på **både datum + order** (råa orderrader)
+   - `date`: gruppera på **enbart datum** (dagssumma; ingen “skärning” på order-id)
+   - `order`: gruppera på **enbart order**
+
 ### 3.2 UI
 
 På sidan finns två Selects:
 - **Date field**: styr `dateField`
 - **ID field**: styr `idField`
+- **Group by**: styr `groupBy`
 
 När du ändrar dem uppdateras URL:en och sidan refetchar med nya dimensioner.
 

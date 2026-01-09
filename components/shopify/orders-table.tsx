@@ -72,6 +72,7 @@ type OrdersTableProps = {
   tenantSlug?: string // Optional for admin context
   dateField?: 'processed_at' | 'created_at' | 'created_at_ts' | 'updated_at'
   idField?: 'order_id' | 'order_number'
+  groupBy?: 'date_order' | 'date' | 'order'
 }
 
 const formatCurrency = (value: number | null, currency: string = 'SEK') => {
@@ -110,15 +111,117 @@ const formatDateTime = (date: string | null) => {
   return new Date(date).toLocaleString('sv-SE')
 }
 
-export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) {
+function toStockholmDay(date: string | null): string | null {
+  if (!date) return null
+  try {
+    return new Date(date).toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' })
+  } catch {
+    return null
+  }
+}
+
+function getGroupDay(order: ShopifyOrder, dateField: NonNullable<OrdersTableProps['dateField']>): string | null {
+  const raw = (order as any)[dateField] as string | null | undefined
+  return toStockholmDay(raw ?? null)
+}
+
+type GroupedRow = ShopifyOrder & {
+  // For aggregated rows, these help keep the UI consistent.
+  _group_key: string
+  _group_count: number
+}
+
+function groupOrders(
+  orders: ShopifyOrder[],
+  opts: {
+    groupBy: NonNullable<OrdersTableProps['groupBy']>
+    dateField: NonNullable<OrdersTableProps['dateField']>
+    idField: NonNullable<OrdersTableProps['idField']>
+  },
+): GroupedRow[] {
+  const { groupBy, dateField, idField } = opts
+
+  // Default behavior: show raw order rows (date+order).
+  if (groupBy === 'date_order') {
+    return orders.map((o) => ({
+      ...o,
+      _group_key: `${(o as any)[idField] ?? o.order_id}-${(o as any)[dateField] ?? ''}`,
+      _group_count: 1,
+    }))
+  }
+
+  const groups = new Map<string, GroupedRow>()
+
+  for (const o of orders) {
+    const day = getGroupDay(o, dateField)
+    const idVal = (o as any)[idField] ?? o.order_id
+
+    const key =
+      groupBy === 'date'
+        ? `date:${day ?? '—'}`
+        : `order:${idVal ?? '—'}`
+
+    const existing = groups.get(key)
+    if (!existing) {
+      groups.set(key, {
+        ...o,
+        // For date-only grouping, keep the chosen date field (as a day string) and blank the ID dimension.
+        ...(groupBy === 'date'
+          ? {
+              // Keep all date-ish fields aligned for display/filtering.
+              processed_at: day ?? null,
+              created_at: day ?? null,
+              created_at_ts: null,
+              updated_at: null,
+              // Remove order identifiers so we don't "slice" on them.
+              order_id: '—',
+              order_number: null,
+            }
+          : {}),
+        _group_key: key,
+        _group_count: 1,
+      })
+      continue
+    }
+
+    // Aggregate numerics
+    existing.gross_sales = getNumericValue(existing.gross_sales) + getNumericValue(o.gross_sales)
+    existing.net_sales = getNumericValue(existing.net_sales) + getNumericValue(o.net_sales)
+    existing.total_tax = getNumericValue(existing.total_tax) + getNumericValue(o.total_tax)
+    existing.tax = getNumericValue(existing.tax) + getNumericValue(o.tax)
+    existing.total_sales =
+      getNumericValue(existing.total_sales) + getNumericValue(o.total_sales)
+    existing.revenue = getNumericValue(existing.revenue) + getNumericValue(o.revenue)
+
+    // Backcompat fields
+    const existingDiscount = getDiscountValue(existing)
+    const nextDiscount = getDiscountValue(o)
+    existing.discount = existingDiscount + nextDiscount
+
+    const existingRefunds = getRefundsValue(existing)
+    const nextRefunds = getRefundsValue(o)
+    existing.refunds = existingRefunds + nextRefunds
+
+    existing._group_count += 1
+    groups.set(key, existing)
+  }
+
+  return Array.from(groups.values())
+}
+
+export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateFieldProp, idField: idFieldProp, groupBy: groupByProp }: OrdersTableProps) {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [globalFilter, setGlobalFilter] = React.useState('')
 
   const dateField =
-    (searchParams.get('dateField') as OrdersTableProps['dateField']) ?? 'processed_at'
-  const idField = (searchParams.get('idField') as OrdersTableProps['idField']) ?? 'order_id'
+    dateFieldProp ??
+    ((searchParams.get('dateField') as OrdersTableProps['dateField']) ?? 'processed_at')
+  const idField =
+    idFieldProp ?? ((searchParams.get('idField') as OrdersTableProps['idField']) ?? 'order_id')
+  const groupBy =
+    groupByProp ?? ((searchParams.get('groupBy') as OrdersTableProps['groupBy']) ?? 'date_order')
 
   const setQueryParam = (key: string, value: string) => {
     const params = new URLSearchParams(searchParams.toString())
@@ -153,37 +256,55 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
 
   // Filter orders that are included in gross sales calculation
   // Include all orders with gross_sales > 0 (both regular orders and refunds)
-  const includedOrders = orders.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
-  const excludedOrders = orders.filter((o) => parseFloat((o.gross_sales || 0).toString()) === 0)
+  const displayRows = React.useMemo(
+    () =>
+      groupOrders(orders, {
+        groupBy: (groupBy as any) || 'date_order',
+        dateField: (dateField as any) || 'processed_at',
+        idField: (idField as any) || 'order_id',
+      }),
+    [orders, groupBy, dateField, idField],
+  )
+
+  const includedOrders = displayRows.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
+  const excludedOrders = displayRows.filter((o) => parseFloat((o.gross_sales || 0).toString()) === 0)
 
   const columns: ColumnDef<ShopifyOrder>[] = React.useMemo(
-    () => [
-      {
-        accessorKey: idField,
-        header: idField === 'order_number' ? 'Order Number' : 'Order ID',
-        cell: ({ row }) => (
-          <div className="font-mono text-sm">
-            {row.getValue(idField) ?? '—'}
-          </div>
-        ),
-      },
-      {
-        accessorKey: dateField,
-        header:
-          dateField === 'created_at'
-            ? 'Created Date'
-            : dateField === 'created_at_ts'
-              ? 'Created At'
-              : dateField === 'updated_at'
-                ? 'Updated At'
-                : 'Processed Date',
-        cell: ({ row }) => {
-          const raw = row.getValue(dateField) as string | null
-          return dateField === 'created_at_ts' || dateField === 'updated_at'
-            ? formatDateTime(raw)
-            : formatDate(raw)
-        },
-      },
+    () => {
+      const cols: ColumnDef<ShopifyOrder>[] = []
+
+      // Grouping toggle controls whether we include these dimensions as columns.
+      if (groupBy === 'date_order' || groupBy === 'order') {
+        cols.push({
+          accessorKey: idField,
+          header: idField === 'order_number' ? 'Order Number' : 'Order ID',
+          cell: ({ row }) => (
+            <div className="font-mono text-sm">{row.getValue(idField) ?? '—'}</div>
+          ),
+        })
+      }
+
+      if (groupBy === 'date_order' || groupBy === 'date') {
+        cols.push({
+          accessorKey: dateField,
+          header:
+            dateField === 'created_at'
+              ? 'Created Date'
+              : dateField === 'created_at_ts'
+                ? 'Created At'
+                : dateField === 'updated_at'
+                  ? 'Updated At'
+                  : 'Processed Date',
+          cell: ({ row }) => {
+            const raw = row.getValue(dateField) as string | null
+            return dateField === 'created_at_ts' || dateField === 'updated_at'
+              ? formatDateTime(raw)
+              : formatDate(raw)
+          },
+        })
+      }
+
+      cols.push(
       {
         id: 'total_sales',
         header: 'Total Sales',
@@ -305,12 +426,15 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
           )
         },
       },
-    ],
-    [dateField, idField]
+      )
+
+      return cols
+    },
+    [dateField, idField, groupBy]
   )
 
   const table = useReactTable({
-    data: orders,
+    data: displayRows,
     columns,
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
@@ -416,6 +540,20 @@ export function OrdersTable({ orders, from, to, tenantSlug }: OrdersTableProps) 
             <SelectContent>
               <SelectItem value="order_id">order_id</SelectItem>
               <SelectItem value="order_number">order_number</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-sm font-medium">Group by:</label>
+          <Select value={groupBy ?? 'date_order'} onValueChange={(value) => setQueryParam('groupBy', value)}>
+            <SelectTrigger className="w-[190px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="date_order">Date + Order</SelectItem>
+              <SelectItem value="date">Date only</SelectItem>
+              <SelectItem value="order">Order only</SelectItem>
             </SelectContent>
           </Select>
         </div>
