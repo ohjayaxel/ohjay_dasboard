@@ -1358,7 +1358,7 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
 
     const syncStartDate = connection.meta?.sync_start_date;
     const backfillSince = connection.meta?.backfill_since;
-    const since =
+    let since =
       typeof backfillSince === 'string' && backfillSince.length > 0
         ? backfillSince
         : typeof syncStartDate === 'string' && syncStartDate.length > 0
