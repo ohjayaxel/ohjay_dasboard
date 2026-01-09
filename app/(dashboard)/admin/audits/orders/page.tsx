@@ -23,6 +23,82 @@ function coerceIdDimension(value: unknown): IdDimension {
   return 'order_id'
 }
 
+async function fetchAllShopifyOrdersForRange(params: {
+  supabase: ReturnType<typeof getSupabaseServiceClient>
+  tenantId: string
+  dateField: DateDimension
+  from: string
+  to: string
+  maxRows?: number
+}) {
+  const { supabase, tenantId, dateField } = params
+  const maxRows = params.maxRows ?? 20000
+  const PAGE_SIZE = 1000
+
+  const fromValue =
+    dateField === 'created_at_ts' || dateField === 'updated_at'
+      ? `${params.from}T00:00:00.000Z`
+      : params.from
+  const toValue =
+    dateField === 'created_at_ts' || dateField === 'updated_at'
+      ? `${params.to}T23:59:59.999Z`
+      : params.to
+
+  const all: any[] = []
+  let offset = 0
+
+  // Select only what the UI needs; avoids transferring huge JSON columns for audits.
+  const selectCols = [
+    'tenant_id',
+    'order_id',
+    'order_number',
+    'processed_at',
+    'created_at',
+    'created_at_ts',
+    'updated_at',
+    'gross_sales',
+    'net_sales',
+    'total_tax',
+    'total_sales',
+    'tax',
+    'discount',
+    'refunds',
+    'discount_total',
+    'total_refunds',
+    'currency',
+    'financial_status',
+    'fulfillment_status',
+    'source_name',
+    'is_refund',
+  ].join(',')
+
+  while (all.length < maxRows) {
+    const { data, error } = await supabase
+      .from('shopify_orders')
+      .select(selectCols)
+      .eq('tenant_id', tenantId)
+      .gte(dateField, fromValue)
+      .lte(dateField, toValue)
+      .order(dateField, { ascending: false })
+      .range(offset, offset + PAGE_SIZE - 1)
+
+    if (error) {
+      throw error
+    }
+
+    const batch = data ?? []
+    all.push(...batch)
+
+    if (batch.length < PAGE_SIZE) {
+      break
+    }
+
+    offset += PAGE_SIZE
+  }
+
+  return all
+}
+
 export default async function AdminOrdersPage(props: PageProps) {
   await requirePlatformAdmin()
   const rawSearchParams = await (props.searchParams ?? Promise.resolve({}))
@@ -54,28 +130,17 @@ export default async function AdminOrdersPage(props: PageProps) {
 
   if (selectedTenantId && selectedTenant) {
     // Fetch orders for selected tenant
-    const fromValue =
-      dateField === 'created_at_ts' || dateField === 'updated_at'
-        ? `${from}T00:00:00.000Z`
-        : from
-    const toValue =
-      dateField === 'created_at_ts' || dateField === 'updated_at'
-        ? `${to}T23:59:59.999Z`
-        : to
-
-    const { data, error } = await supabase
-      .from('shopify_orders')
-      .select('*')
-      .eq('tenant_id', selectedTenantId)
-      .gte(dateField, fromValue)
-      .lte(dateField, toValue)
-      .order(dateField, { ascending: false })
-      .limit(1000)
-
-    if (error) {
+    try {
+      orders = await fetchAllShopifyOrdersForRange({
+        supabase,
+        tenantId: selectedTenantId,
+        dateField,
+        from,
+        to,
+      })
+    } catch (error) {
       console.error('Error fetching orders:', error)
-    } else {
-      orders = data || []
+      orders = []
     }
   }
 
