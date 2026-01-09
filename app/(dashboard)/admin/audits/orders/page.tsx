@@ -1,5 +1,6 @@
 import { getSupabaseServiceClient } from '@/lib/supabase/server'
 import { OrdersTable } from '@/components/shopify/orders-table'
+import { ShopifyDailySalesTable } from '@/components/shopify/shopify-daily-sales-table'
 import { listAdminTenants } from '@/lib/admin/tenants'
 import { requirePlatformAdmin } from '@/lib/auth/current-user'
 import { TenantSelector } from '@/components/admin/tenant-selector'
@@ -12,6 +13,7 @@ type PageProps = {
 
 type DateDimension = 'processed_at' | 'created_at' | 'created_at_ts' | 'updated_at'
 type IdDimension = 'order_id' | 'order_number'
+type GroupBy = 'date_order' | 'date' | 'order'
 
 function coerceDateDimension(value: unknown): DateDimension {
   if (value === 'created_at' || value === 'created_at_ts' || value === 'updated_at') return value
@@ -21,6 +23,11 @@ function coerceDateDimension(value: unknown): DateDimension {
 function coerceIdDimension(value: unknown): IdDimension {
   if (value === 'order_number') return 'order_number'
   return 'order_id'
+}
+
+function coerceGroupBy(value: unknown): GroupBy {
+  if (value === 'date' || value === 'order') return value
+  return 'date_order'
 }
 
 async function supportsShopifyOrdersColumn(params: {
@@ -125,6 +132,7 @@ export default async function AdminOrdersPage(props: PageProps) {
   const tenantParam = rawSearchParams?.tenant
   const dateFieldParam = rawSearchParams?.dateField
   const idFieldParam = rawSearchParams?.idField
+  const groupByParam = rawSearchParams?.groupBy
 
   // Default to last 30 days
   const today = new Date()
@@ -139,15 +147,17 @@ export default async function AdminOrdersPage(props: PageProps) {
   const selectedTenantId = typeof tenantParam === 'string' && tenantParam.length > 0 ? tenantParam : null
   const dateField = coerceDateDimension(typeof dateFieldParam === 'string' ? dateFieldParam : undefined)
   const idField = coerceIdDimension(typeof idFieldParam === 'string' ? idFieldParam : undefined)
+  const groupBy = coerceGroupBy(typeof groupByParam === 'string' ? groupByParam : undefined)
 
   let orders: any[] = []
+  let dailyRows: any[] = []
   let selectedTenant = tenants.find((t) => t.id === selectedTenantId) ?? null
   let supportsUpdatedAt = false
   let supportsCreatedAtTs = false
   let effectiveDateField: DateDimension = dateField
 
   if (selectedTenantId && selectedTenant) {
-    // Fetch orders for selected tenant
+    // Fetch for selected tenant
     try {
       // Some environments don't have updated_at / created_at_ts columns on shopify_orders.
       // Detect support and fall back to processed_at to avoid hard failures.
@@ -169,16 +179,35 @@ export default async function AdminOrdersPage(props: PageProps) {
         effectiveDateField = 'created_at'
       }
 
-      orders = await fetchAllShopifyOrdersForRange({
-        supabase,
-        tenantId: selectedTenantId,
-        dateField: effectiveDateField,
-        from,
-        to,
-      })
+      if (groupBy === 'date') {
+        // Date-only view should match Shopify Analytics: returns are allocated by refund date.
+        // shopify_daily_sales (mode='shopify') is the canonical daily table for this.
+        const { data, error } = await supabase
+          .from('shopify_daily_sales')
+          .select(
+            'date, gross_sales_excl_tax, discounts_excl_tax, refunds_excl_tax, net_sales_excl_tax, orders_count, currency',
+          )
+          .eq('tenant_id', selectedTenantId)
+          .eq('mode', 'shopify')
+          .gte('date', from)
+          .lte('date', to)
+          .order('date', { ascending: false })
+
+        if (error) throw error
+        dailyRows = data ?? []
+      } else {
+        orders = await fetchAllShopifyOrdersForRange({
+          supabase,
+          tenantId: selectedTenantId,
+          dateField: effectiveDateField,
+          from,
+          to,
+        })
+      }
     } catch (error) {
       console.error('Error fetching orders:', error)
       orders = []
+      dailyRows = []
     }
   }
 
@@ -207,7 +236,9 @@ export default async function AdminOrdersPage(props: PageProps) {
         baseUrl="/admin/audits/orders"
       />
 
-      {selectedTenant && orders.length > 0 ? (
+      {selectedTenant && groupBy === 'date' && dailyRows.length > 0 ? (
+        <ShopifyDailySalesTable rows={dailyRows as any} />
+      ) : selectedTenant && groupBy !== 'date' && orders.length > 0 ? (
         <OrdersTable
           orders={orders}
           from={from}
@@ -217,8 +248,9 @@ export default async function AdminOrdersPage(props: PageProps) {
           idField={idField}
           supportsUpdatedAt={supportsUpdatedAt}
           supportsCreatedAtTs={supportsCreatedAtTs}
+          groupBy={groupBy}
         />
-      ) : selectedTenant && orders.length === 0 ? (
+      ) : selectedTenant && orders.length === 0 && dailyRows.length === 0 ? (
         <div className="text-center text-muted-foreground py-8">
           No orders found for the selected date range.
         </div>
