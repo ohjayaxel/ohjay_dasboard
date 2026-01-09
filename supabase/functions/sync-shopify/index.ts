@@ -461,12 +461,6 @@ async function fetchShopifyOrdersGraphQL(params: {
                 currencyCode
               }
             }
-            totalDutiesSet {
-              shopMoney {
-                amount
-                currencyCode
-              }
-            }
             lineItems(first: 250) {
               edges {
                 node {
@@ -740,12 +734,9 @@ async function fetchShopifyOrdersGraphQL(params: {
             currency_code: gqlOrder.totalShippingPriceSet.shopMoney.currencyCode,
           },
         } : undefined,
-        total_duties_set: gqlOrder.totalDutiesSet ? {
-          shop_money: {
-            amount: gqlOrder.totalDutiesSet.shopMoney.amount,
-            currency_code: gqlOrder.totalDutiesSet.shopMoney.currencyCode,
-          },
-        } : undefined,
+        // NOTE: Some Shopify stores / API versions do not expose totalDutiesSet on Order in Admin GraphQL.
+        // We keep duties null for now to avoid hard-failing the entire sync.
+        total_duties_set: undefined,
       };
 
       allOrders.push(restOrder);
