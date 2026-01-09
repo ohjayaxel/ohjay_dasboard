@@ -30,6 +30,101 @@ function coerceGroupBy(value: unknown): GroupBy {
   return 'date_order'
 }
 
+type ShopifySalesTransactionRow = {
+  shopify_order_id: string
+  event_date: string // YYYY-MM-DD
+  gross_sales: number | null
+  discounts: number | null
+  returns: number | null
+  currency: string | null
+}
+
+async function fetchAllShopifySalesTransactionsForRange(params: {
+  supabase: ReturnType<typeof getSupabaseServiceClient>
+  tenantId: string
+  from: string
+  to: string
+  maxRows?: number
+}) {
+  const maxRows = params.maxRows ?? 50000
+  const PAGE_SIZE = 5000
+
+  const all: ShopifySalesTransactionRow[] = []
+  let offset = 0
+
+  while (all.length < maxRows) {
+    const { data, error } = await params.supabase
+      .from('shopify_sales_transactions')
+      .select('shopify_order_id,event_date,gross_sales,discounts,returns,currency')
+      .eq('tenant_id', params.tenantId)
+      .gte('event_date', params.from)
+      .lte('event_date', params.to)
+      .order('event_date', { ascending: false })
+      .range(offset, offset + PAGE_SIZE - 1)
+
+    if (error) throw error
+
+    const batch = (data as ShopifySalesTransactionRow[]) ?? []
+    all.push(...batch)
+
+    if (batch.length < PAGE_SIZE) break
+    offset += PAGE_SIZE
+  }
+
+  return all
+}
+
+function buildSyntheticOrdersFromTransactions(rows: ShopifySalesTransactionRow[]) {
+  // Build one row per (event_date, shopify_order_id) with:
+  // net = gross - discounts - returns
+  const map = new Map<string, any>()
+
+  for (const r of rows) {
+    const orderId = r.shopify_order_id
+    const date = r.event_date
+    const key = `${date}|${orderId}`
+
+    const existing =
+      map.get(key) ??
+      ({
+        order_id: orderId,
+        processed_at: date,
+        created_at: date,
+        gross_sales: 0,
+        net_sales: 0,
+        total_tax: 0,
+        total_sales: 0,
+        tax: 0,
+        discount: 0,
+        refunds: 0,
+        currency: r.currency ?? null,
+        financial_status: null,
+        fulfillment_status: null,
+        source_name: null,
+        is_refund: false,
+      } as any)
+
+    const gross = Number(r.gross_sales ?? 0) || 0
+    const discounts = Number(r.discounts ?? 0) || 0
+    const returns = Number(r.returns ?? 0) || 0
+
+    existing.gross_sales += gross
+    existing.discount += discounts
+    existing.refunds += returns
+    existing.net_sales = existing.gross_sales - existing.discount - existing.refunds
+
+    // Mark refund rows so they don't look like "orders"
+    if (existing.gross_sales <= 0 && existing.refunds > 0) {
+      existing.is_refund = true
+    }
+
+    if (!existing.currency && r.currency) existing.currency = r.currency
+    map.set(key, existing)
+  }
+
+  return Array.from(map.values())
+}
+
 async function supportsShopifyOrdersColumn(params: {
   supabase: ReturnType<typeof getSupabaseServiceClient>
   tenantId: string
@@ -195,6 +290,16 @@ export default async function AdminOrdersPage(props: PageProps) {
 
         if (error) throw error
         dailyRows = data ?? []
+      } else if (groupBy === 'date_order') {
+        // Date + Order should mirror Shopify Analytics "Day" behavior:
+        // show both SALE rows (order day) and RETURN rows (refund day) per order.
+        const txRows = await fetchAllShopifySalesTransactionsForRange({
+          supabase,
+          tenantId: selectedTenantId,
+          from,
+          to,
+        })
+        orders = buildSyntheticOrdersFromTransactions(txRows)
       } else {
         orders = await fetchAllShopifyOrdersForRange({
           supabase,
