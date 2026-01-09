@@ -15,14 +15,8 @@ function getEnvVar(key: string) {
 }
 
 function createSupabaseClient(): SupabaseClient {
-  // Try secrets first, then fall back to automatic Supabase environment variables
-  const url = Deno.env.get('SUPABASE_URL') || 
-              Deno.env.get('SUPABASE_PROJECT_URL') || 
-              getEnvVar('SUPABASE_URL');
-  
-  const serviceRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || 
-                      Deno.env.get('SUPABASE_ANON_KEY') || 
-                      getEnvVar('SUPABASE_SERVICE_ROLE_KEY');
+  const url = getEnvVar('SUPABASE_URL');
+  const serviceRole = getEnvVar('SUPABASE_SERVICE_ROLE_KEY');
 
   return createClient(url, serviceRole, {
     auth: { persistSession: false },
@@ -45,10 +39,14 @@ type ShopifyOrderRow = {
   tenant_id: string;
   order_id: string;
   processed_at: string | null;
-  total_price: number | null;
-  total_tax: number | null;
-  discount_total: number | null;
-  total_refunds: number | null;
+  created_at: string | null; // Date string (YYYY-MM-DD) for aggregations
+  created_at_ts: string | null; // Full timestamp (ISO string) for deterministic classification
+  total_sales: number | null; // Gross Sales + Tax (produkter före rabatter, inklusive skatt)
+  tax: number | null; // Skatt på Gross Sales
+  total_tax: number | null; // Total tax från Shopify API (tax på subtotal_price, dvs efter rabatter)
+  revenue: number | null; // Omsättning: net_sales + tax + shipping_amount
+  discount: number | null;
+  refunds: number | null;
   currency: string | null;
   customer_id: string | null;
   financial_status: string | null;
@@ -58,7 +56,15 @@ type ShopifyOrderRow = {
   gross_sales: number | null;
   net_sales: number | null;
   is_new_customer: boolean;
+  is_first_order_for_customer: boolean;
+  customer_type_shopify_mode: string | null;
+  customer_type_financial_mode: string | null;
   country: string | null;
+  shipping_amount: number | null;
+  shipping_tax: number | null;
+  duties_amount: number | null;
+  additional_fees_amount: number | null;
+  is_test: boolean;
 };
 
 type JobResult = {
@@ -74,15 +80,35 @@ type JobResult = {
 type ShopifyRefund = {
   id: number;
   created_at: string;
+  processed_at?: string; // Preferred date if available (more accurate for analytics)
+
+  // Line item refunds (used for refunded_subtotal)
   refund_line_items?: Array<{
     line_item_id: number | string;
     quantity: number;
     subtotal?: string;
+    subtotal_set?: {
+      shop_money?: { amount: string };
+    };
     line_item?: {
       price: string;
     };
   }>;
-  transactions?: Array<{ amount: string }>;
+
+  // Underlying payment transactions associated with this refund.
+  // These map closely to /admin/api/*/transactions.json and are used to
+  // build the transaction ledger (shopify_transactions).
+  transactions?: Array<{
+    id?: number | string;
+    amount: string;
+    kind: string;
+    gateway: string | null;
+    status?: string | null;
+    processed_at?: string | null;
+    created_at?: string | null;
+    currency?: string | null;
+    test?: boolean | null;
+  }>;
 };
 
 type ShopifyOrder = {
@@ -102,6 +128,7 @@ type ShopifyOrder = {
     price: string; // Price per unit (before discount), as string
     quantity: number;
     total_discount: string; // Discount on this line item, as string
+    tax?: string; // Total tax for this line item (sum of taxLines), as string
   }>;
   email: string | null;
   financial_status: string;
@@ -118,6 +145,12 @@ type ShopifyOrder = {
   shipping_address?: {
     country_code?: string;
     country?: string;
+  };
+  total_shipping_price_set?: {
+    shop_money?: { amount: string };
+  };
+  total_duties_set?: {
+    shop_money?: { amount: string };
   };
 };
 
@@ -330,34 +363,415 @@ async function fetchWithRetry(
   }
 }
 
-async function fetchShopifyOrders(params: {
+/**
+ * Fetch orders from Shopify using GraphQL API with processed_at filter
+ * This matches the backfill script's approach for consistency
+ */
+async function fetchShopifyOrdersGraphQL(params: {
   shopDomain: string;
   accessToken: string;
   since?: string;
+  until?: string;
+  filterBy?: 'created_at' | 'processed_at';
+  excludeTest?: boolean;
 }): Promise<ShopifyOrder[]> {
-  const url = new URL(`https://${params.shopDomain}/admin/api/2023-10/orders.json`);
-  url.searchParams.set('status', 'any');
-  url.searchParams.set('limit', '250');
-  // Include billing_address and shipping_address for country
-  url.searchParams.set('fields', 'id,order_number,processed_at,created_at,updated_at,total_price,subtotal_price,total_discounts,total_tax,currency,customer,line_items,refunds,email,financial_status,fulfillment_status,source_name,cancelled_at,tags,test,billing_address,shipping_address');
+  const normalizedShop = normalizeShopDomain(params.shopDomain);
+  const allOrders: ShopifyOrder[] = [];
+  let cursor: string | null = null;
+  let hasNextPage = true;
+  const filterBy = params.filterBy || 'processed_at';
+  const excludeTest = params.excludeTest !== false;
+
+  // Build query string for date filtering
+  const queryParts: string[] = [];
   if (params.since) {
-    url.searchParams.set('created_at_min', params.since);
+    if (filterBy === 'processed_at') {
+      queryParts.push(`processed_at:>='${params.since}'`);
+    } else {
+      queryParts.push(`created_at:>='${params.since}'`);
+    }
+  }
+  if (params.until) {
+    if (filterBy === 'processed_at') {
+      queryParts.push(`processed_at:<='${params.until}T23:59:59'`);
+    } else {
+      queryParts.push(`created_at:<='${params.until}T23:59:59'`);
+    }
+  }
+  // Don't filter test orders at fetch time - filtering happens in database/frontend
+  // if (excludeTest) {
+  //   queryParts.push(`-test:true`);
+  // }
+  const queryString = queryParts.length > 0 ? queryParts.join(' AND ') : undefined;
+
+  const ORDERS_QUERY = `
+    query GetOrders($first: Int!, $after: String, $query: String) {
+      orders(first: $first, after: $after, query: $query) {
+        edges {
+          node {
+            id
+            name
+            legacyResourceId
+            createdAt
+            processedAt
+            updatedAt
+            cancelledAt
+            test
+            currencyCode
+            customer {
+              id
+              email
+              numberOfOrders
+            }
+            billingAddress {
+              countryCode
+              country
+            }
+            shippingAddress {
+              countryCode
+              country
+            }
+            totalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            subtotalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            totalDiscountsSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            totalTaxSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            totalShippingPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            totalDutiesSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            lineItems(first: 250) {
+              edges {
+                node {
+                  id
+                  sku
+                  name
+                  quantity
+                  taxLines {
+                    priceSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                  originalUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  discountedUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  discountAllocations {
+                    allocatedAmountSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            transactions(first: 250) {
+              id
+              kind
+              status
+              processedAt
+              gateway
+              amountSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+            refunds(first: 250) {
+              id
+              createdAt
+              refundLineItems(first: 250) {
+                edges {
+                  node {
+                    quantity
+                    lineItem {
+                      id
+                      originalUnitPriceSet {
+                        shopMoney {
+                          amount
+                          currencyCode
+                        }
+                      }
+                    }
+                    subtotalSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  `;
+
+  let page = 1;
+  const MAX_PAGES = 500; // Safety limit
+
+  while (hasNextPage && page <= MAX_PAGES) {
+    const variables: any = {
+      first: 100,
+      query: queryString,
+    };
+    if (cursor) {
+      variables.after = cursor;
+    }
+
+    const response = await fetchWithRetry(`https://${normalizedShop}/admin/api/2023-10/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': params.accessToken,
+      },
+      body: JSON.stringify({
+        query: ORDERS_QUERY,
+        variables,
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Shopify GraphQL fetch failed: ${response.status} ${body}`);
+    }
+
+    const result = await response.json();
+    if (result.errors) {
+      throw new Error(`Shopify GraphQL errors: ${JSON.stringify(result.errors)}`);
+    }
+
+    const orders = result.data?.orders?.edges || [];
+    if (orders.length === 0) {
+      break;
+    }
+
+    // Convert GraphQL orders to REST format
+    for (const edge of orders) {
+      const gqlOrder = edge.node;
+      
+      // Extract customer ID from GID
+      let customerId: number | null = null;
+      if (gqlOrder.customer?.id) {
+        const gidMatch = gqlOrder.customer.id.match(/\/(\d+)$/);
+        if (gidMatch) {
+          customerId = parseInt(gidMatch[1]);
+        }
+      }
+
+      // Prefer order-level totalDiscountsSet when available; fallback to summing line-item discount allocations.
+      let totalDiscounts = 0;
+      const orderLevelDiscount = gqlOrder.totalDiscountsSet?.shopMoney?.amount;
+      if (orderLevelDiscount !== null && orderLevelDiscount !== undefined && orderLevelDiscount !== '') {
+        const n = parseFloat(orderLevelDiscount);
+        totalDiscounts = Number.isFinite(n) ? n : 0;
+      } else {
+        for (const lineItemEdge of gqlOrder.lineItems.edges || []) {
+          const item = lineItemEdge.node;
+          for (const allocation of item.discountAllocations || []) {
+            totalDiscounts += parseFloat(allocation.allocatedAmountSet.shopMoney.amount || '0');
+          }
+        }
+      }
+
+      // Infer financial_status from transactions (same logic as backfill script)
+      // CRITICAL: Default to 'paid' if order has line items but no transactions
+      // This ensures orders are not filtered out by calculateShopifyLikeSales
+      // This matches Shopify Analytics behavior where orders typically have financial_status='paid'
+      let financialStatus = 'pending';
+      if (gqlOrder.cancelledAt) {
+        financialStatus = 'voided';
+      } else if (gqlOrder.transactions && gqlOrder.transactions.length > 0) {
+        const successfulSales = gqlOrder.transactions.filter(
+          (txn: any) => (txn.kind === 'SALE' || txn.kind === 'CAPTURE') && txn.status === 'SUCCESS'
+        );
+        const refunds = gqlOrder.transactions.filter(
+          (txn: any) => txn.kind === 'REFUND' && txn.status === 'SUCCESS'
+        );
+        
+        if (refunds.length > 0 && successfulSales.length > 0) {
+          financialStatus = 'partially_refunded';
+        } else if (successfulSales.length > 0) {
+          financialStatus = 'paid';
+        } else {
+          // No successful sales transactions - but if we have line items, assume 'paid'
+          // (transactions might be missing from GraphQL but order is actually paid)
+          const hasLineItems = gqlOrder.lineItems?.edges?.length > 0;
+          financialStatus = hasLineItems ? 'paid' : 'pending';
+        }
+      } else {
+        // No transactions available - default to 'paid' if order has line items
+        // This ensures orders are included in calculations (matches Shopify Analytics behavior)
+        const hasLineItems = gqlOrder.lineItems?.edges?.length > 0;
+        financialStatus = hasLineItems ? 'paid' : 'pending';
+      }
+
+      // Convert line items
+      const lineItems = (gqlOrder.lineItems.edges || []).map((lineItemEdge: any) => {
+        const item = lineItemEdge.node;
+        let lineItemId: number | null = null;
+        const gidMatch = item.id.match(/\/(\d+)$/);
+        if (gidMatch) {
+          lineItemId = parseInt(gidMatch[1]);
+        }
+
+        let itemTotalDiscount = 0;
+        for (const allocation of item.discountAllocations || []) {
+          itemTotalDiscount += parseFloat(allocation.allocatedAmountSet.shopMoney.amount || '0');
+        }
+
+        let itemTaxTotal = 0;
+        for (const tl of item.taxLines || []) {
+          const amt = tl?.priceSet?.shopMoney?.amount;
+          if (amt !== null && amt !== undefined && amt !== '') {
+            const n = parseFloat(amt);
+            if (Number.isFinite(n)) itemTaxTotal += n;
+          }
+        }
+
+        return {
+          id: lineItemId || 0,
+          sku: item.sku || null,
+          name: item.name,
+          quantity: item.quantity,
+          price: item.originalUnitPriceSet.shopMoney.amount,
+          total_discount: itemTotalDiscount.toFixed(2),
+          tax: itemTaxTotal.toFixed(2),
+        };
+      });
+
+      // Convert refunds
+      const refunds: ShopifyRefund[] = (gqlOrder.refunds || []).map((refund: any) => ({
+        id: parseInt(refund.id.match(/\/(\d+)$/)?.[1] || '0'),
+        created_at: refund.createdAt,
+        refund_line_items: (refund.refundLineItems?.edges || []).map((refundEdge: any) => {
+          const refundNode = refundEdge.node;
+          return {
+            line_item_id: refundNode.lineItem?.id || null,
+            quantity: refundNode.quantity,
+            subtotal: refundNode.subtotalSet?.shopMoney?.amount,
+            line_item: refundNode.lineItem ? {
+              price: refundNode.lineItem.originalUnitPriceSet.shopMoney.amount,
+            } : undefined,
+          };
+        }),
+      }));
+
+      const restOrder: ShopifyOrder = {
+        id: parseInt(gqlOrder.legacyResourceId || gqlOrder.id),
+        order_number: parseInt(gqlOrder.name.replace('#', '')),
+        processed_at: gqlOrder.processedAt || null,
+        created_at: gqlOrder.createdAt,
+        updated_at: gqlOrder.updatedAt || null,
+        cancelled_at: gqlOrder.cancelledAt || null,
+        total_price: gqlOrder.totalPriceSet?.shopMoney?.amount || '0',
+        subtotal_price: gqlOrder.subtotalPriceSet?.shopMoney?.amount || '0',
+        total_discounts: totalDiscounts.toFixed(2),
+        total_tax: gqlOrder.totalTaxSet?.shopMoney?.amount || '0',
+        currency: gqlOrder.currencyCode,
+        test: gqlOrder.test,
+        customer: gqlOrder.customer && customerId ? {
+          id: customerId,
+          email: gqlOrder.customer.email || null,
+          first_name: null,
+          last_name: null,
+        } : null,
+        line_items: lineItems,
+        refunds,
+        financial_status: financialStatus,
+        billing_address: gqlOrder.billingAddress ? {
+          country_code: gqlOrder.billingAddress.countryCode || null,
+          country: gqlOrder.billingAddress.country || null,
+        } : undefined,
+        shipping_address: gqlOrder.shippingAddress ? {
+          country_code: gqlOrder.shippingAddress.countryCode || null,
+          country: gqlOrder.shippingAddress.country || null,
+        } : undefined,
+        total_shipping_price_set: gqlOrder.totalShippingPriceSet ? {
+          shop_money: {
+            amount: gqlOrder.totalShippingPriceSet.shopMoney.amount,
+            currency_code: gqlOrder.totalShippingPriceSet.shopMoney.currencyCode,
+          },
+        } : undefined,
+        total_duties_set: gqlOrder.totalDutiesSet ? {
+          shop_money: {
+            amount: gqlOrder.totalDutiesSet.shopMoney.amount,
+            currency_code: gqlOrder.totalDutiesSet.shopMoney.currencyCode,
+          },
+        } : undefined,
+      };
+
+      allOrders.push(restOrder);
+    }
+
+    const pageInfo = result.data?.orders?.pageInfo;
+    hasNextPage = pageInfo?.hasNextPage || false;
+    cursor = pageInfo?.endCursor || null;
+    
+    console.log(`[sync-shopify] Fetched ${orders.length} orders via GraphQL (total: ${allOrders.length}, page ${page})`);
+    
+    page++;
+    
+    // Small delay between pages
+    if (hasNextPage) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
 
-  // Use fetchWithRetry for automatic retry on transient errors
-  const res = await fetchWithRetry(url.toString(), {
-    headers: {
-      'X-Shopify-Access-Token': params.accessToken,
-    },
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Shopify orders fetch failed: ${res.status} ${body}`);
+  if (page > MAX_PAGES) {
+    console.warn(`[sync-shopify] Reached maximum page limit (${MAX_PAGES}), stopping pagination`);
   }
 
-  const body = await res.json();
-  return (body.orders ?? []) as ShopifyOrder[];
+  console.log(`[sync-shopify] Total orders fetched via GraphQL: ${allOrders.length} across ${page - 1} page(s)`);
+  
+  return allOrders;
 }
 
 function normalizeShopDomain(domain: string): string {
@@ -372,8 +786,11 @@ function normalizeShopDomain(domain: string): string {
  * Shopify-like sales calculation (mirrors lib/shopify/sales.ts logic)
  * Edge Functions can't import from lib/, so we duplicate the logic here
  * 
- * NEW CALCULATION METHOD (matching Shopify Analytics):
- * - Net Sales EXCL tax = subtotal_price - total_tax - refunds (EXCL tax)
+ * CALCULATION METHOD (matching Shopify Analytics):
+ * - Gross Sales = SUM(line_item.price × quantity) EXCL tax
+ * - Discounts = SUM(line_item.total_discount)
+ * - Returns = SUM(refund_line_items.subtotal) EXCL tax
+ * - Net Sales EXCL tax = gross_sales - discounts - returns
  * - Uses Shopify's own fields as source of truth
  */
 function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
@@ -396,28 +813,27 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
     return { grossSales: 0, discounts: 0, returns: 0, netSales: 0 };
   }
 
-  // Calculate Gross Sales: sum of (price × quantity) for all line items (INCL tax)
-  // This is for reference/display purposes only
-  let grossSales = 0;
+  // Prices from GraphQL:
+  // - originalUnitPriceSet: typically INCL tax (for our tenant, confirmed via Shopify Analytics matching)
+  // - total_discount: discount allocations, treated as INCL tax
+  let grossSalesInclTax = 0;
   for (const lineItem of order.line_items || []) {
     const price = parseFloat(lineItem.price || '0');
     const quantity = lineItem.quantity || 0;
-    grossSales += price * quantity;
+    grossSalesInclTax += price * quantity;
   }
-  grossSales = Math.round(grossSales * 100) / 100;
+  grossSalesInclTax = Math.round(grossSalesInclTax * 100) / 100;
 
-  // Calculate Discounts: prefer order.total_discounts if available (includes both line-item and order-level discounts)
-  // This is for reference/display purposes only (INCL tax)
-  let discounts = 0;
+  // Discounts INCL tax (order-level preferred, else sum line-level)
+  let discountsInclTax = 0;
   if (order.total_discounts !== undefined && order.total_discounts !== null) {
-    discounts = parseFloat(order.total_discounts || '0');
+    discountsInclTax = parseFloat(order.total_discounts || '0');
   } else {
-    // Fallback: sum line-item discounts
     for (const lineItem of order.line_items || []) {
-      discounts += parseFloat(lineItem.total_discount || '0');
+      discountsInclTax += parseFloat(lineItem.total_discount || '0');
     }
   }
-  discounts = Math.round(discounts * 100) / 100;
+  discountsInclTax = Math.round(discountsInclTax * 100) / 100;
 
   // NEW METHOD: Calculate Net Sales EXCL tax using Shopify's fields
   // subtotal_price = ordersumma efter rabatter, INKL moms
@@ -437,6 +853,93 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
   // Net Sales EXCL tax BEFORE refunds
   // = subtotalPrice - totalTax
   const netSalesExclTaxBeforeRefunds = Math.round((subtotalPrice - totalTax) * 100) / 100;
+
+  const subtotalExclTax = subtotalPrice - totalTax;
+  const taxRate =
+    subtotalPrice > 0 && totalTax > 0 && subtotalExclTax > 0
+      ? totalTax / subtotalExclTax
+      : 0;
+
+  // Mixed tax rates: compute line-level EXCL conversions (fallback to order-level taxRate)
+  let grossSalesExclTaxFromLines = 0;
+  let discountsExclTaxFromLines = 0;
+  for (const lineItem of order.line_items || []) {
+    const priceIncl = parseFloat(lineItem.price || '0') || 0;
+    const qty = lineItem.quantity || 0;
+    const discountIncl = parseFloat(lineItem.total_discount || '0') || 0;
+    const taxTotal = parseFloat(lineItem.tax || '0') || 0;
+
+    const lineTotalIncl = priceIncl * qty;
+    const lineNetIncl = Math.max(0, lineTotalIncl - discountIncl);
+
+    let lineTaxRate = taxRate;
+    if (taxTotal > 0 && lineNetIncl > taxTotal) {
+      lineTaxRate = taxTotal / (lineNetIncl - taxTotal);
+    }
+
+    const lineGrossEx =
+      lineTaxRate > 0 ? lineTotalIncl / (1 + lineTaxRate) : lineTotalIncl;
+    const lineDiscountEx =
+      lineTaxRate > 0 ? discountIncl / (1 + lineTaxRate) : discountIncl;
+
+    grossSalesExclTaxFromLines += lineGrossEx;
+    discountsExclTaxFromLines += lineDiscountEx;
+
+    // 100% discount special: Shopify Analytics includes the tax component in both gross & discounts
+    if (
+      discountIncl > 0 &&
+      Math.abs(lineTotalIncl - discountIncl) < 0.01 &&
+      lineTaxRate > 0
+    ) {
+      const extraTax = ((priceIncl * lineTaxRate) / (1 + lineTaxRate)) * qty;
+      grossSalesExclTaxFromLines += extraTax;
+      discountsExclTaxFromLines += extraTax;
+    }
+  }
+  grossSalesExclTaxFromLines = Math.round(grossSalesExclTaxFromLines * 100) / 100;
+  discountsExclTaxFromLines = Math.round(discountsExclTaxFromLines * 100) / 100;
+
+  // Gross Sales strategy (mirrors lib/shopify/sales.ts)
+  let grossSales = 0;
+  if (totalTax === 0) {
+    if (grossSalesInclTax > 0) {
+      grossSales = grossSalesInclTax;
+    }
+  } else if (taxRate > 0 && grossSalesInclTax > 0) {
+    const taxRateDeviationFrom25 = Math.abs(taxRate - 0.25);
+    const USE_SUBTOTAL_PRICE_THRESHOLD = 0.001;
+
+    let totalDiscountsAmount = 0;
+    for (const li of order.line_items || []) {
+      totalDiscountsAmount += parseFloat(li.total_discount || '0');
+    }
+    const orderHasDiscounts = totalDiscountsAmount > 0.01 || discountsInclTax > 0.01;
+
+    const subtotalPriceTimesOnePlusTaxRate = subtotalPrice * (1 + taxRate);
+    const diffBetweenSubtotalAndSum = Math.abs(subtotalPriceTimesOnePlusTaxRate - grossSalesInclTax);
+    const SUBTOTAL_MATCHES_SUM_THRESHOLD = 1.0;
+
+    if (
+      taxRateDeviationFrom25 > USE_SUBTOTAL_PRICE_THRESHOLD &&
+      subtotalPrice > 0 &&
+      orderHasDiscounts &&
+      diffBetweenSubtotalAndSum < SUBTOTAL_MATCHES_SUM_THRESHOLD
+    ) {
+      // Special case discovered empirically: Shopify Analytics uses subtotal_price directly
+      grossSales = subtotalPrice;
+    } else {
+      grossSales = grossSalesExclTaxFromLines;
+    }
+  } else if (subtotalExclTax > 0) {
+    grossSales = subtotalExclTax;
+  } else if (grossSalesInclTax > 0) {
+    grossSales = grossSalesInclTax;
+  }
+  grossSales = Math.round(grossSales * 100) / 100;
+
+  // Discounts EXCL tax (prefer line-level conversion to handle mixed rates)
+  let discounts = discountsExclTaxFromLines;
+  discounts = Math.round(discounts * 100) / 100;
 
   // Calculate Returns EXCL tax: use refund_line_items[].subtotal if available
   // subtotal field contains refund amount EXCL tax
@@ -464,8 +967,8 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
   }
   returns = Math.round(returns * 100) / 100;
 
-  // Net Sales EXCL tax AFTER refunds
-  const netSales = Math.round((netSalesExclTaxBeforeRefunds - returns) * 100) / 100;
+  // Net Sales EXCL tax = gross_sales - discounts - returns (Shopify Analytics definition)
+  const netSales = Math.round((grossSales - discounts - returns) * 100) / 100;
 
   return { grossSales, discounts, returns, netSales };
 }
@@ -536,55 +1039,48 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
   const totalDiscounts = parseFloat(order.total_discounts || '0');
   const subtotalPrice = parseFloat(order.subtotal_price || '0');
   
-  // Shopify Gross Sales filtering logic:
-  // Include order if:
-  // - cancelled_at = null (not cancelled)
-  // Exclude order if:
-  // - order is cancelled (cancelled_at != null)
-  // - order is a test order (test === true OR tags contains "test")
-  // - order is a draft that is not "completed" (source_name === "shopify_draft_order" AND processed_at is null)
-  // - order has 0 kr in order value (subtotal_price = 0)
-
-  const isCancelled = order.cancelled_at !== null && order.cancelled_at !== '';
+  // Don't filter when saving to database - save ALL orders
+  // Filtering happens in aggregation (shopify_daily_sales, etc) based on gross_sales > 0
+  // Mark test orders but still calculate and save their sales values
   const isTestOrder = order.test === true || (order.tags?.toLowerCase().includes('test') ?? false);
-  const isDraftNotCompleted = order.source_name === 'shopify_draft_order' && processedAt === null;
-  // Only exclude zero subtotal if there are no line_items
-  // If there are line_items, even with discounts that make subtotal = 0, it should still count in Gross Sales
-  const hasLineItems = order.line_items && order.line_items.length > 0;
-  const hasZeroSubtotalNoItems = subtotalPrice === 0 && !hasLineItems;
-
-  const shouldExclude = isCancelled || isTestOrder || isDraftNotCompleted || hasZeroSubtotalNoItems;
   
-  // Calculate Gross Sales: SUM(line_item.price × line_item.quantity)
-  // This is the product price × quantity, BEFORE discounts, tax, shipping
-  let grossSales: number | null = null;
-  let netSales: number | null = null;
+  // Calculate sales for ALL orders (no filtering at save time)
+  // This calculates:
+  // - Gross Sales = SUM(line_item.price × quantity) EXCL tax
+  // - Discounts = SUM(line_item.total_discount)
+  // - Returns = SUM(refund_line_items.subtotal) EXCL tax
+  // - Net Sales EXCL tax = gross_sales - discounts - returns
+  const sales = totalPrice > 0 && order.line_items && order.line_items.length > 0
+    ? calculateShopifyLikeSalesInline(order)
+    : { grossSales: 0, discounts: 0, returns: 0, netSales: 0 };
 
-  if (!shouldExclude && totalPrice > 0) {
-    // Use Shopify-like sales calculation for refunds and discounts
-    // Note: This may return zeros if financial_status is invalid, but we'll use total_price as fallback
-    const sales = calculateShopifyLikeSalesInline(order);
-    
-    // Gross Sales should ALWAYS be set if order has total_price > 0
-    // Don't require line_items - orders can have total_price without line_items being fetched
-    // Gross Sales = total_price (Shopify's total_price, which is what should be used as gross_sales)
-    // This matches what user expects: gross_sales should be the same as total_price
-    grossSales = Math.round(totalPrice * 100) / 100;
-    
-    // Net Sales = Gross Sales - Discounts - Returns (to match file definition)
-    // File: Nettoförsäljning = Bruttoförsäljning + Rabatter
-    // Note: In file, Rabatter is NEGATIVE (-1584.32), so adding negative = subtracting
-    // In our system, sales.discounts is POSITIVE, so we subtract it
-    // File does NOT subtract tax from net sales
-    
-    // If calculateShopifyLikeSalesInline returned zeros (e.g., due to invalid financial_status),
-    // use totalPrice as a fallback for net_sales calculation
-    // This ensures we capture sales even if financial_status is null or invalid
-    const effectiveDiscounts = sales.discounts > 0 ? sales.discounts : totalDiscounts;
-    const effectiveReturns = sales.returns > 0 ? sales.returns : 0;
-    
-    netSales = Math.round((grossSales - effectiveDiscounts - effectiveReturns) * 100) / 100;
-  }
+  // Use the correctly calculated values from calculateShopifyLikeSalesInline
+  // Gross Sales = SUM of (line_item.price × quantity) for all line items EXCL tax
+  // Definition: Ungefärliga försäljningsintäkter, innan rabatter och returer räknas in över tid, exklusive skatt
+  // Save gross_sales for ALL orders (filtering happens in aggregation)
+  const grossSales = sales.grossSales > 0 ? sales.grossSales : null;
+  
+  // Tax = skatt på Gross Sales
+  // Calculate approximate tax on gross_sales using tax rate from subtotal
+  // tax_rate = total_tax / (subtotal_price - total_tax)
+  // tax = gross_sales * tax_rate
+  // Note: subtotalPrice and totalTax are already declared above
+  const subtotalPriceExclTax = subtotalPrice - totalTax;
+  const taxRate = subtotalPriceExclTax > 0 ? totalTax / subtotalPriceExclTax : 0;
+  const tax = grossSales && grossSales > 0 
+    ? Math.round((grossSales * taxRate) * 100) / 100
+    : null;
+  
+  // Total Sales = Gross Sales + Tax
+  // Definition: Exakt som Gross Sales men inkluderar skatt
+  const totalSales = grossSales && tax !== null 
+    ? Math.round((grossSales + tax) * 100) / 100
+    : null;
+  
+  // Net Sales EXCL tax = gross_sales - discounts - returns
+  // This is calculated correctly in calculateShopifyLikeSalesInline using Shopify Analytics formula
+  // Save net_sales for ALL orders (filtering happens in aggregation)
+  const netSales = sales.netSales !== 0 ? sales.netSales : null;
 
   // Extract country from billing_address (preferred) or shipping_address
   // Shopify API can provide country_code (ISO 2-letter) or country (full name)
@@ -600,24 +1096,67 @@ function mapShopifyOrderToRow(tenantId: string, order: ShopifyOrder): ShopifyOrd
     country = order.shipping_address.country;
   }
 
+  // Extract shipping and duties amounts from Shopify API
+  // total_shipping_price_set.shop_money.amount is shipping excluding tax
+  const shippingAmount = order.total_shipping_price_set?.shop_money?.amount
+    ? parseFloat(order.total_shipping_price_set.shop_money.amount)
+    : null;
+  
+  // For shipping_tax, we'd need current_total_tax_set or similar, but Shopify API doesn't always provide this breakdown
+  // Setting to null for now - can be enhanced later if needed
+  const shippingTax: number | null = null;
+  
+  const dutiesAmount = order.total_duties_set?.shop_money?.amount
+    ? parseFloat(order.total_duties_set.shop_money.amount)
+    : null;
+  
+  // Additional fees are not directly available in Shopify Admin API
+  // They may appear in some setups (marketplace fees, payment fees), but require custom handling
+  const additionalFeesAmount: number | null = null;
+
+  // Revenue (Omsättning) = net_sales + tax + shipping_amount
+  // Definition: Net Sales + Tax + Fraktavgifter
+  const revenue = netSales !== null && tax !== null && shippingAmount !== null
+    ? Math.round((netSales + tax + shippingAmount) * 100) / 100
+    : (netSales !== null && tax !== null
+      ? Math.round((netSales + tax + (shippingAmount || 0)) * 100) / 100
+      : null);
+
+  // Extract full timestamp for created_at_ts (ISO string from Shopify API)
+  const createdAtTimestamp = order.created_at
+    ? new Date(order.created_at).toISOString()
+    : null;
+
   return {
     tenant_id: tenantId,
     order_id: order.id.toString(),
     processed_at: processedAt,
-    total_price: totalPrice || null,
-    total_tax: totalTax || null,
-    discount_total: sales.discounts || null,
-    total_refunds: sales.returns || null,
+    created_at: orderCreatedAt, // Date string (YYYY-MM-DD) for aggregations
+    created_at_ts: createdAtTimestamp, // Full timestamp (ISO) for deterministic classification
+    total_sales: totalSales || null, // Gross Sales + Tax (produkter före rabatter, inklusive skatt)
+    tax: tax || null, // Skatt på Gross Sales
+    total_tax: totalTax || null, // Total tax från Shopify API (tax på subtotal_price, dvs efter rabatter)
+    discount: sales.discounts || null,
+    refunds: sales.returns || null,
     currency: order.currency || null,
     customer_id: order.customer?.id?.toString() || null,
     financial_status: order.financial_status || null,
     fulfillment_status: order.fulfillment_status || null,
     source_name: order.source_name || null,
     is_refund: isRefund,
-    gross_sales: grossSales,
+    gross_sales: grossSales, // Produkter före rabatter, exklusive skatt
     net_sales: netSales,
-    is_new_customer: false, // Will be determined during batch processing
+    revenue: revenue, // Omsättning: net_sales + tax + shipping_amount
+    is_new_customer: false, // Will be determined using customer_stats
+    is_first_order_for_customer: false, // Will be determined using customer_stats
+    customer_type_shopify_mode: null, // Will be determined using customer_stats
+    customer_type_financial_mode: null, // DEPRECATED
     country: country || null,
+    shipping_amount: shippingAmount,
+    shipping_tax: shippingTax,
+    duties_amount: dutiesAmount,
+    additional_fees_amount: additionalFeesAmount,
+    is_test: isTestOrder,
   };
 }
 
@@ -662,30 +1201,33 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
 
     // Add all orders (both regular orders and refunds) to totals
     const netValue = row.net_sales ?? 0;
-    existing.revenue += row.total_price ?? 0;
-    // Total Sales = total_price + tax (the actual total sales including tax)
-    const totalSales = (row.total_price ?? 0) + (row.total_tax ?? 0);
-    existing.total_sales += totalSales;
+    // Gross Sales = SUM(line_item.price × quantity) for each order (BEFORE discounts, tax, shipping)
+    // This is stored in row.gross_sales
+    // grossSalesValue was already declared above in the filter check, reuse it
+    existing.revenue += grossSalesValue;
+    // total_sales should also use gross_sales (same as revenue for Shopify)
+    existing.total_sales += grossSalesValue;
     existing.total_tax += row.total_tax ?? 0;
     existing.net_sales += netValue;
     
-    // Only count conversions for non-refund orders
-    if (!row.is_refund) {
-      existing.conversions += 1;
-      
-      // Track currency frequency (use most common currency for the day)
-      if (row.currency) {
-        const count = existing.currencies.get(row.currency) ?? 0;
-        existing.currencies.set(row.currency, count + 1);
-      }
-      
-      if (row.is_new_customer) {
-        existing.new_customer_conversions += 1;
-        existing.new_customer_net_sales += netValue;
-      } else {
-        existing.returning_customer_conversions += 1;
-        existing.returning_customer_net_sales += netValue;
-      }
+    // Count ALL orders with gross_sales > 0 as "orders" (Shopify Analytics behavior)
+    // No filtering on is_refund - only gross_sales > 0 matters
+    existing.conversions += 1;
+    
+    // Track currency frequency (use most common currency for the day)
+    if (row.currency) {
+      const count = existing.currencies.get(row.currency) ?? 0;
+      existing.currencies.set(row.currency, count + 1);
+    }
+    
+    // Use is_first_order_for_customer for correct classification
+    // is_new_customer is kept for backward compatibility but should match is_first_order_for_customer
+    if (row.is_first_order_for_customer === true) {
+      existing.new_customer_conversions += 1;
+      existing.new_customer_net_sales += netValue;
+    } else {
+      existing.returning_customer_conversions += 1;
+      existing.returning_customer_net_sales += netValue;
     }
     byDate.set(row.processed_at, existing);
   }
@@ -703,8 +1245,9 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
       }
     }
     
-    // Gross Sales = sum of gross_sales from shopify_orders (which is now total_price)
-    // This is the same as revenue, but kept separate for clarity
+    // Gross Sales = sum of gross_sales from shopify_orders
+    // gross_sales = SUM(line_item.price × quantity) for each order (BEFORE discounts, tax, shipping)
+    // revenue is now correctly set to sum of gross_sales (we fixed it above)
     const grossSales = values.revenue;
     
     return {
@@ -723,42 +1266,78 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
       aov,
       cos: null,
       roas: null,
+      total_tax: values.total_tax || null, // Include total_tax for shopify_daily_sales calculation
     };
   });
 }
 
-async function upsertJobLog(client: SupabaseClient, payload: {
-  tenantId: string;
-  status: 'pending' | 'running' | 'succeeded' | 'failed';
-  error?: string;
-  startedAt: string;
-  finishedAt?: string;
-}) {
-  const { error } = await client.from('jobs_log').insert({
-    tenant_id: payload.tenantId,
-    source: SOURCE,
-    status: payload.status,
-    started_at: payload.startedAt,
-    finished_at: payload.finishedAt ?? null,
-    error: payload.error ?? null,
-  });
+async function upsertJobLog(
+  client: SupabaseClient,
+  payload: {
+    tenantId: string;
+    status: 'pending' | 'running' | 'succeeded' | 'failed';
+    error?: string;
+    startedAt: string;
+    finishedAt?: string;
+    jobLogId?: string; // If provided, update this specific job log entry
+  },
+): Promise<string | null> {
+  // If we have a jobLogId, update the existing entry
+  if (payload.jobLogId) {
+    const { error, data } = await client
+      .from('jobs_log')
+      .update({
+        status: payload.status,
+        finished_at: payload.finishedAt ?? null,
+        error: payload.error ?? null,
+      })
+      .eq('id', payload.jobLogId)
+      .select('id')
+      .single();
+
+    if (error) {
+      console.error(`Failed to update jobs_log ${payload.jobLogId} for tenant ${payload.tenantId}:`, error);
+      return null;
+    }
+    return data?.id ?? null;
+  }
+
+  // Otherwise, insert new entry (for initial 'running' status)
+  const { error, data } = await client
+    .from('jobs_log')
+    .insert({
+      tenant_id: payload.tenantId,
+      source: SOURCE,
+      status: payload.status,
+      started_at: payload.startedAt,
+      finished_at: payload.finishedAt ?? null,
+      error: payload.error ?? null,
+    })
+    .select('id')
+    .single();
 
   if (error) {
-    console.error(`Failed to write jobs_log for tenant ${payload.tenantId}:`, error);
+    console.error(`Failed to insert jobs_log for tenant ${payload.tenantId}:`, error);
+    return null;
   }
+  return data?.id ?? null;
 }
 
 async function processTenant(client: SupabaseClient, connection: ShopifyConnection): Promise<JobResult> {
   const tenantId = connection.tenant_id;
   const startedAt = new Date().toISOString();
 
-  let jobLogInserted = false;
+  // Version stamp for operational parity verification
+  const SYNC_VERSION = 'phase3-20250111';
+  console.log(`[sync-shopify] SYNC_VERSION=${SYNC_VERSION} - Starting sync for tenant ${tenantId}`);
+
+  // Insert initial 'running' job log entry and save the ID for updates
+  let jobLogId: string | null = null;
   try {
-    await upsertJobLog(client, { tenantId, status: 'running', startedAt });
-    jobLogInserted = true;
+    jobLogId = await upsertJobLog(client, { tenantId, status: 'running', startedAt });
   } catch (logError) {
     console.error(`Failed to insert initial job log for tenant ${tenantId}:`, logError);
-    // Continue anyway - we'll try to update it later
+    // Continue anyway - we'll try to create it later if needed
   }
 
   try {
@@ -786,86 +1365,173 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
           ? syncStartDate
           : undefined;
 
-    // Fetch orders from Shopify
+    // Fetch orders from Shopify using GraphQL API with processed_at filter
+    // This matches the backfill script's approach for consistency
     console.log(`[sync-shopify] Fetching orders for tenant ${tenantId}, shop ${normalizedShop}, since ${since || 'all time'}`);
-    const shopifyOrders = await fetchShopifyOrders({
+    
+    // For daily syncs, if 'since' is a single date, fetch that entire day
+    // Otherwise, if a date range is provided, use it
+    let until: string | undefined = undefined;
+    if (since) {
+      // If since is just a date (YYYY-MM-DD), fetch the entire day
+      if (since.match(/^\d{4}-\d{2}-\d{2}$/)) {
+        until = `${since}T23:59:59Z`;
+        since = `${since}T00:00:00Z`;
+      } else {
+        // If since includes time, use it as-is and don't set until (fetch from since onwards)
+        until = undefined;
+      }
+    }
+    
+    // Fetch ALL orders without filtering - filtering happens in database/frontend
+    const shopifyOrders = await fetchShopifyOrdersGraphQL({
       shopDomain: normalizedShop,
       accessToken,
       since,
+      until,
+      filterBy: 'processed_at', // Use processed_at filter (same as backfill)
+      excludeTest: false, // Don't filter - fetch all orders, filtering happens in DB/frontend
     });
 
     console.log(`[sync-shopify] Fetched ${shopifyOrders.length} orders for tenant ${tenantId}`);
 
-    // Map to database rows
-    let orderRows = shopifyOrders.map((order) => mapShopifyOrderToRow(tenantId, order));
+    // Map to database rows (need to preserve original order for customer_stats timestamp)
+    const orderRowsWithOriginal: Array<{ row: ShopifyOrderRow; originalOrder: ShopifyOrder }> = shopifyOrders.map((order) => ({
+      row: mapShopifyOrderToRow(tenantId, order),
+      originalOrder: order,
+    }));
 
-    // Determine if customers are new or returning
-    // Sort orders by processed_at (oldest first) to process chronologically
-    orderRows.sort((a, b) => {
-      if (!a.processed_at) return 1;
-      if (!b.processed_at) return -1;
-      return a.processed_at.localeCompare(b.processed_at);
-    });
+    // Step 1: Update customer_stats for all orders in batch (MIN-merge)
+    // Collect customer stats updates (using original order.created_at timestamp for accurate comparison)
+    const customerStatsUpdates = new Map<string, {
+      tenantId: string;
+      customerId: string;
+      firstOrderAt: string; // ISO timestamp from order.created_at
+      firstOrderId: string;
+    }>();
 
-    // Get all unique customer IDs from this batch
-    const customerIdsInBatch = new Set<string>();
-    orderRows.forEach((row) => {
-      if (row.customer_id) {
-        customerIdsInBatch.add(row.customer_id);
-      }
-    });
-
-    // Bulk check: Get earliest processed_at for each customer from database
-    const customerEarliestOrder = new Map<string, string | null>();
-    if (customerIdsInBatch.size > 0) {
-      const { data: existingOrders, error: lookupError } = await client
-        .from('shopify_orders')
-        .select('customer_id, processed_at')
-        .eq('tenant_id', tenantId)
-        .in('customer_id', Array.from(customerIdsInBatch))
-        .not('customer_id', 'is', null)
-        .not('processed_at', 'is', null);
-
-      if (!lookupError && existingOrders) {
-        for (const order of existingOrders) {
-          const customerId = order.customer_id as string;
-          const processedAt = order.processed_at as string;
-          const currentEarliest = customerEarliestOrder.get(customerId);
-          if (!currentEarliest || (processedAt && processedAt < currentEarliest)) {
-            customerEarliestOrder.set(customerId, processedAt);
-          }
+    for (const { row, originalOrder } of orderRowsWithOriginal) {
+      if (!row.customer_id || !originalOrder.created_at) continue;
+      
+      const customerId = row.customer_id;
+      const orderCreatedAtTimestamp = originalOrder.created_at; // ISO timestamp from API
+      const orderId = row.order_id;
+      
+      const existing = customerStatsUpdates.get(customerId);
+      if (!existing) {
+        customerStatsUpdates.set(customerId, {
+          tenantId,
+          customerId,
+          firstOrderAt: orderCreatedAtTimestamp,
+          firstOrderId: orderId,
+        });
+      } else {
+        // MIN-merge: if this order is earlier, or same timestamp but smaller order_id
+        if (
+          orderCreatedAtTimestamp < existing.firstOrderAt ||
+          (orderCreatedAtTimestamp === existing.firstOrderAt && orderId < existing.firstOrderId)
+        ) {
+          existing.firstOrderAt = orderCreatedAtTimestamp;
+          existing.firstOrderId = orderId;
         }
       }
     }
 
-    // Track customers seen in this batch chronologically
-    const customersSeenInBatch = new Map<string, string>();
+    // Upsert customer_stats (using SQL function for atomic MIN-merge)
+    // Note: We use upsert_shopify_customer_stats (not the new RPC) for batch processing
+    // The new RPC (upsert_and_classify_shopify_customer_order) is used in webhook for single orders
+    if (customerStatsUpdates.size > 0) {
+      for (const stats of customerStatsUpdates.values()) {
+        const { error: statsError } = await client.rpc('upsert_shopify_customer_stats', {
+          p_tenant_id: stats.tenantId,
+          p_customer_id: stats.customerId,
+          p_first_order_at: stats.firstOrderAt,
+          p_first_order_id: stats.firstOrderId,
+        });
 
-    // Determine is_new_customer for each order
-    orderRows = orderRows.map((row) => {
-      if (!row.customer_id || !row.processed_at) {
-        return { ...row, is_new_customer: false };
+        if (statsError) {
+          console.error(
+            `[sync-shopify] Failed to upsert customer_stats for customer ${stats.customerId}:`,
+            statsError.message,
+          );
+          // Continue processing even if stats update fails
+        }
       }
+    }
 
-      // Check if we've seen this customer earlier in this batch
-      const seenInBatchAt = customersSeenInBatch.get(row.customer_id);
-      if (seenInBatchAt && seenInBatchAt < row.processed_at) {
-        customersSeenInBatch.set(row.customer_id, seenInBatchAt);
-        return { ...row, is_new_customer: false };
-      }
+    // Step 2: Fetch customer_stats for all customers in batch
+    const customerStatsMap = new Map<string, { first_order_at: string; first_order_id: string }>();
+    if (customerStatsUpdates.size > 0) {
+      const { data: customerStats, error: statsFetchError } = await client
+        .from('shopify_customer_stats')
+        .select('customer_id, first_order_at, first_order_id')
+        .eq('tenant_id', tenantId)
+        .in('customer_id', Array.from(customerStatsUpdates.keys()));
 
-      // Check if customer exists in database with earlier order
-      const earliestInDb = customerEarliestOrder.get(row.customer_id);
-      if (earliestInDb && earliestInDb < row.processed_at) {
-        customersSeenInBatch.set(row.customer_id, earliestInDb);
-        return { ...row, is_new_customer: false };
+      if (statsFetchError) {
+        console.error('[sync-shopify] Failed to fetch customer_stats:', statsFetchError.message);
+        // Continue but classification may be incorrect
+      } else if (customerStats) {
+        for (const stats of customerStats) {
+          customerStatsMap.set(stats.customer_id, {
+            first_order_at: stats.first_order_at,
+            first_order_id: stats.first_order_id || '',
+          });
+        }
       }
+    }
 
-      // This is a new customer (first order in batch and no earlier order in DB)
-      if (!seenInBatchAt) {
-        customersSeenInBatch.set(row.customer_id, row.processed_at);
+    // Step 3: Classify each order deterministically based on customer_stats
+    let orderRows = orderRowsWithOriginal.map(({ row, originalOrder }) => {
+      // Handle guest checkout or missing customer_id
+      if (!row.customer_id || !row.created_at_ts || !originalOrder.created_at) {
+        return {
+          ...row,
+          is_new_customer: false,
+          is_first_order_for_customer: false,
+          customer_type_shopify_mode: row.customer_id ? null : 'GUEST',
+          customer_type_financial_mode: null,
+        };
       }
-      return { ...row, is_new_customer: true };
+      
+      const stats = customerStatsMap.get(row.customer_id);
+      if (!stats) {
+        // Customer not in stats yet (shouldn't happen after upsert, but handle gracefully)
+        console.warn(`[sync-shopify] Customer ${row.customer_id} not found in customer_stats`);
+        return {
+          ...row,
+          is_new_customer: false,
+          is_first_order_for_customer: false,
+          customer_type_shopify_mode: 'RETURNING',
+          customer_type_financial_mode: null,
+        };
+      }
+      
+      // Deterministic classification: is_first if timestamp matches AND order_id matches
+      // Compare ISO timestamp string from API with timestamptz from stats
+      // Convert both to ISO strings for accurate comparison (handles timezone normalization)
+      const orderCreatedAtTimestamp = originalOrder.created_at; // ISO timestamp string from API
+      const statsFirstOrderAt = stats.first_order_at; // timestamptz from database (ISO string format)
+      
+      // Normalize both to ISO strings for comparison
+      // This handles timezone differences and ensures accurate timestamp comparison
+      const orderTimestamp = new Date(orderCreatedAtTimestamp).toISOString();
+      const statsTimestamp = new Date(statsFirstOrderAt).toISOString();
+      
+      // Compare timestamps: must match exactly
+      // For same timestamp, use order_id as tie-breaker (exact match required)
+      const isFirstOrder = 
+        orderTimestamp === statsTimestamp &&
+        row.order_id === stats.first_order_id; // Exact match required (no fallback to null check)
+      
+      // Set all classification fields consistently
+      return {
+        ...row,
+        is_new_customer: isFirstOrder, // For backward compatibility
+        is_first_order_for_customer: isFirstOrder,
+        customer_type_shopify_mode: isFirstOrder ? 'FIRST_TIME' : 'RETURNING',
+        customer_type_financial_mode: null, // DEPRECATED
+      };
     });
 
     if (orderRows.length > 0) {
@@ -876,6 +1542,244 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       if (upsertError) {
         throw new Error(upsertError.message);
       }
+
+      // Process refunds and populate shopify_refunds table
+      // CRITICAL: Process refunds from BOTH main orders AND lookback orders.
+      // We need to find ALL product-related refunds where refund_processed_at falls
+      // in our target period, regardless of when the order was processed_at.
+      //
+      // Process refunds and populate shopify_refunds table.
+      //
+      // NOTE: shopify_refunds is primarily a line-item level ledger for debugging.
+      // The canonical source for Returns in analytics will be shopify_transactions
+      // (kind = 'refund'), which is built from refund.transactions and, in
+      // backfills, from GraphQL payment transactions.
+      //
+      // Shopify Analytics \"Returns\" includes:
+      //   - Line item refunds (refund_line_items.subtotal_set.shop_money.amount)
+      //   - Custom refunds that do not have refund_line_items (only transactions)
+      //
+      // but EXCLUDES:
+      //   - Tax refunds
+      //   - Shipping refunds
+      const refundRows: Array<{
+        tenant_id: string;
+        shopify_order_id: string;
+        shopify_refund_id: string;
+        refund_processed_at: string;
+        refunded_subtotal: number;
+        refunded_tax: number;
+        refunded_shipping: number;
+        currency: string | null;
+      }> = [];
+
+      // Determine target period for refund filtering (if we have a since date).
+      // When present, we only keep refunds whose refund_processed_at falls inside
+      // this window – matching Shopify Analytics which attributes returns on
+      // refund date, not order date.
+      let refundPeriodStart: Date | null = null;
+      let refundPeriodEnd: Date | null = null;
+      if (since) {
+        refundPeriodStart = new Date(since);
+        refundPeriodEnd = new Date(); // Current date as end
+      }
+
+      // Track how many refund transactions we upsert to the transaction ledger
+      let refundTransactionsUpserted = 0;
+
+      // Process refunds from main orders (for orders in target period)
+      for (const { originalOrder } of orderRowsWithOriginal) {
+        if (!originalOrder.refunds || originalOrder.refunds.length === 0) continue;
+
+        for (const refund of originalOrder.refunds) {
+          // STEP A: Calculate refunded_subtotal from refund_line_items (line item refunds, excl. tax)
+          let refundedSubtotal = 0;
+          if (refund.refund_line_items && refund.refund_line_items.length > 0) {
+            for (const refundLineItem of refund.refund_line_items) {
+              // Prefer subtotal_set.shop_money.amount if available (most accurate)
+              if (refundLineItem.subtotal_set?.shop_money?.amount) {
+                refundedSubtotal += parseFloat(refundLineItem.subtotal_set.shop_money.amount);
+              } else if (refundLineItem.subtotal) {
+                // Fallback to subtotal string
+                refundedSubtotal += parseFloat(refundLineItem.subtotal);
+              }
+            }
+          }
+
+          // STEP B: Fallback – handle custom refunds without refund_line_items.
+          // Shopify Analytics still counts these as \"Returns\".
+          //
+          // When there are no line item subtotals, approximate the product refund
+          // portion from refund.transactions. We:
+          //   - Treat kind='refund' + gateway=null as tax/shipping (handled below)
+          //   - Treat kind='refund' + gateway!=null as product-level refund
+          if (
+            refundedSubtotal === 0 &&
+            refund.transactions &&
+            refund.transactions.length > 0
+          ) {
+            for (const transaction of refund.transactions) {
+              const amount = parseFloat(transaction.amount || '0');
+              if (!Number.isFinite(amount) || amount <= 0) continue;
+
+              // Product-level refund approximation: kind='refund' with a gateway.
+              // Tax/shipping refunds (kind='refund' + gateway=null) are handled
+              // separately and should not be counted as product returns.
+              if (transaction.kind === 'refund' && transaction.gateway) {
+                refundedSubtotal += amount;
+              }
+            }
+          }
+
+          // STEP C: Calculate refunded_tax and refunded_shipping from transactions.
+          // Shopify refund transactions have kind='refund' and gateway=null for
+          // tax/shipping refunds. We conservatively attribute these amounts to tax.
+          let refundedTax = 0;
+          let refundedShipping = 0;
+          if (refund.transactions && refund.transactions.length > 0) {
+            for (const transaction of refund.transactions) {
+              const amount = parseFloat(transaction.amount || '0');
+              // For tax refunds: kind='refund' and gateway is null
+              // For shipping refunds: similar pattern (may need refinement based on actual data)
+              if (transaction.kind === 'refund' && !transaction.gateway) {
+                // Shopify doesn't always break down tax vs shipping in transactions
+                // This is an approximation - may need refinement
+                refundedTax += amount; // Conservative: attribute to tax
+              }
+            }
+          }
+
+          // Use refund.processed_at if available (preferred), otherwise fallback to created_at
+          // This is critical for accurate time series matching with Shopify Analytics
+          const refundDate = refund.processed_at || refund.created_at;
+          
+          // FILTER: Only include refunds where refund_processed_at falls in our target period
+          // This ensures we count refunds by refund date, not order date (matching Shopify Analytics)
+          if (refundPeriodStart && refundPeriodEnd) {
+            const refundDateObj = new Date(refundDate);
+            if (refundDateObj < refundPeriodStart || refundDateObj > refundPeriodEnd) {
+              // Skip refunds outside our target period
+              continue;
+            }
+          }
+          
+          refundRows.push({
+            tenant_id: tenantId,
+            shopify_order_id: originalOrder.id.toString(),
+            shopify_refund_id: refund.id.toString(),
+            refund_processed_at: refundDate,
+            refunded_subtotal: refundedSubtotal,
+            refunded_tax: refundedTax,
+            refunded_shipping: refundedShipping,
+            currency: originalOrder.currency || null,
+          });
+        }
+      }
+
+      // Upsert refunds if any
+      if (refundRows.length > 0) {
+        const { error: refundsError } = await client
+          .from('shopify_refunds')
+          .upsert(refundRows, {
+            onConflict: 'tenant_id,shopify_order_id,shopify_refund_id',
+          });
+
+        if (refundsError) {
+          console.error('[sync-shopify] Failed to upsert refunds:', refundsError.message);
+          // Continue processing even if refunds update fails (non-critical)
+        } else {
+          console.log(`[sync-shopify] Upserted ${refundRows.length} refund events`);
+        }
+      }
+
+      // Build transaction ledger rows from refund.transactions (kind = 'refund').
+      // This provides a near real-time transaction ledger; historical completeness
+      // comes from the GraphQL-powered backfill script which also writes to
+      // shopify_transactions.
+      const transactionRows: Array<{
+        tenant_id: string;
+        order_id: string;
+        shopify_transaction_id: string;
+        processed_at: string;
+        kind: string;
+        amount: number;
+        currency: string | null;
+        gateway: string | null;
+        status: string | null;
+        test: boolean | null;
+      }> = [];
+
+      for (const { originalOrder } of orderRowsWithOriginal) {
+        if (!originalOrder.refunds || originalOrder.refunds.length === 0) continue;
+
+        const orderIdStr = originalOrder.id.toString();
+
+        for (const refund of originalOrder.refunds) {
+          if (!refund.transactions || refund.transactions.length === 0) continue;
+
+          for (const tx of refund.transactions) {
+            if (tx.kind !== 'refund') continue;
+
+            const amount = parseFloat(tx.amount || '0');
+            if (!Number.isFinite(amount) || amount <= 0) continue;
+
+            const processedAt =
+              tx.processed_at ||
+              tx.created_at ||
+              refund.processed_at ||
+              refund.created_at;
+
+            const currency = tx.currency || originalOrder.currency || null;
+            const status = (tx.status as string | null) ?? null;
+            const test =
+              typeof tx.test === 'boolean'
+                ? tx.test
+                : typeof originalOrder.test === 'boolean'
+                  ? originalOrder.test
+                  : null;
+
+            const txId =
+              (tx.id !== undefined && tx.id !== null
+                ? String(tx.id)
+                : `${orderIdStr}-${refund.id}-${tx.kind}-${processedAt}`) || '';
+
+            transactionRows.push({
+              tenant_id: tenantId,
+              order_id: orderIdStr,
+              shopify_transaction_id: txId,
+              processed_at: processedAt,
+              kind: tx.kind,
+              amount,
+              currency,
+              gateway: tx.gateway,
+              status,
+              test,
+            });
+          }
+        }
+      }
+
+      if (transactionRows.length > 0) {
+        const { error: txError } = await client
+          .from('shopify_transactions')
+          .upsert(transactionRows, {
+            onConflict: 'tenant_id,shopify_transaction_id',
+          });
+
+        if (txError) {
+          console.error('[sync-shopify] Failed to upsert transactions:', txError.message);
+        } else {
+          refundTransactionsUpserted = transactionRows.length;
+          console.log(
+            `[sync-shopify] Upserted ${refundTransactionsUpserted} refund transactions to shopify_transactions`,
+          );
+        }
+      }
+
+      // Log sync summary for operational parity verification
+      console.log(
+        `[sync-shopify] SYNC_VERSION=${SYNC_VERSION} - Summary: ${orderRows.length} orders updated, ${refundRows.length} refunds upserted, ${refundTransactionsUpserted} refund transactions upserted`,
+      );
 
       const aggregates = aggregateKpis(orderRows);
       const kpiRows = aggregates.map((row) => ({
@@ -906,12 +1810,92 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
         throw new Error(kpiError.message);
       }
 
-      // Note: Daily sales aggregation by mode (shopify/financial) requires GraphQL data
-      // (line items, refunds with subtotalSet, etc.) which is not available via REST API.
-      // This is handled by:
-      // 1. Backfill script (scripts/shopify_backfill.ts) - calculates both modes
-      // 2. Webhook handler (app/api/webhooks/shopify/route.ts) - uses GraphQL for new orders
-      // Edge function focuses on order-level data sync via REST API.
+      // Update shopify_daily_sales for all dates that were affected by this sync
+      // We need to recalculate from ALL orders for each date (not just the synced ones)
+      // to ensure accuracy - this matches the logic in recalculate_all_shopify_daily_sales.ts
+      const uniqueDates = Array.from(new Set(aggregates.map((a) => a.date)));
+      
+      for (const date of uniqueDates) {
+        // Fetch ALL orders for this date from database
+        const { data: dateOrders, error: dateOrdersError } = await client
+          .from('shopify_orders')
+          .select('processed_at, gross_sales, net_sales, discount, refunds, currency, is_first_order_for_customer, is_refund')
+          .eq('tenant_id', tenantId)
+          .eq('processed_at', date)
+          .not('gross_sales', 'is', null)
+          .gt('gross_sales', 0);
+
+        if (dateOrdersError) {
+          console.error(`[sync-shopify] Failed to fetch orders for date ${date}:`, dateOrdersError.message);
+          continue;
+        }
+
+        // Aggregate for this date from ALL orders
+        let grossSales = 0;
+        let netSales = 0;
+        let discounts = 0;
+        let refunds = 0;
+        let ordersCount = 0;
+        let newCustomerNetSales = 0;
+        let returningCustomerNetSales = 0;
+        let currency: string | null = null;
+
+        for (const order of dateOrders || []) {
+          const gross = parseFloat((order.gross_sales || 0).toString());
+          const net = parseFloat((order.net_sales || 0).toString());
+          const disc = parseFloat((order.discount || 0).toString());
+          const ref = parseFloat((order.refunds || 0).toString());
+
+          grossSales += gross;
+          netSales += net;
+          discounts += disc;
+          refunds += ref;
+
+          // Count ALL orders with gross_sales > 0 (Shopify Analytics behavior)
+          // Only filter: gross_sales > 0 (already filtered in the query above)
+          // No filtering on is_refund - Shopify counts all orders with gross_sales > 0
+          ordersCount += 1;
+          
+          if (order.is_first_order_for_customer === true) {
+            newCustomerNetSales += net;
+          } else if (order.is_first_order_for_customer === false) {
+            returningCustomerNetSales += net;
+          }
+
+          if (!currency && order.currency) {
+            currency = order.currency as string;
+          }
+        }
+
+        // Upsert shopify_daily_sales for this date
+        const { error: dailySalesError } = await client
+          .from('shopify_daily_sales')
+          .upsert(
+            {
+              tenant_id: tenantId,
+              date: date,
+              mode: 'shopify',
+              gross_sales_excl_tax: grossSales,
+              net_sales_excl_tax: netSales,
+              discounts_excl_tax: discounts,
+              refunds_excl_tax: refunds,
+              orders_count: ordersCount,
+              currency: currency,
+              new_customer_net_sales: newCustomerNetSales,
+              returning_customer_net_sales: returningCustomerNetSales,
+              guest_net_sales: 0,
+            },
+            {
+              onConflict: 'tenant_id,date,mode',
+            },
+          );
+
+        if (dailySalesError) {
+          console.error(`[sync-shopify] Failed to upsert shopify_daily_sales for date ${date}:`, dailySalesError.message);
+        }
+      }
+      
+      console.log(`[sync-shopify] Updated shopify_daily_sales for ${uniqueDates.length} dates for tenant ${tenantId}`);
     }
 
     if (backfillSince) {
@@ -943,38 +1927,48 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       status: 'succeeded',
       startedAt,
       finishedAt: new Date().toISOString(),
+      jobLogId,
     });
 
     return { tenantId, status: 'succeeded', inserted: orderRows.length };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[sync-shopify] Error processing tenant ${tenantId}:`, message);
-    await upsertJobLog(client, {
-      tenantId,
-      status: 'failed',
-      startedAt,
-      finishedAt: new Date().toISOString(),
-      error: message,
-    });
+    
+    // Update existing job log if we have an ID, otherwise create new one
+    if (jobLogId) {
+      await upsertJobLog(client, {
+        tenantId,
+        status: 'failed',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        error: message,
+        jobLogId,
+      });
+    } else {
+      // Fallback: create new entry if we don't have jobLogId
+      await upsertJobLog(client, {
+        tenantId,
+        status: 'failed',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        error: message,
+      });
+    }
 
     return { tenantId, status: 'failed', error: message };
   } finally {
-    // Ensure job log is always updated, even if the try-catch above fails
-    if (jobLogInserted) {
+    // Ensure job log is always updated if we have a jobLogId but it's still in running status
+    if (jobLogId) {
       try {
         // Check if job log was already updated (has finished_at)
         const { data: existingJob } = await client
           .from('jobs_log')
           .select('finished_at')
-          .eq('tenant_id', tenantId)
-          .eq('source', SOURCE)
-          .eq('status', 'running')
-          .eq('started_at', startedAt)
-          .order('started_at', { ascending: false })
-          .limit(1)
+          .eq('id', jobLogId)
           .maybeSingle();
 
-        // Only update if still in running status
+        // Only update if still in running status (no finished_at)
         if (existingJob && !existingJob.finished_at) {
           await upsertJobLog(client, {
             tenantId,
@@ -982,6 +1976,7 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
             startedAt,
             finishedAt: new Date().toISOString(),
             error: 'Job execution was interrupted or failed unexpectedly',
+            jobLogId,
           });
         }
       } catch (finalError) {
@@ -1049,4 +2044,3 @@ serve(async (request) => {
     });
   }
 });
-

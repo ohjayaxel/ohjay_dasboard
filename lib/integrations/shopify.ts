@@ -8,7 +8,9 @@ const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const APP_BASE_URL = process.env.APP_BASE_URL ?? 'http://localhost:3000';
 
-const SHOPIFY_SCOPES = ['read_orders', 'read_customers'];
+// Needed for item-level matching (product/variant IDs) in analytics reconciliation.
+// Safe to request; existing installs will require re-auth to grant the new scope.
+const SHOPIFY_SCOPES = ['read_orders', 'read_customers', 'read_products'];
 
 type ConnectionRow = {
   id: string;

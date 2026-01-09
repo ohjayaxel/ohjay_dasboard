@@ -1,6 +1,8 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+// Support both Next.js-style NEXT_PUBLIC_SUPABASE_URL and server-side SUPABASE_URL.
+// Scripts/backfills often set SUPABASE_URL only; the app typically sets NEXT_PUBLIC_SUPABASE_URL.
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 let cachedServiceClient: SupabaseClient | undefined;
@@ -13,7 +15,7 @@ function assertServerEnv() {
 
 function ensureEnvVars() {
   if (!SUPABASE_URL) {
-    throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL environment variable.');
+    throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL environment variable.');
   }
 
   if (!SUPABASE_SERVICE_ROLE_KEY) {

@@ -80,6 +80,12 @@ export type GraphQLOrder = {
         sku: string | null;
         name: string;
         quantity: number;
+        product?: {
+          id: string;
+        } | null;
+        variant?: {
+          id: string;
+        } | null;
         originalUnitPriceSet: {
           shopMoney: {
             amount: string;
@@ -114,6 +120,31 @@ export type GraphQLOrder = {
   refunds: Array<{
     id: string;
     createdAt: string;
+    totalRefundedSet?: {
+      shopMoney: {
+        amount: string;
+        currencyCode: string;
+      };
+    } | null;
+    orderAdjustments?: {
+      edges: Array<{
+        node: {
+          reason?: string | null;
+          amountSet?: {
+            shopMoney: {
+              amount: string;
+              currencyCode: string;
+            };
+          } | null;
+          taxAmountSet?: {
+            shopMoney: {
+              amount: string;
+              currencyCode: string;
+            };
+          } | null;
+        };
+      }>;
+    } | null;
     refundLineItems: {
       edges: Array<{
         node: {
@@ -138,6 +169,22 @@ export type GraphQLOrder = {
         };
       }>;
     };
+    transactions?: {
+      edges: Array<{
+        node: {
+          id: string;
+          kind: string;
+          status: string;
+          processedAt?: string | null;
+          amountSet?: {
+            shopMoney: {
+              amount: string;
+              currencyCode: string;
+            };
+          };
+        };
+      }>;
+    } | null;
   }>;
 };
 
@@ -241,6 +288,12 @@ const ORDERS_QUERY = `
                 sku
                 name
                 quantity
+                product {
+                  id
+                }
+                variant {
+                  id
+                }
                 originalUnitPriceSet {
                   shopMoney {
                     amount
@@ -275,6 +328,31 @@ const ORDERS_QUERY = `
           refunds(first: 50) {
             id
             createdAt
+            totalRefundedSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            orderAdjustments(first: 50) {
+              edges {
+                node {
+                  reason
+                  amountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  taxAmountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
             refundLineItems(first: 250) {
               edges {
                 node {
@@ -299,6 +377,22 @@ const ORDERS_QUERY = `
                 }
               }
             }
+            transactions(first: 50) {
+              edges {
+                node {
+                  id
+                  kind
+                  status
+                  processedAt
+                  amountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -310,6 +404,226 @@ const ORDERS_QUERY = `
   }
 `;
 
+const ORDER_BY_ID_QUERY = `
+  query OrderById($id: ID!) {
+    order(id: $id) {
+      id
+      name
+      legacyResourceId
+      createdAt
+      processedAt
+      updatedAt
+      cancelledAt
+      test
+      currencyCode
+      customer {
+        id
+        email
+        numberOfOrders
+        createdAt
+      }
+      billingAddress {
+        countryCode
+        country
+      }
+      shippingAddress {
+        countryCode
+        country
+      }
+      totalPriceSet {
+        shopMoney {
+          amount
+          currencyCode
+        }
+      }
+      subtotalPriceSet {
+        shopMoney {
+          amount
+          currencyCode
+        }
+      }
+      totalDiscountsSet {
+        shopMoney {
+          amount
+          currencyCode
+        }
+      }
+      totalTaxSet {
+        shopMoney {
+          amount
+          currencyCode
+        }
+      }
+      transactions(first: 50) {
+        id
+        kind
+        status
+        processedAt
+        gateway
+        amountSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+        paymentMethod
+      }
+      lineItems(first: 250) {
+        edges {
+          node {
+            id
+            sku
+            name
+            quantity
+            product {
+              id
+            }
+            variant {
+              id
+            }
+            originalUnitPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            discountedUnitPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            discountAllocations {
+              allocatedAmountSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+            taxLines {
+              priceSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+          }
+        }
+      }
+      refunds(first: 50) {
+        id
+        createdAt
+        totalRefundedSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+        orderAdjustments(first: 50) {
+          edges {
+            node {
+              reason
+              amountSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              taxAmountSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+          }
+        }
+        refundLineItems(first: 250) {
+          edges {
+            node {
+              quantity
+              subtotalSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+              lineItem {
+                id
+                sku
+                name
+                originalUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+              }
+            }
+          }
+        }
+        transactions(first: 50) {
+          edges {
+            node {
+              id
+              kind
+              status
+              processedAt
+              amountSet {
+                shopMoney {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+export async function fetchShopifyOrderByLegacyIdGraphQL(params: {
+  tenantId: string;
+  shopDomain: string;
+  legacyOrderId: string; // numeric string, e.g. "7008752206167"
+  accessToken?: string;
+}): Promise<GraphQLOrder | null> {
+  const accessToken =
+    params.accessToken || (await getShopifyAccessToken(params.tenantId));
+  if (!accessToken) {
+    throw new Error('No access token found for this tenant');
+  }
+
+  const normalizedShop = normalizeShopDomain(params.shopDomain);
+  const url = `https://${normalizedShop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
+  const gid = `gid://shopify/Order/${params.legacyOrderId}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': accessToken,
+    },
+    body: JSON.stringify({
+      query: ORDER_BY_ID_QUERY,
+      variables: { id: gid },
+    }),
+  });
+
+  const json = (await response.json()) as any;
+  if (json.errors && json.errors.length > 0) {
+    const first = json.errors[0];
+    throw new Error(
+      `Shopify GraphQL errors: ${first.message || 'Unknown error'}`,
+    );
+  }
+
+  return (json?.data?.order as GraphQLOrder | null) ?? null;
+}
+
 /**
  * Fetches orders from Shopify using GraphQL API with pagination support
  */
@@ -320,6 +634,7 @@ export async function fetchShopifyOrdersGraphQL(params: {
   until?: string;
   excludeTest?: boolean;
   accessToken?: string; // Optional: pass directly to avoid getShopifyAccessToken call
+  filterBy?: 'created_at' | 'processed_at' | 'updated_at'; // Optional: filter by created_at (default), processed_at, or updated_at
 }): Promise<GraphQLOrder[]> {
   const accessToken = params.accessToken || await getShopifyAccessToken(params.tenantId);
   if (!accessToken) {
@@ -332,16 +647,31 @@ export async function fetchShopifyOrdersGraphQL(params: {
   let hasNextPage = true;
 
   // Build query string for date filtering
+  // Support filtering by processed_at (Shopify Analytics "Day") or created_at (default) or updated_at (refunds update the order)
+  const filterBy = (params as any).filterBy || 'created_at';
   const queryParts: string[] = [];
   if (params.since) {
-    queryParts.push(`created_at:>='${params.since}'`);
+    if (filterBy === 'processed_at') {
+      queryParts.push(`processed_at:>='${params.since}'`);
+    } else if (filterBy === 'updated_at') {
+      queryParts.push(`updated_at:>='${params.since}'`);
+    } else {
+      queryParts.push(`created_at:>='${params.since}'`);
+    }
   }
   if (params.until) {
-    queryParts.push(`created_at:<='${params.until}T23:59:59'`);
+    if (filterBy === 'processed_at') {
+      queryParts.push(`processed_at:<='${params.until}T23:59:59'`);
+    } else if (filterBy === 'updated_at') {
+      queryParts.push(`updated_at:<='${params.until}T23:59:59'`);
+    } else {
+      queryParts.push(`created_at:<='${params.until}T23:59:59'`);
+    }
   }
-  if (params.excludeTest !== false) {
-    queryParts.push(`-test:true`);
-  }
+  // Don't filter test orders at fetch time - filtering happens in database/frontend
+  // if (params.excludeTest !== false) {
+  //   queryParts.push(`-test:true`);
+  // }
   const queryString = queryParts.length > 0 ? queryParts.join(' AND ') : undefined;
 
   console.log(`[shopify-graphql] Fetching orders from ${normalizedShop}...`);

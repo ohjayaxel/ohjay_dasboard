@@ -27,6 +27,7 @@ export type SalesMode = 'shopify';
 export type ShopifyOrder = {
   id: number | string;
   created_at: string;
+  processed_at?: string | null; // When order was processed/paid (preferred for Shopify Analytics "Day" allocation)
   currency: string;
   financial_status: string;
   cancelled_at: string | null;
@@ -34,14 +35,22 @@ export type ShopifyOrder = {
   total_tax?: string; // Total tax on order (equivalent to totalTaxSet in GraphQL)
   line_items: {
     id: number | string;
+    product_id?: string; // Product ID for matching with CSV (extracted from variant or product GID)
     price: string; // Price per unit, as string
     quantity: number;
     total_discount: string; // Discount on this line item, as string
+    tax?: string; // Total tax for this line item (across quantity), as string
   }[];
   total_discounts?: string; // Order-level total discounts (preferred over summing line_items)
   refunds?: {
     id: number | string;
     created_at: string;
+    total_refunded?: string; // Refund total (likely INCL tax) from GraphQL totalRefundedSet
+    adjustments?: Array<{
+      reason?: string | null;
+      amount?: string | null; // Adjustment amount (likely INCL tax)
+      tax_amount?: string | null;
+    }>;
     refund_line_items: {
       line_item_id: number | string;
       quantity: number;
@@ -50,6 +59,14 @@ export type ShopifyOrder = {
         price: string;
       };
     }[];
+    transactions?: Array<{
+      id: string;
+      kind: string;
+      status: string;
+      processed_at?: string | null; // Prefer for period inclusion when matching Shopify Analytics exports
+      amount?: string; // Transaction amount (for shipping refunds, order-level refunds)
+      currency?: string;
+    }>;
   }[];
 };
 
@@ -155,12 +172,160 @@ function roundTo2Decimals(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function getRefundEffectiveDate(refund: NonNullable<ShopifyOrder['refunds']>[number]): string {
+  // Shopify Analytics exports may align refunds to the transaction processed date (payout/settlement),
+  // not necessarily refund.created_at. Prefer successful REFUND transaction processed_at when available.
+  const processedDates =
+    refund.transactions
+      ?.filter((t) => t.kind === 'REFUND' && t.status === 'SUCCESS' && t.processed_at)
+      .map((t) => t.processed_at as string) || [];
+
+  if (processedDates.length > 0) {
+    // Use the latest processed date to represent when the refund actually took effect financially.
+    processedDates.sort();
+    return processedDates[processedDates.length - 1];
+  }
+
+  return refund.created_at;
+}
+
+function sumRefundTransactionsAmount(refund: NonNullable<ShopifyOrder['refunds']>[number]): number {
+  let total = 0;
+  for (const t of refund.transactions || []) {
+    if (t.kind === 'REFUND' && t.status === 'SUCCESS' && t.amount) {
+      // Shopify can represent refund amounts as negative numbers depending on API surface.
+      // For analytics "Returns" we want the magnitude.
+      total += Math.abs(parseFloat(t.amount));
+    }
+  }
+  return roundTo2Decimals(total);
+}
+
+function sumRefundOrderAdjustments(refund: NonNullable<ShopifyOrder['refunds']>[number]): number {
+  let total = 0;
+  for (const adj of refund.adjustments || []) {
+    if (adj.amount) {
+      total += parseFloat(adj.amount);
+    }
+  }
+  return roundTo2Decimals(total);
+}
+
+function hasSuccessfulRefundTransaction(
+  refund: NonNullable<ShopifyOrder['refunds']>[number],
+): boolean {
+  for (const t of refund.transactions || []) {
+    if (t.kind === 'REFUND' && t.status === 'SUCCESS' && t.amount) return true;
+  }
+  return false;
+}
+
+function orderHasAnySuccessfulRefundTransaction(order: ShopifyOrder): boolean {
+  for (const refund of order.refunds || []) {
+    if (hasSuccessfulRefundTransaction(refund)) return true;
+  }
+  return false;
+}
+
+function getFullRefundTaxHintFromOrder(order: ShopifyOrder): number | null {
+  // If there's a "full refund" object without a SUCCESS transaction but with line items,
+  // Shopify Analytics `Dag` exports sometimes reflect the financial refund via a separate tx-only refund,
+  // while this no-tx refund provides the full tax component for netting.
+  for (const refund of order.refunds || []) {
+    if (hasSuccessfulRefundTransaction(refund)) continue;
+    const hasLineItems = refund.refund_line_items && refund.refund_line_items.length > 0;
+    if (!hasLineItems) continue;
+    if (!isFullRefundForOrder(refund, order.line_items)) continue;
+    const refundedTax = calculateRefundedTaxFromLineItems(refund, order.line_items);
+    if (refundedTax > 0) return refundedTax;
+  }
+  return null;
+}
+
+function calculateRefundedTaxFromLineItems(
+  refund: NonNullable<ShopifyOrder['refunds']>[number],
+  orderLineItems: ShopifyOrder['line_items'],
+): number {
+  // Shopify Analytics “Dag”-exports split refunds into Net + Taxes.
+  // We want Returns EXCL tax, so we subtract refunded tax from the refund transaction totals.
+  //
+  // We approximate refunded tax by summing original order line item taxLines proportionally to refunded quantity.
+  let tax = 0;
+  const byId = new Map<string, ShopifyOrder['line_items'][number]>();
+  for (const li of orderLineItems) {
+    byId.set(li.id.toString(), li);
+  }
+
+  for (const rli of refund.refund_line_items || []) {
+    const lineItemId = rli.line_item_id?.toString();
+    if (!lineItemId) continue;
+    const original = byId.get(lineItemId);
+    if (!original) continue;
+    const originalTaxTotal = parseFloat(original.tax || '0') || 0;
+    const originalQty = original.quantity || 0;
+    if (originalQty <= 0 || originalTaxTotal <= 0) continue;
+
+    const perUnitTax = originalTaxTotal / originalQty;
+    tax += perUnitTax * (rli.quantity || 0);
+  }
+
+  return roundTo2Decimals(tax);
+}
+
+function isFullRefundForOrder(
+  refund: NonNullable<ShopifyOrder['refunds']>[number],
+  orderLineItems: ShopifyOrder['line_items'],
+): boolean {
+  const refundedQtyByLineItem = new Map<string, number>();
+  for (const rli of refund.refund_line_items || []) {
+    const id = rli.line_item_id?.toString();
+    if (!id) continue;
+    refundedQtyByLineItem.set(id, (refundedQtyByLineItem.get(id) || 0) + (rli.quantity || 0));
+  }
+
+  for (const li of orderLineItems) {
+    const id = li.id.toString();
+    const orderedQty = li.quantity || 0;
+    if (orderedQty <= 0) continue;
+    const refundedQty = refundedQtyByLineItem.get(id) || 0;
+    if (refundedQty < orderedQty) return false;
+  }
+
+  return orderLineItems.length > 0;
+}
+
+function sumRefundLineItemsSubtotalInclTax(
+  refund: NonNullable<ShopifyOrder['refunds']>[number],
+  orderLineItems: ShopifyOrder['line_items'],
+): number {
+  // In our current GraphQL mapping, refundLineItems.subtotalSet behaves like an INCL-tax line subtotal
+  // (matches `Omsättning` per item in `Dag` exports).
+  let total = 0;
+  for (const rli of refund.refund_line_items || []) {
+    if (rli.subtotal) {
+      total += parseFloat(rli.subtotal);
+    } else {
+      const fallback = calculateRefundLineItemSubtotal(rli, orderLineItems);
+      total += fallback;
+    }
+  }
+  return roundTo2Decimals(total);
+}
+
 /**
  * Converts a date string to YYYY-MM-DD format in the shop's timezone
  */
 function toLocalDate(dateString: string, timezone: string = 'Europe/Stockholm'): string {
   const date = new Date(dateString);
   return date.toLocaleDateString('en-CA', { timeZone: timezone });
+}
+
+function getOrderReportDay(order: ShopifyOrder): string {
+  // Shopify Analytics "Dag" aligns to shop timezone and typically uses processedAt for revenue recognition.
+  // We default to processed_at when available, otherwise created_at.
+  const dateString = order.processed_at || order.created_at;
+  // `toLocalDate` normalizes to shop timezone (important around day boundaries).
+  return toLocalDate(dateString);
 }
 
 /**
@@ -259,6 +424,69 @@ function calculateRefundLineItemSubtotal(
   return roundTo2Decimals(pricePerUnit * refundLineItem.quantity);
 }
 
+function calculateRefundReturnExclTaxForDaily(
+  refund: NonNullable<ShopifyOrder['refunds']>[number],
+  order: ShopifyOrder,
+  datePeriod?: { from?: string; to?: string },
+): number {
+  // Apply the same logic as calculateOrderSales, but scoped to a single refund so we can allocate by refund day.
+  if (datePeriod?.from || datePeriod?.to) {
+    const refundDate = getRefundEffectiveDate(refund).split('T')[0];
+    if (datePeriod.from && refundDate < datePeriod.from) return 0;
+    if (datePeriod.to && refundDate > datePeriod.to) return 0;
+  }
+
+  const orderDay = getOrderReportDay(order);
+  const orderDayInPeriod =
+    (!datePeriod?.from || orderDay >= datePeriod.from) &&
+    (!datePeriod?.to || orderDay <= datePeriod.to);
+
+  const refundTxTotal = sumRefundTransactionsAmount(refund);
+  const hasSuccessfulTx = hasSuccessfulRefundTransaction(refund);
+  const hasRefundLineItems = refund.refund_line_items && refund.refund_line_items.length > 0;
+
+  // Rule: if the order day is outside the report period and Shopify reports a discrepancy adjustment,
+  // Analytics sometimes only shows the adjustment amount as "Returns" for that refund day.
+  if (!orderDayInPeriod) {
+    const adj = sumRefundOrderAdjustments(refund);
+    if (Math.abs(adj) > 0.01 && (refundTxTotal <= 0 || Math.abs(adj) < Math.abs(refundTxTotal))) {
+      return Math.abs(adj);
+    }
+  }
+
+  if (hasSuccessfulTx && refundTxTotal > 0) {
+    if (hasRefundLineItems) {
+      const refundedTax = calculateRefundedTaxFromLineItems(refund, order.line_items);
+      return Math.max(0, refundTxTotal - refundedTax);
+    }
+
+    // Tx-only refund (no line items): in Shopify Sales/Analytics "Returns" this typically should NOT be counted
+    // as product returns (often shipping/fee/adjustment). Ignore to avoid overstating returns.
+    return 0;
+  }
+
+  // No successful refund transaction.
+  if (hasRefundLineItems) {
+    const refundedTax = calculateRefundedTaxFromLineItems(refund, order.line_items);
+    const fullRefund = isFullRefundForOrder(refund, order.line_items);
+
+    // If we already have any successful refund transaction on this order, and this refund is a full-refund "shell"
+    // without a transaction, it often represents a non-financial return event and should not affect totals.
+    if (fullRefund && orderHasAnySuccessfulRefundTransaction(order)) {
+      return 0;
+    }
+
+    if (fullRefund) {
+      return refundedTax;
+    }
+
+    const subtotalInclTax = sumRefundLineItemsSubtotalInclTax(refund, order.line_items);
+    return Math.max(0, subtotalInclTax - refundedTax);
+  }
+
+  return 0;
+}
+
 /**
  * Calculates sales metrics for a single Shopify order.
  * 
@@ -266,32 +494,44 @@ function calculateRefundLineItemSubtotal(
  * - Net Sales EXCL tax = subtotal_price - total_tax - refunds (EXCL tax)
  * - Uses Shopify's own fields as source of truth
  * 
+ * **IMPORTANT - Refunds Date Filtering:**
+ * - Refunds are filtered by report period (refund.created_at), NOT order.processed_at
+ * - If datePeriod is provided, only refunds where refund.created_at is within the period are included
+ * - This matches Shopify Analytics CSV export behavior
+ * - Example: For period 1-30 December, only refunds created in December are included
+ * 
  * @param order - Shopify order object
+ * @param datePeriod - Optional date period to filter refunds (refund.created_at must be within this period)
  * @returns Per-order sales breakdown
  */
-export function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
-  // Calculate Gross Sales: sum of (price × quantity) for all line items (INCL tax)
-  // This is for reference/display purposes only
-  let grossSales = 0;
+export function calculateOrderSales(
+  order: ShopifyOrder,
+  datePeriod?: { from?: string; to?: string },
+): OrderSalesBreakdown {
+  // Calculate Gross Sales INCL tax: sum of (price × quantity) for all line items
+  // NOTE: line_item.price from Shopify API (originalUnitPriceSet) actually INCLUDES tax
+  let grossSalesInclTax = 0;
   for (const lineItem of order.line_items) {
     const price = parseFloat(lineItem.price);
     const quantity = lineItem.quantity;
-    grossSales += price * quantity;
+    grossSalesInclTax += price * quantity;
   }
-  grossSales = roundTo2Decimals(grossSales);
+  grossSalesInclTax = roundTo2Decimals(grossSalesInclTax);
 
-  // Calculate Discounts: prefer order.total_discounts if available (includes both line-item and order-level discounts)
-  // This is for reference/display purposes only (INCL tax)
-  let discounts = 0;
+  // Calculate Discounts INCL tax from API
+  // IMPORTANT: Discounts are fetched at ORDER-LEVEL via totalDiscountsSet in GraphQL API
+  // This is the recommended way according to Shopify documentation (similar to totalTaxSet, subtotalPriceSet)
+  // Note: total_discounts from Shopify API is INCL tax, but Shopify Analytics shows EXCL tax
+  let discountsInclTax = 0;
   if (order.total_discounts !== undefined && order.total_discounts !== null) {
-    discounts = parseFloat(order.total_discounts || '0');
+    discountsInclTax = parseFloat(order.total_discounts || '0');
   } else {
     // Fallback: sum line-item discounts
     for (const lineItem of order.line_items) {
-      discounts += parseFloat(lineItem.total_discount || '0');
+      discountsInclTax += parseFloat(lineItem.total_discount || '0');
     }
   }
-  discounts = roundTo2Decimals(discounts);
+  discountsInclTax = roundTo2Decimals(discountsInclTax);
 
   // NEW METHOD: Calculate Net Sales EXCL tax using Shopify's fields
   // subtotal_price = ordersumma efter rabatter, INKL moms
@@ -304,41 +544,245 @@ export function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
     ? parseFloat(order.total_tax || '0')
     : 0;
   
+  // Calculate subtotal EXCL tax = subtotal_price - total_tax
+  const subtotalExclTax = subtotalPrice - totalTax;
+  
+  // Calculate tax rate from actual order values (from API)
+  // tax_rate = total_tax / (subtotal_price - total_tax)
+  // This gives us the tax rate on the subtotal (after discounts, EXCL tax)
+  let taxRate = 0;
+  if (subtotalPrice > 0 && totalTax > 0 && subtotalExclTax > 0) {
+    taxRate = totalTax / subtotalExclTax;
+  }
+
+  // Compute line-level EXCL tax totals to handle mixed tax rates.
+  // We derive a line-specific tax rate from line tax + (line net incl tax), and fallback to order taxRate.
+  let grossSalesExclTaxFromLines = 0;
+  let discountsExclTaxFromLines = 0;
+  for (const lineItem of order.line_items) {
+    const priceIncl = parseFloat(lineItem.price || '0') || 0;
+    const qty = lineItem.quantity || 0;
+    const discountIncl = parseFloat(lineItem.total_discount || '0') || 0;
+    const taxTotal = parseFloat((lineItem as any).tax || '0') || 0;
+
+    const lineTotalIncl = priceIncl * qty;
+    const lineNetIncl = Math.max(0, lineTotalIncl - discountIncl);
+
+    let lineTaxRate = taxRate;
+    if (taxTotal > 0 && lineNetIncl > taxTotal) {
+      lineTaxRate = taxTotal / (lineNetIncl - taxTotal);
+    }
+
+    const lineGrossEx = lineTaxRate > 0 ? lineTotalIncl / (1 + lineTaxRate) : lineTotalIncl;
+    const lineDiscountEx = lineTaxRate > 0 ? discountIncl / (1 + lineTaxRate) : discountIncl;
+
+    grossSalesExclTaxFromLines += lineGrossEx;
+    discountsExclTaxFromLines += lineDiscountEx;
+
+    // 100% discount special: Shopify Analytics includes tax component in both Gross and Discounts
+    if (discountIncl > 0 && Math.abs(lineTotalIncl - discountIncl) < 0.01 && lineTaxRate > 0) {
+      const extraTax = ((priceIncl * lineTaxRate) / (1 + lineTaxRate)) * qty;
+      grossSalesExclTaxFromLines += extraTax;
+      discountsExclTaxFromLines += extraTax;
+    }
+  }
+  grossSalesExclTaxFromLines = roundTo2Decimals(grossSalesExclTaxFromLines);
+  discountsExclTaxFromLines = roundTo2Decimals(discountsExclTaxFromLines);
+  
+  // Gross Sales calculation strategy (based on analysis of 62,770 orders):
+  // 
+  // 1. If total_tax = 0 (from API): CSV uses sum(line_items) directly as Gross Sales
+  //    - This happens when: net sales = 0 (100% discount), orders outside Sweden, or special cases
+  //    - Since there's no tax, INCL tax = EXCL tax
+  // 
+  // 2. If total_tax > 0: CSV uses sum_line_items / (1 + tax_rate) where tax_rate is calculated from netto
+  //    - tax_rate = total_tax / (subtotal_price - total_tax) = total_tax / netto (before refunds)
+  //    - This matches CSV in ~86% of orders with tax
+  // 
+  // 3. IMPORTANT: Shopify Analytics includes 100% discounted items' tax component in Gross Sales
+  //    - For 100% discounted items (price = discount), add tax component: price × tax_rate / (1 + tax_rate)
+  //    - CSV Gross Sales = API Gross Sales + sum(tax components of 100% discounted items)
+  //    - This matches 100% of orders with 100% discounted items (analysis 2025-01-27)
+  // 
+  // 4. Fallback: use subtotal_excl_tax when we can't calculate tax rate
+  let grossSales = 0;
+  
+  if (totalTax === 0) {
+    // API says no tax: use sum(line_items) directly (matches CSV behavior)
+    // Analysis shows all orders with API total_tax = 0 also have CSV tax = 0
+    if (grossSalesInclTax > 0) {
+      grossSales = grossSalesInclTax;
+    }
+  } else if (taxRate > 0 && grossSalesInclTax > 0) {
+    // IMPORTANT: When tax_rate deviates significantly from 25% AND order has discounts,
+    // Shopify Analytics uses subtotal_price INCL tax directly
+    // Analysis (2025-01-27): Orders with tax_rate deviation > 0.1% from 25% AND discounts use subtotal_price directly
+    // Using threshold 0.001 (0.1%) correctly identifies 58/64 mismatches and all 537 perfect matches (99% accuracy)
+    // BUT: Only applies when order has discounts (all 64 mismatches had discounts, orders without discounts use different logic)
+    const taxRateDeviationFrom25 = Math.abs(taxRate - 0.25);
+    const USE_SUBTOTAL_PRICE_THRESHOLD = 0.001; // 0.1% deviation
+    const hasDiscounts = subtotalExclTax > 0 && (grossSalesInclTax - subtotalExclTax - totalTax) < -0.01; // Check if discounts exist
+    
+    // Calculate total discounts from line items as fallback
+    let totalDiscountsAmount = 0;
+    for (const lineItem of order.line_items || []) {
+      totalDiscountsAmount += parseFloat(lineItem.total_discount || '0');
+    }
+    const orderHasDiscounts = totalDiscountsAmount > 0.01 || (order.total_discounts && parseFloat(order.total_discounts) > 0.01);
+    
+    // Test if subtotal_price × (1 + tax_rate) ≈ sum(line_items)
+    // This indicates that subtotal_price is closer to the expected value
+    const subtotalPriceTimesOnePlusTaxRate = subtotalPrice * (1 + taxRate);
+    const diffBetweenSubtotalAndSum = Math.abs(subtotalPriceTimesOnePlusTaxRate - grossSalesInclTax);
+    // Analysis shows that for orders with discounts and tax_rate deviation, CSV uses subtotal_price
+    // when the mathematical relationship is reasonably close (within 1 kr for rounding)
+    // Testing with 10.0 kr threshold decreased accuracy (87.66% → 87.29%)
+    // This threshold (1.0 kr) balances accuracy vs. avoiding false positives
+    const SUBTOTAL_MATCHES_SUM_THRESHOLD = 1.0; // Allow 1 kr difference for rounding
+    
+    // Use subtotal_price when:
+    // 1. Tax rate deviates from 25% AND order has discounts (original condition)
+    // 2. AND subtotal_price × (1 + tax_rate) ≈ sum(line_items) (mathematical relationship)
+    // This ensures we only use subtotal_price when it's mathematically consistent
+    if (taxRateDeviationFrom25 > USE_SUBTOTAL_PRICE_THRESHOLD && 
+        subtotalPrice > 0 && 
+        orderHasDiscounts &&
+        diffBetweenSubtotalAndSum < SUBTOTAL_MATCHES_SUM_THRESHOLD) {
+      // Tax rate deviates from 25% AND order has discounts AND subtotal_price is mathematically consistent
+      // Use subtotal_price INCL tax directly (matches CSV behavior)
+      grossSales = subtotalPrice;
+    } else {
+      // Tax rate is close to 25%: use standard calculation
+      // Has tax: convert from INCL tax to EXCL tax using tax_rate calculated from netto
+      // tax_rate = total_tax / (subtotal_price - total_tax) = total_tax / netto (before refunds)
+      grossSales = grossSalesExclTaxFromLines;
+    }
+  } else if (subtotalExclTax > 0) {
+    // Fallback: use subtotal_excl_tax when we can't calculate tax rate but have subtotal
+    grossSales = subtotalExclTax;
+  } else if (grossSalesInclTax > 0) {
+    // Final fallback: assume Gross Sales is already EXCL tax
+    grossSales = grossSalesInclTax;
+  }
+  grossSales = roundTo2Decimals(grossSales);
+  
+  // Convert Discounts from INCL tax to EXCL tax
+  // Discounts EXCL tax = Discounts INCL tax / (1 + tax_rate)
+  // Shopify Analytics shows discounts EXCL tax
+  let discounts = 0;
+  // Prefer line-level conversion to handle mixed tax rates.
+  // Falls back naturally if taxRate=0 (then line computations are INCL=EXCL).
+  discounts = discountsExclTaxFromLines;
+  discounts = roundTo2Decimals(discounts);
+  
   // Net Sales EXCL tax BEFORE refunds
   // = subtotalPrice - totalTax
   const netSalesExclTaxBeforeRefunds = roundTo2Decimals(subtotalPrice - totalTax);
 
-  // Calculate Returns EXCL tax: use refund_line_items[].subtotal if available
-  // subtotal field contains refund amount EXCL tax
+  // Note: order day is used later to zero Gross/Discounts outside the period; refunds are filtered separately.
+
+  // Calculate Returns EXCL tax
+  // IMPORTANT: Returns have NO order-level field in Shopify GraphQL API (unlike discounts)
+  // Shopify API does NOT provide totalRefundedSet or similar field on Order object
+  // Therefore, we use refunds data (refund_line_items + refund.transactions).
+  //
+  // Verified with `Dag`-dimension export (2025-01-08):
+  // - Discounts are allocated to order day
+  // - Returns are allocated to refund day
+  // - Refund day rows show Returns (net) and Taxes separately
+  //
+  // Our best match to Shopify Analytics:
+  // - Prefer refund REFUND/SUCCESS transaction totals (represents refund financial impact)
+  // - If refund has refund_line_items, subtract refunded tax computed from original order line item taxLines
+  // - If refund has no line items, treat as non-taxed adjustment unless we can infer otherwise
+  // 
+  // CRITICAL: Refunds are filtered by report period (refund.created_at), NOT order.processed_at
+  // This matches Shopify Analytics CSV export behavior - only refunds within the report period are included
   let returns = 0;
   if (order.refunds && order.refunds.length > 0) {
     for (const refund of order.refunds) {
-      for (const refundLineItem of refund.refund_line_items) {
-        // Prefer subtotal field (EXCL tax), otherwise calculate from price
-        if (refundLineItem.subtotal) {
-          returns += parseFloat(refundLineItem.subtotal);
+      // Filter refunds by date period if provided (matches Shopify Analytics CSV behavior)
+      if (datePeriod) {
+        const refundDate = getRefundEffectiveDate(refund).split('T')[0]; // Get date part (YYYY-MM-DD)
+        if (datePeriod.from && refundDate < datePeriod.from) {
+          continue; // Refund is before period start
+        }
+        if (datePeriod.to && refundDate > datePeriod.to) {
+          continue; // Refund is after period end
+        }
+      }
+
+      const refundTxTotal = sumRefundTransactionsAmount(refund);
+      const hasRefundLineItems = refund.refund_line_items && refund.refund_line_items.length > 0;
+
+      if (refundTxTotal > 0) {
+        if (hasRefundLineItems) {
+          const refundedTax = calculateRefundedTaxFromLineItems(refund, order.line_items);
+          returns += refundTxTotal - refundedTax;
         } else {
-          // Fallback: calculate from line_item.price or original order line item
-          const subtotal = calculateRefundLineItemSubtotal(
-            refundLineItem,
-            order.line_items,
-          );
-          returns += subtotal;
+          // No line items. This can be shipping/fee OR a product refund where Shopify didn't attach line items.
+          //
+          // If the order also contains a "full refund shell" (no SUCCESS tx but with line items),
+          // use that shell to infer the refunded tax component and convert txTotal to net.
+          const fullRefundTaxHint = getFullRefundTaxHintFromOrder(order);
+          if (fullRefundTaxHint && fullRefundTaxHint > 0) {
+            returns += Math.max(0, refundTxTotal - fullRefundTaxHint);
+          } else {
+            returns += refundTxTotal;
+          }
+        }
+        continue;
+      }
+
+      // No successful refund transaction.
+      // Verified in `Dag` exports: these cases frequently appear as tax-only adjustments
+      // (Returer ~= refunded tax, Skatter negative), not as full net returns.
+      if (hasRefundLineItems) {
+        const refundedTax = calculateRefundedTaxFromLineItems(refund, order.line_items);
+        const fullRefund = isFullRefundForOrder(refund, order.line_items);
+        // If we already have any successful refund transaction on this order, and this refund is a full-refund "shell"
+        // without a transaction, it often represents a non-financial return event and should not affect analytics totals.
+        if (fullRefund && orderHasAnySuccessfulRefundTransaction(order)) {
+          // ignore
+        } else if (fullRefund) {
+          returns += refundedTax;
+        } else {
+          // Partial refunds without SUCCESS transactions behave like net returns per refunded items.
+          const subtotalInclTax = sumRefundLineItemsSubtotalInclTax(refund, order.line_items);
+          returns += Math.max(0, subtotalInclTax - refundedTax);
         }
       }
     }
   }
   returns = roundTo2Decimals(returns);
 
-  // Net Sales EXCL tax AFTER refunds
-  const netSales = roundTo2Decimals(netSalesExclTaxBeforeRefunds - returns);
+  // If a report period is provided, Shopify Analytics "Dag" exports only include:
+  // - Gross/Discounts on the order day (typically processed_at)
+  // - Returns on the refund day
+  //
+  // Therefore: if the order day is outside the report period, Gross/Discounts should be 0,
+  // but Returns may still be non-zero due to refunds within the period.
+  if (datePeriod?.from || datePeriod?.to) {
+    const orderDay = getOrderReportDay(order);
+    if (datePeriod.from && orderDay < datePeriod.from) {
+      grossSales = 0;
+      discounts = 0;
+    } else if (datePeriod.to && orderDay > datePeriod.to) {
+      grossSales = 0;
+      discounts = 0;
+    }
+  }
+
+  // Net Sales EXCL tax = gross_sales - discounts - returns
+  // This matches Shopify Analytics formula: Net Sales = Gross Sales - Discounts - Returns
+  const netSales = roundTo2Decimals(grossSales - discounts - returns);
 
   return {
     orderId: order.id.toString(),
-    grossSales, // Gross sales INCL tax (for reference)
-    discounts, // Discounts INCL tax (for reference)
-    returns, // Returns EXCL tax
-    netSales, // Net Sales EXCL tax AFTER refunds (NEW METHOD)
+    grossSales, // Gross sales EXCL tax (SUM(line_item.price × quantity))
+    discounts, // Discounts (sum of line_item.total_discount)
+    returns, // Returns EXCL tax (from refund_line_items)
+    netSales, // Net Sales EXCL tax = grossSales - discounts - returns
   };
 }
 
@@ -355,6 +799,12 @@ export function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
  * - Only includes orders with financial_status: paid, partially_paid, partially_refunded, or refunded
  * - Orders with cancelled_at are included (Shopify Finance reports handle cancellations via refunds)
  * 
+ * **CRITICAL - Refunds Date Filtering:**
+ * - If datePeriod is provided, refunds are filtered by refund.created_at (NOT order.processed_at)
+ * - Only refunds where refund.created_at is within the datePeriod are included in Returns calculation
+ * - This matches Shopify Analytics CSV export behavior
+ * - Example: For period 1-30 December, only refunds created in December are included
+ * 
  * **Assumptions/Interpretations:**
  * - We use refund_line_items.subtotal if available, otherwise calculate from line_item.price × quantity
  * - If refund_line_item.line_item?.price exists, we prefer that over original order line item price
@@ -362,6 +812,7 @@ export function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
  * - Currency conversion is not handled - assumes all orders are in the same currency
  * 
  * @param orders - Array of Shopify order objects (REST API structure)
+ * @param datePeriod - Optional date period to filter refunds (refund.created_at must be within this period)
  * @returns Sales calculation result with summary and per-order breakdown
  * 
  * @example
@@ -372,35 +823,35 @@ export function calculateOrderSales(order: ShopifyOrder): OrderSalesBreakdown {
  * console.log(result.summary.netSales);   // Total net sales
  * ```
  */
-export function calculateShopifyLikeSales(orders: ShopifyOrder[]): SalesResult {
-  // Filter orders to only include those with valid financial status
-  const validOrders = orders.filter((order) => {
-    const hasValidStatus = VALID_FINANCIAL_STATUSES.has(order.financial_status);
-    
-    // Note: We include orders with cancelled_at because Shopify Finance reports
-    // handle cancellations through refunds. If an order is cancelled, it should
-    // have a refund that will offset the gross sales, resulting in net sales = 0.
-    // If you want to exclude cancelled orders entirely, uncomment:
-    // if (order.cancelled_at) return false;
-    
-    return hasValidStatus;
-  });
-
-  // Calculate per-order breakdowns
-  const perOrder: OrderSalesBreakdown[] = validOrders.map((order) =>
-    calculateOrderSales(order),
+export function calculateShopifyLikeSales(
+  orders: ShopifyOrder[],
+  datePeriod?: { from?: string; to?: string },
+): SalesResult {
+  // Shopify Analytics behavior: Only filter is gross_sales > 0
+  // No filtering on financial_status, is_refund, or any other criteria
+  // Calculate sales for ALL orders, then filter by gross_sales > 0 in the result
+  
+  // Calculate per-order breakdowns for all orders
+  // IMPORTANT: Keep all orders in perOrder array to maintain index alignment with input orders
+  // Filtering happens only in summary aggregation
+  // CRITICAL: Pass datePeriod to calculateOrderSales to filter refunds by report period
+  const perOrder: OrderSalesBreakdown[] = orders.map((order) =>
+    calculateOrderSales(order, datePeriod),
   );
 
-  // Aggregate totals
+  // Filter for aggregation (only orders with gross_sales > 0)
+  const ordersWithGrossSales = perOrder.filter((breakdown) => breakdown.grossSales > 0);
+
+  // Aggregate totals (only from orders with gross_sales > 0)
   const summary: SalesAggregation = {
     grossSales: roundTo2Decimals(
-      perOrder.reduce((sum, order) => sum + order.grossSales, 0),
+      ordersWithGrossSales.reduce((sum, order) => sum + order.grossSales, 0),
     ),
     discounts: roundTo2Decimals(
-      perOrder.reduce((sum, order) => sum + order.discounts, 0),
+      ordersWithGrossSales.reduce((sum, order) => sum + order.discounts, 0),
     ),
     returns: roundTo2Decimals(
-      perOrder.reduce((sum, order) => sum + order.returns, 0),
+      ordersWithGrossSales.reduce((sum, order) => sum + order.returns, 0),
     ),
     netSales: 0, // Will calculate below
   };
@@ -412,7 +863,7 @@ export function calculateShopifyLikeSales(orders: ShopifyOrder[]): SalesResult {
 
   return {
     summary,
-    perOrder,
+    perOrder, // Return ALL orders to maintain index alignment
   };
 }
 
@@ -449,12 +900,17 @@ export function calculateDailySales(
   // Map to aggregate daily data
   const dailyMap = new Map<string, DailySalesRow>();
   
+  const datePeriod =
+    reportingPeriodStart || reportingPeriodEnd
+      ? { from: reportingPeriodStart, to: reportingPeriodEnd }
+      : undefined;
+
   for (const order of includedOrders) {
-    // Calculate order sales breakdown
-    const orderSales = calculateOrderSales(order);
-    
-    // Get event date for this order (always uses order.createdAt for Shopify mode)
-    const orderDate = getOrderEventDate(order, mode, timezone);
+    // Calculate order sales breakdown, applying report-period behavior (zero out gross/discounts outside period).
+    const orderSales = calculateOrderSales(order, datePeriod);
+
+    // Shopify Analytics "Dag": allocate order metrics to the order report day (processed_at preferred).
+    const orderDate = getOrderReportDay(order);
     
     if (!orderDate) {
       // Skip if no valid event date (should not happen in Shopify mode, but kept for safety)
@@ -479,57 +935,26 @@ export function calculateDailySales(
       dailyMap.set(orderDate, dailyRow);
     }
     
-    // Shopify mode: Add net_sales_excl_tax_before_refunds on order date
-    // Financial mode: Add net_sales_excl_tax_before_refunds on transaction date
+    // Add order-day metrics (before refunds). Refunds are allocated separately by refund day.
     const subtotalPrice = order.subtotal_price ? parseFloat(order.subtotal_price) : 0;
     const totalTax = order.total_tax ? parseFloat(order.total_tax || '0') : 0;
     const netSalesExclTaxBeforeRefunds = roundTo2Decimals(subtotalPrice - totalTax);
     
-    // Calculate Gross Sales INCL tax: sum of all line item prices
-    // Use orderSales.grossSales which is already calculated from line items
-    const grossSalesInclTax = orderSales.grossSales;
+    // orderSales.grossSales and orderSales.discounts are already EXCL tax.
+    const grossSalesExclTax = orderSales.grossSales;
+    const discountsExclTax = orderSales.discounts;
     
-    // Calculate total discounts INCL tax
-    const totalDiscountsInclTax = orderSales.discounts;
-    
-    // Calculate Discounts EXCL tax
-    let discountsExclTax = 0;
-    if (subtotalPrice > 0 && totalTax > 0) {
-      const taxRateOnSubtotal = totalTax / subtotalPrice;
-      discountsExclTax = totalDiscountsInclTax / (1 + taxRateOnSubtotal);
-    } else {
-      discountsExclTax = totalDiscountsInclTax;
+    const orderDayInPeriod =
+      !datePeriod ||
+      ((!datePeriod.from || orderDate >= datePeriod.from) &&
+        (!datePeriod.to || orderDate <= datePeriod.to));
+
+    if (orderDayInPeriod) {
+      dailyRow.netSalesExclTax += netSalesExclTaxBeforeRefunds;
+      dailyRow.grossSalesExclTax! += grossSalesExclTax;
+      dailyRow.discountsExclTax! += discountsExclTax;
+      dailyRow.ordersCount += 1;
     }
-    
-    // Calculate refunds for this order (needed for Gross Sales calculation)
-    let orderTotalRefundsExclTax = 0;
-    if (order.refunds && order.refunds.length > 0) {
-      for (const refund of order.refunds) {
-        for (const refundLineItem of refund.refund_line_items) {
-          if (refundLineItem.subtotal) {
-            orderTotalRefundsExclTax += parseFloat(refundLineItem.subtotal);
-          } else {
-            const subtotal = calculateRefundLineItemSubtotal(
-              refundLineItem,
-              order.line_items,
-            );
-            orderTotalRefundsExclTax += subtotal;
-          }
-        }
-      }
-    }
-    orderTotalRefundsExclTax = roundTo2Decimals(orderTotalRefundsExclTax);
-    
-    // Calculate Gross Sales EXCL tax
-    // Gross Sales EXCL tax = Net Sales EXCL tax (after refunds) + Discounts EXCL tax + Returns EXCL tax
-    const netSalesExclTaxAfterRefunds = netSalesExclTaxBeforeRefunds - orderTotalRefundsExclTax;
-    const grossSalesExclTax = netSalesExclTaxAfterRefunds + discountsExclTax + orderTotalRefundsExclTax;
-    
-    // Add sales value on the determined date
-    dailyRow.netSalesExclTax += netSalesExclTaxBeforeRefunds;
-    dailyRow.grossSalesExclTax! += grossSalesExclTax;
-    dailyRow.discountsExclTax! += discountsExclTax;
-    dailyRow.ordersCount += 1;
     
     // Classify customer type (Shopify Mode only now)
     let customerType: CustomerTypeShopifyMode = 'UNKNOWN';
@@ -561,27 +986,14 @@ export function calculateDailySales(
       }
     }
     
-    // Process refunds separately (they hit on their own date)
-    // Note: Refunds only affect Net Sales and Returns, not Gross Sales or Discounts
+    // Process refunds separately (they hit on their own date).
     if (order.refunds && order.refunds.length > 0) {
       for (const refund of order.refunds) {
         const refundDate = getRefundEventDate(refund, order, mode, timezone);
-        
-        // Calculate refund amount EXCL tax
-        let refundAmountExclTax = 0;
-        for (const refundLineItem of refund.refund_line_items) {
-          if (refundLineItem.subtotal) {
-            refundAmountExclTax += parseFloat(refundLineItem.subtotal);
-          } else {
-            const subtotal = calculateRefundLineItemSubtotal(
-              refundLineItem,
-              order.line_items,
-            );
-            refundAmountExclTax += subtotal;
-          }
-        }
-        refundAmountExclTax = roundTo2Decimals(refundAmountExclTax);
-        
+        const refundAmountExclTax = roundTo2Decimals(
+          calculateRefundReturnExclTaxForDaily(refund, order, datePeriod),
+        );
+
         if (refundAmountExclTax > 0) {
           // Get or create daily row for refund date
           let refundDailyRow = dailyMap.get(refundDate);
