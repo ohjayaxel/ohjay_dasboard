@@ -73,8 +73,6 @@ async function fetchAllShopifyOrdersForRange(params: {
     'order_id',
     'processed_at',
     'created_at',
-    'created_at_ts',
-    'updated_at',
     'gross_sales',
     'net_sales',
     'total_tax',
