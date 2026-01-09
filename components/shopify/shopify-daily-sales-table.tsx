@@ -6,6 +6,7 @@ import {
   ColumnDef,
   flexRender,
   getCoreRowModel,
+  getFilteredRowModel,
   getPaginationRowModel,
   getSortedRowModel,
   SortingState,
@@ -72,6 +73,7 @@ export function ShopifyDailySalesTable(props: {
   const [sorting, setSorting] = React.useState<SortingState>([
     { id: 'date', desc: true },
   ])
+  const [globalFilter, setGlobalFilter] = React.useState('')
 
   const currency = props.rows.find((r) => r.currency)?.currency ?? 'SEK'
 
@@ -107,7 +109,8 @@ export function ShopifyDailySalesTable(props: {
     const returns = sum(props.rows.map((r) => r.refunds_excl_tax))
     const net = sum(props.rows.map((r) => r.net_sales_excl_tax))
     const orders = sum(props.rows.map((r) => r.orders_count))
-    return { gross, discounts, returns, net, orders }
+    const aov = orders > 0 ? net / orders : null
+    return { gross, discounts, returns, net, orders, aov }
   }, [props.rows])
 
   const columns: ColumnDef<ShopifyDailySalesRow>[] = React.useMemo(
@@ -157,11 +160,14 @@ export function ShopifyDailySalesTable(props: {
     data: props.rows,
     columns,
     getCoreRowModel: getCoreRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     onSortingChange: setSorting,
+    onGlobalFilterChange: setGlobalFilter,
     state: { sorting },
-    initialState: { pagination: { pageSize: 31 } },
+    state: { sorting, globalFilter },
+    initialState: { pagination: { pageSize: 50 } },
   })
 
   return (
@@ -241,7 +247,11 @@ export function ShopifyDailySalesTable(props: {
       </div>
 
       {/* Summary (match audits/orders metrics) */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+        <div className="rounded-lg border p-4">
+          <div className="text-sm text-muted-foreground">Included Days</div>
+          <div className="text-2xl font-semibold">{props.rows.length}</div>
+        </div>
         <div className="rounded-lg border p-4">
           <div className="text-sm font-medium text-muted-foreground">Gross Sales</div>
           <div className="text-2xl font-semibold">{formatCurrency(totals.gross, currency)}</div>
@@ -264,6 +274,36 @@ export function ShopifyDailySalesTable(props: {
           <div className="text-sm font-medium text-muted-foreground">Orders</div>
           <div className="text-2xl font-semibold">{Math.round(totals.orders)}</div>
         </div>
+        <div className="rounded-lg border p-4">
+          <div className="text-sm font-medium text-muted-foreground">AOV</div>
+          <div className="text-2xl font-semibold">
+            {totals.aov === null ? '—' : formatCurrency(totals.aov, currency)}
+          </div>
+        </div>
+      </div>
+
+      {/* Search + page size (match audits/orders UX) */}
+      <div className="flex items-center gap-4">
+        <Input
+          placeholder="Search date..."
+          value={globalFilter}
+          onChange={(e) => setGlobalFilter(e.target.value)}
+          className="max-w-sm"
+        />
+        <Select
+          value={table.getState().pagination.pageSize.toString()}
+          onValueChange={(value) => table.setPageSize(Number(value))}
+        >
+          <SelectTrigger className="w-32">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="25">25 rows</SelectItem>
+            <SelectItem value="50">50 rows</SelectItem>
+            <SelectItem value="100">100 rows</SelectItem>
+            <SelectItem value="250">250 rows</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="rounded-md border">
@@ -318,9 +358,9 @@ export function ShopifyDailySalesTable(props: {
           Showing {table.getState().pagination.pageIndex * table.getState().pagination.pageSize + 1} to{' '}
           {Math.min(
             (table.getState().pagination.pageIndex + 1) * table.getState().pagination.pageSize,
-            table.getSortedRowModel().rows.length,
+            table.getFilteredRowModel().rows.length,
           )}{' '}
-          of {table.getSortedRowModel().rows.length} days
+          of {table.getFilteredRowModel().rows.length} days
         </div>
         <div className="flex items-center gap-2">
           <Button
