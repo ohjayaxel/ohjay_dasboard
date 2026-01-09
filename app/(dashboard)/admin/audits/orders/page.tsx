@@ -237,7 +237,13 @@ export default async function AdminOrdersPage(props: PageProps) {
       />
 
       {selectedTenant && groupBy === 'date' && dailyRows.length > 0 ? (
-        <ShopifyDailySalesTable rows={dailyRows as any} />
+        <ShopifyDailySalesTable
+          rows={dailyRows as any}
+          from={from}
+          to={to}
+          supportsUpdatedAt={supportsUpdatedAt}
+          supportsCreatedAtTs={supportsCreatedAtTs}
+        />
       ) : selectedTenant && groupBy !== 'date' && orders.length > 0 ? (
         <OrdersTable
           orders={orders}
