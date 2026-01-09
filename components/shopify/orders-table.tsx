@@ -223,6 +223,13 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
   const groupBy =
     groupByProp ?? ((searchParams.get('groupBy') as OrdersTableProps['groupBy']) ?? 'date_order')
 
+  // If the DB schema doesn't include order_number (older schema), fall back to order_id.
+  // We detect that by checking if any row has a numeric order_number.
+  const effectiveIdField: OrdersTableProps['idField'] =
+    idField === 'order_number' && !orders.some((o) => typeof o.order_number === 'number')
+      ? 'order_id'
+      : idField
+
   const setQueryParam = (key: string, value: string) => {
     const params = new URLSearchParams(searchParams.toString())
     params.set(key, value)
@@ -261,9 +268,9 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
       groupOrders(orders, {
         groupBy: (groupBy as any) || 'date_order',
         dateField: (dateField as any) || 'processed_at',
-        idField: (idField as any) || 'order_id',
+        idField: (effectiveIdField as any) || 'order_id',
       }),
-    [orders, groupBy, dateField, idField],
+    [orders, groupBy, dateField, effectiveIdField],
   )
 
   const includedOrders = displayRows.filter((o) => parseFloat((o.gross_sales || 0).toString()) > 0)
@@ -276,10 +283,10 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
       // Grouping toggle controls whether we include these dimensions as columns.
       if (groupBy === 'date_order' || groupBy === 'order') {
         cols.push({
-          accessorKey: idField,
-          header: idField === 'order_number' ? 'Order Number' : 'Order ID',
+          accessorKey: effectiveIdField,
+          header: effectiveIdField === 'order_number' ? 'Order Number' : 'Order ID',
           cell: ({ row }) => (
-            <div className="font-mono text-sm">{row.getValue(idField) ?? '—'}</div>
+            <div className="font-mono text-sm">{row.getValue(effectiveIdField) ?? '—'}</div>
           ),
         })
       }
@@ -430,7 +437,7 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
 
       return cols
     },
-    [dateField, idField, groupBy]
+    [dateField, effectiveIdField, groupBy]
   )
 
   const table = useReactTable({
@@ -531,7 +538,7 @@ export function OrdersTable({ orders, from, to, tenantSlug, dateField: dateField
         <div className="flex items-center gap-2">
           <label className="text-sm font-medium">ID field:</label>
           <Select
-            value={idField ?? 'order_id'}
+            value={effectiveIdField ?? 'order_id'}
             onValueChange={(value) => setQueryParam('idField', value)}
           >
             <SelectTrigger className="w-[170px]">
