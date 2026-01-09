@@ -1287,18 +1287,21 @@ async function main() {
 
   console.log(`[shopify_backfill] Successfully saved ${savedOrderCount}/${orderRows.length} orders`);
 
-  // Fetch orders via GraphQL and save transactions for 100% matching
-  console.log(`\n[shopify_backfill] Fetching orders via GraphQL for transaction mapping...`);
+  // Save transactions for 100% matching
+  //
+  // IMPORTANT: We must include orders UPDATED in the period, not only orders CREATED in the period.
+  // Shopify Analytics "Dag" attributes returns by refund date; refunds update the order.
+  // We already fetched a union of:
+  // - processed_at in [since, until]
+  // - updated_at in [since, until]
+  // earlier in this script (graphqlOrdersForClassification). Reuse that dataset here so
+  // RETURN transactions are generated for refunds that happened in the period even if the
+  // original order was outside the period.
+  console.log(`\n[shopify_backfill] Mapping transactions from GraphQL orders...`);
   let graphqlOrders: GraphQLOrder[] = [];
   try {
-      graphqlOrders = await fetchShopifyOrdersGraphQL({
-      tenantId: tenantId,
-      shopDomain,
-      since,
-      until,
-      excludeTest: false, // Don't filter - fetch all orders, filtering happens in DB/frontend
-    });
-    console.log(`[shopify_backfill] Fetched ${graphqlOrders.length} orders via GraphQL`);
+    graphqlOrders = graphqlOrdersForClassification;
+    console.log(`[shopify_backfill] Using ${graphqlOrders.length} GraphQL orders (processed_at + updated_at union) for transaction mapping`);
 
     // Map GraphQL orders to transactions
     const allTransactions: SalesTransaction[] = [];
