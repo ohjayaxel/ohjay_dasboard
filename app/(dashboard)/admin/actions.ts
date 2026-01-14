@@ -1063,6 +1063,21 @@ const addPlatformAdminSchema = z.object({
   tenantId: z.string().uuid({ message: 'Invalid tenant identifier.' }),
 })
 
+const addUserSchema = z.object({
+  email: z.string().email({ message: 'Invalid email address.' }).transform((value) => value.toLowerCase()),
+  password: z.string().min(6, { message: 'Password must be at least 6 characters.' }),
+  tenantIds: z.array(z.string().uuid({ message: 'Invalid tenant identifier.' })).min(1, { message: 'At least one tenant is required.' }),
+  role: roleEnum,
+})
+
+const updateUserSchema = z.object({
+  userId: z.string().uuid({ message: 'Invalid user identifier.' }),
+  email: z.string().email({ message: 'Invalid email address.' }).transform((value) => value.toLowerCase()).optional(),
+  password: z.string().min(6, { message: 'Password must be at least 6 characters.' }).optional(),
+  tenantIds: z.array(z.string().uuid({ message: 'Invalid tenant identifier.' })).min(1, { message: 'At least one tenant is required.' }).optional(),
+  role: roleEnum.optional(),
+})
+
 const removePlatformAdminSchema = z.object({
   memberId: z.string().uuid({ message: 'Invalid member identifier.' }),
 })
@@ -1148,6 +1163,191 @@ export async function addPlatformAdmin(formData: FormData) {
 
   revalidatePath('/settings')
   redirect('/settings?status=platform-admin-added')
+}
+
+export async function addUser(formData: FormData) {
+  await requirePlatformAdmin()
+
+  // Parse tenantIds from form data (can be multiple)
+  const tenantIds = formData.getAll('tenantIds').filter((id): id is string => typeof id === 'string' && id.length > 0)
+
+  const result = addUserSchema.safeParse({
+    email: formData.get('email'),
+    password: formData.get('password'),
+    tenantIds,
+    role: formData.get('role'),
+  })
+
+  if (!result.success) {
+    redirect(
+      `/settings?error=${encodeURIComponent(result.error.errors[0]?.message ?? 'Invalid user payload.')}`,
+    )
+  }
+
+  const client = getSupabaseServiceClient()
+
+  // Check if user already exists
+  const { data: usersData, error: userLookupError } = await client.auth.admin.listUsers({
+    page: 1,
+    perPage: 1,
+    filter: { email: result.data.email },
+  })
+
+  if (userLookupError) {
+    redirect(
+      `/settings?error=${encodeURIComponent(`Unable to search Supabase Auth: ${userLookupError.message}`)}`,
+    )
+  }
+
+  let userId: string
+
+  const existingUser = usersData?.users?.[0]
+  if (existingUser) {
+    userId = existingUser.id
+  } else {
+    // Create new user in Supabase Auth
+    const { data: newUser, error: createError } = await client.auth.admin.createUser({
+      email: result.data.email,
+      password: result.data.password,
+      email_confirm: true,
+    })
+
+    if (createError) {
+      redirect(
+        `/settings?error=${encodeURIComponent(`Failed to create user: ${createError.message}`)}`,
+      )
+    }
+
+    if (!newUser.user) {
+      redirect(
+        `/settings?error=${encodeURIComponent('Failed to create user: No user returned.')}`,
+      )
+    }
+
+    userId = newUser.user.id
+  }
+
+  // Add user to all selected tenants
+  const membersToInsert = result.data.tenantIds.map((tenantId) => ({
+    tenant_id: tenantId,
+    user_id: userId,
+    email: result.data.email,
+    role: result.data.role,
+  }))
+
+  const { error: insertError } = await client
+    .from('members')
+    .upsert(membersToInsert, {
+      onConflict: 'tenant_id,user_id',
+      ignoreDuplicates: false,
+    })
+
+  if (insertError) {
+    redirect(
+      `/settings?error=${encodeURIComponent(`Failed to add user to tenants: ${insertError.message}`)}`,
+    )
+  }
+
+  revalidatePath('/settings')
+  redirect('/settings?status=user-added')
+}
+
+export async function updateUser(formData: FormData) {
+  await requirePlatformAdmin()
+
+  // Parse tenantIds from form data (can be multiple)
+  const tenantIds = formData.getAll('tenantIds').filter((id): id is string => typeof id === 'string' && id.length > 0)
+
+  const passwordValue = formData.get('password')
+  const password = passwordValue && typeof passwordValue === 'string' && passwordValue.trim().length > 0 ? passwordValue : undefined
+
+  const result = updateUserSchema.safeParse({
+    userId: formData.get('userId'),
+    email: formData.get('email') || undefined,
+    password,
+    tenantIds: tenantIds.length > 0 ? tenantIds : undefined,
+    role: formData.get('role') || undefined,
+  })
+
+  if (!result.success) {
+    redirect(
+      `/settings?error=${encodeURIComponent(result.error.errors[0]?.message ?? 'Invalid user payload.')}`,
+    )
+  }
+
+  const client = getSupabaseServiceClient()
+
+  // Update user in Supabase Auth if email or password changed
+  if (result.data.email || result.data.password) {
+    const updatePayload: { email?: string; password?: string } = {}
+    if (result.data.email) updatePayload.email = result.data.email
+    if (result.data.password) updatePayload.password = result.data.password
+
+    const { error: updateAuthError } = await client.auth.admin.updateUserById(result.data.userId, updatePayload)
+
+    if (updateAuthError) {
+      redirect(
+        `/settings?error=${encodeURIComponent(`Failed to update user: ${updateAuthError.message}`)}`,
+      )
+    }
+  }
+
+  // Update tenant memberships and role if provided
+  if (result.data.tenantIds && result.data.role) {
+    // First, delete all existing memberships for this user
+    const { error: deleteError } = await client.from('members').delete().eq('user_id', result.data.userId)
+
+    if (deleteError) {
+      redirect(
+        `/settings?error=${encodeURIComponent(`Failed to update user tenants: ${deleteError.message}`)}`,
+      )
+    }
+
+    // Then insert new memberships
+    const email = result.data.email || (await client.auth.admin.getUserById(result.data.userId)).data.user?.email || ''
+    const membersToInsert = result.data.tenantIds.map((tenantId) => ({
+      tenant_id: tenantId,
+      user_id: result.data.userId,
+      email,
+      role: result.data.role!,
+    }))
+
+    const { error: insertError } = await client.from('members').insert(membersToInsert)
+
+    if (insertError) {
+      redirect(
+        `/settings?error=${encodeURIComponent(`Failed to add user to tenants: ${insertError.message}`)}`,
+      )
+    }
+
+    // Update email in all members if email changed
+    if (result.data.email) {
+      const { error: updateEmailError } = await client
+        .from('members')
+        .update({ email: result.data.email })
+        .eq('user_id', result.data.userId)
+
+      if (updateEmailError) {
+        // Non-critical error, continue
+        console.error('Failed to update email in members:', updateEmailError)
+      }
+    }
+  } else if (result.data.email) {
+    // Only update email in members table
+    const { error: updateEmailError } = await client
+      .from('members')
+      .update({ email: result.data.email })
+      .eq('user_id', result.data.userId)
+
+    if (updateEmailError) {
+      redirect(
+        `/settings?error=${encodeURIComponent(`Failed to update email: ${updateEmailError.message}`)}`,
+      )
+    }
+  }
+
+  revalidatePath('/settings')
+  redirect('/settings?status=user-updated')
 }
 
 export async function removePlatformAdmin(formData: FormData) {

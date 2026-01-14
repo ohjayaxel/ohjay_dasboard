@@ -1,40 +1,38 @@
-import { AppSidebar } from '@/components/app-sidebar'
-import { ChartAreaInteractive } from '@/components/chart-area-interactive'
-import { DataTable } from '@/components/data-table'
-import { SectionCards } from '@/components/section-cards'
-import { SiteHeader } from '@/components/site-header'
-import {
-  SidebarInset,
-  SidebarProvider,
-} from '@/components/ui/sidebar'
+import { redirect } from 'next/navigation'
+import { cookies } from 'next/headers'
 
-import data from "./data.json"
+import { getCurrentUser } from '@/lib/auth/current-user'
+import { getUserTenants } from '@/lib/admin/settings'
+import { isPlatformAdmin } from '@/lib/auth/roles'
+import { DashboardSelection } from '@/components/dashboard-selection'
 
-export default function Page() {
-  return (
-    <SidebarProvider
-      style={
-        {
-          "--sidebar-width": "calc(var(--spacing) * 72)",
-          "--header-height": "calc(var(--spacing) * 12)",
-        } as React.CSSProperties
-      }
-    >
-      <AppSidebar variant="inset" />
-      <SidebarInset>
-        <SiteHeader />
-        <div className="flex flex-1 flex-col">
-          <div className="@container/main flex flex-1 flex-col gap-2">
-            <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
-              <SectionCards />
-              <div className="px-4 lg:px-6">
-                <ChartAreaInteractive />
-              </div>
-              <DataTable data={data} />
-            </div>
-          </div>
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
-  )
+export default async function DashboardPage() {
+  const user = await getCurrentUser()
+  const userTenants = await getUserTenants(user.id)
+  const userIsAdmin = isPlatformAdmin(user.role)
+
+  // Check for saved tenant preference in cookies
+  const cookieStore = await cookies()
+  const savedTenantSlug = cookieStore.get('selectedTenant')?.value
+
+  // If user has a saved tenant preference, redirect to it
+  if (savedTenantSlug) {
+    const savedTenant = userTenants.find((t) => t.tenantSlug === savedTenantSlug)
+    if (savedTenant) {
+      redirect(`/t/${savedTenantSlug}`)
+    }
+  }
+
+  // If user only has one tenant, redirect directly to it
+  if (userTenants.length === 1) {
+    redirect(`/t/${userTenants[0].tenantSlug}`)
+  }
+
+  // If user has multiple tenants or admin access, show selection page
+  if (userTenants.length > 1 || userIsAdmin) {
+    return <DashboardSelection userTenants={userTenants} isAdmin={userIsAdmin} />
+  }
+
+  // Fallback: if no tenants, redirect to signin
+  redirect('/signin')
 }
