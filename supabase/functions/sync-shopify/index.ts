@@ -14,6 +14,18 @@ function getEnvVar(key: string) {
   return value;
 }
 
+function requireTriggerSecret(request: Request) {
+  const expected = Deno.env.get('SYNC_TRIGGER_SECRET');
+  if (!expected) {
+    // If unset, keep backwards compatibility (but strongly recommend setting it).
+    return;
+  }
+  const got = request.headers.get('x-sync-secret');
+  if (!got || got !== expected) {
+    throw new Error('Unauthorized: missing/invalid x-sync-secret');
+  }
+}
+
 function createSupabaseClient(): SupabaseClient {
   const url = getEnvVar('SUPABASE_URL');
   const serviceRole = getEnvVar('SUPABASE_SERVICE_ROLE_KEY');
@@ -21,6 +33,37 @@ function createSupabaseClient(): SupabaseClient {
   return createClient(url, serviceRole, {
     auth: { persistSession: false },
   });
+}
+
+function stockholmDay(date: Date = new Date()): string {
+  // YYYY-MM-DD in Europe/Stockholm
+  return date.toLocaleDateString('en-CA', { timeZone: 'Europe/Stockholm' });
+}
+
+function addDays(day: string, deltaDays: number): string {
+  // day: YYYY-MM-DD
+  const [y, m, d] = day.split('-').map((x) => parseInt(x, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return dt.toISOString().slice(0, 10);
+}
+
+function normalizeToIsoCursor(value: string): string {
+  // Accept either YYYY-MM-DD or an ISO timestamp. Always returns ISO (UTC).
+  if (value.match(/^\d{4}-\d{2}-\d{2}$/)) return `${value}T00:00:00Z`;
+  return value;
+}
+
+function addHoursIso(iso: string, hours: number): string {
+  const dt = new Date(iso);
+  dt.setUTCHours(dt.getUTCHours() + hours);
+  return dt.toISOString();
+}
+
+function addSecondsIso(iso: string, seconds: number): string {
+  const dt = new Date(iso);
+  dt.setUTCSeconds(dt.getUTCSeconds() + seconds);
+  return dt.toISOString();
 }
 
 type BufferJson = {
@@ -81,10 +124,16 @@ type ShopifyRefund = {
   id: number;
   created_at: string;
   processed_at?: string; // Preferred date if available (more accurate for analytics)
+  adjustments?: Array<{
+    reason?: string | null;
+    amount?: string;
+    tax_amount?: string;
+  }>;
 
   // Line item refunds (used for refunded_subtotal)
   refund_line_items?: Array<{
     line_item_id: number | string;
+    refund_line_item_id?: string | null;
     quantity: number;
     subtotal?: string;
     subtotal_set?: {
@@ -134,6 +183,14 @@ type ShopifyOrder = {
   financial_status: string;
   fulfillment_status: string | null;
   source_name?: string; // e.g., "web", "pos", "shopify_draft_order"
+  transactions?: Array<{
+    id: string;
+    kind: string;
+    status: string;
+    processed_at?: string | null;
+    amount?: string | null;
+    currency?: string | null;
+  }>;
   refunds?: Array<ShopifyRefund>;
   cancelled_at?: string | null;
   tags?: string; // Comma-separated tags, may include "test"
@@ -367,12 +424,187 @@ async function fetchWithRetry(
  * Fetch orders from Shopify using GraphQL API with processed_at filter
  * This matches the backfill script's approach for consistency
  */
+function convertGraphQLOrderNodeToShopifyOrder(gqlOrder: any): ShopifyOrder {
+  // Extract customer ID from GID
+  let customerId: number | null = null;
+  if (gqlOrder.customer?.id) {
+    const gidMatch = gqlOrder.customer.id.match(/\/(\d+)$/);
+    if (gidMatch) {
+      customerId = parseInt(gidMatch[1]);
+    }
+  }
+
+  // Prefer order-level totalDiscountsSet when available; fallback to summing line-item discount allocations.
+  let totalDiscounts = 0;
+  const orderLevelDiscount = gqlOrder.totalDiscountsSet?.shopMoney?.amount;
+  if (orderLevelDiscount !== null && orderLevelDiscount !== undefined && orderLevelDiscount !== '') {
+    const n = parseFloat(orderLevelDiscount);
+    totalDiscounts = Number.isFinite(n) ? n : 0;
+  } else {
+    for (const lineItemEdge of gqlOrder.lineItems?.edges || []) {
+      const item = lineItemEdge.node;
+      for (const allocation of item.discountAllocations || []) {
+        totalDiscounts += parseFloat(allocation.allocatedAmountSet.shopMoney.amount || '0');
+      }
+    }
+  }
+
+  // Infer financial_status from transactions (same logic as backfill script)
+  // CRITICAL: Default to 'paid' if order has line items but no transactions
+  let financialStatus = 'pending';
+  if (gqlOrder.cancelledAt) {
+    financialStatus = 'voided';
+  } else if (gqlOrder.transactions && gqlOrder.transactions.length > 0) {
+    const successfulSales = gqlOrder.transactions.filter(
+      (txn: any) => (txn.kind === 'SALE' || txn.kind === 'CAPTURE') && txn.status === 'SUCCESS',
+    );
+    const refunds = gqlOrder.transactions.filter(
+      (txn: any) => txn.kind === 'REFUND' && txn.status === 'SUCCESS',
+    );
+
+    if (refunds.length > 0 && successfulSales.length > 0) {
+      financialStatus = 'partially_refunded';
+    } else if (successfulSales.length > 0) {
+      financialStatus = 'paid';
+    } else {
+      const hasLineItems = gqlOrder.lineItems?.edges?.length > 0;
+      financialStatus = hasLineItems ? 'paid' : 'pending';
+    }
+  } else {
+    const hasLineItems = gqlOrder.lineItems?.edges?.length > 0;
+    financialStatus = hasLineItems ? 'paid' : 'pending';
+  }
+
+  // Convert line items
+  const lineItems = (gqlOrder.lineItems?.edges || []).map((lineItemEdge: any) => {
+    const item = lineItemEdge.node;
+    let lineItemId: number | null = null;
+    const gidMatch = item.id.match(/\/(\d+)$/);
+    if (gidMatch) {
+      lineItemId = parseInt(gidMatch[1]);
+    }
+
+    let itemTotalDiscount = 0;
+    for (const allocation of item.discountAllocations || []) {
+      itemTotalDiscount += parseFloat(allocation.allocatedAmountSet.shopMoney.amount || '0');
+    }
+
+    let itemTaxTotal = 0;
+    for (const tl of item.taxLines || []) {
+      const amt = tl?.priceSet?.shopMoney?.amount;
+      if (amt !== null && amt !== undefined && amt !== '') {
+        const n = parseFloat(amt);
+        if (Number.isFinite(n)) itemTaxTotal += n;
+      }
+    }
+
+    return {
+      id: lineItemId || 0,
+      sku: item.sku || null,
+      name: item.name,
+      quantity: item.quantity,
+      price: item.originalUnitPriceSet.shopMoney.amount,
+      total_discount: itemTotalDiscount.toFixed(2),
+      tax: itemTaxTotal.toFixed(2),
+    };
+  });
+
+  // Convert refunds
+  const refunds: ShopifyRefund[] = (gqlOrder.refunds || []).map((refund: any) => ({
+    id: parseInt(refund.id.match(/\/(\d+)$/)?.[1] || '0'),
+    created_at: refund.createdAt,
+    adjustments: (refund.orderAdjustments?.edges || []).map((adjEdge: any) => ({
+      reason: adjEdge?.node?.reason ?? null,
+      amount: adjEdge?.node?.amountSet?.shopMoney?.amount ?? null,
+      tax_amount: adjEdge?.node?.taxAmountSet?.shopMoney?.amount ?? null,
+    })),
+    refund_line_items: (refund.refundLineItems?.edges || []).map((refundEdge: any) => {
+      const refundNode = refundEdge.node;
+      let refundLineItemId: number | null = null;
+      const gid = refundNode.lineItem?.id;
+      if (typeof gid === 'string') {
+        const m = gid.match(/\/(\d+)$/);
+        if (m) refundLineItemId = parseInt(m[1]);
+      }
+      return {
+        line_item_id: refundLineItemId || 0,
+        refund_line_item_id: refundNode.id ? String(refundNode.id) : null,
+        quantity: refundNode.quantity,
+        subtotal: refundNode.subtotalSet?.shopMoney?.amount,
+        line_item: refundNode.lineItem
+          ? {
+              price: refundNode.lineItem.originalUnitPriceSet.shopMoney.amount,
+            }
+          : undefined,
+      };
+    }),
+  }));
+
+  const transactions = (gqlOrder.transactions || []).map((t: any) => ({
+    id: String(t.id),
+    kind: String(t.kind),
+    status: String(t.status),
+    processed_at: t.processedAt || null,
+    amount: t.amountSet?.shopMoney?.amount ?? null,
+    currency: t.amountSet?.shopMoney?.currencyCode ?? null,
+  }));
+
+  return {
+    id: parseInt(gqlOrder.legacyResourceId || gqlOrder.id),
+    order_number: parseInt(String(gqlOrder.name || '').replace('#', '')),
+    processed_at: gqlOrder.processedAt || null,
+    created_at: gqlOrder.createdAt,
+    updated_at: gqlOrder.updatedAt || null,
+    cancelled_at: gqlOrder.cancelledAt || null,
+    total_price: gqlOrder.totalPriceSet?.shopMoney?.amount || '0',
+    subtotal_price: gqlOrder.subtotalPriceSet?.shopMoney?.amount || '0',
+    total_discounts: totalDiscounts.toFixed(2),
+    total_tax: gqlOrder.totalTaxSet?.shopMoney?.amount || '0',
+    currency: gqlOrder.currencyCode,
+    test: gqlOrder.test,
+    customer:
+      gqlOrder.customer && customerId
+        ? {
+            id: customerId,
+            email: gqlOrder.customer.email || null,
+            first_name: null,
+            last_name: null,
+          }
+        : null,
+    line_items: lineItems,
+    transactions,
+    refunds,
+    financial_status: financialStatus,
+    billing_address: gqlOrder.billingAddress
+      ? {
+          country_code: gqlOrder.billingAddress.countryCode || null,
+          country: gqlOrder.billingAddress.country || null,
+        }
+      : undefined,
+    shipping_address: gqlOrder.shippingAddress
+      ? {
+          country_code: gqlOrder.shippingAddress.countryCode || null,
+          country: gqlOrder.shippingAddress.country || null,
+        }
+      : undefined,
+    total_shipping_price_set: gqlOrder.totalShippingPriceSet
+      ? {
+          shop_money: {
+            amount: gqlOrder.totalShippingPriceSet.shopMoney.amount,
+            currency_code: gqlOrder.totalShippingPriceSet.shopMoney.currencyCode,
+          },
+        }
+      : undefined,
+    total_duties_set: undefined,
+  };
+}
+
 async function fetchShopifyOrdersGraphQL(params: {
   shopDomain: string;
   accessToken: string;
   since?: string;
   until?: string;
-  filterBy?: 'created_at' | 'processed_at';
+  filterBy?: 'created_at' | 'processed_at' | 'updated_at';
   excludeTest?: boolean;
 }): Promise<ShopifyOrder[]> {
   const normalizedShop = normalizeShopDomain(params.shopDomain);
@@ -387,6 +619,8 @@ async function fetchShopifyOrdersGraphQL(params: {
   if (params.since) {
     if (filterBy === 'processed_at') {
       queryParts.push(`processed_at:>='${params.since}'`);
+    } else if (filterBy === 'updated_at') {
+      queryParts.push(`updated_at:>='${params.since}'`);
     } else {
       queryParts.push(`created_at:>='${params.since}'`);
     }
@@ -394,6 +628,8 @@ async function fetchShopifyOrdersGraphQL(params: {
   if (params.until) {
     if (filterBy === 'processed_at') {
       queryParts.push(`processed_at:<='${params.until}T23:59:59'`);
+    } else if (filterBy === 'updated_at') {
+      queryParts.push(`updated_at:<='${params.until}T23:59:59'`);
     } else {
       queryParts.push(`created_at:<='${params.until}T23:59:59'`);
     }
@@ -515,9 +751,29 @@ async function fetchShopifyOrdersGraphQL(params: {
             refunds(first: 250) {
               id
               createdAt
+              orderAdjustments(first: 50) {
+                edges {
+                  node {
+                    reason
+                    amountSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                    taxAmountSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                }
+              }
               refundLineItems(first: 250) {
                 edges {
                   node {
+                    id
                     quantity
                     lineItem {
                       id
@@ -562,10 +818,10 @@ async function fetchShopifyOrdersGraphQL(params: {
 
     const response = await fetchWithRetry(`https://${normalizedShop}/admin/api/2023-10/graphql.json`, {
       method: 'POST',
-      headers: {
+    headers: {
         'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': params.accessToken,
-      },
+      'X-Shopify-Access-Token': params.accessToken,
+    },
       body: JSON.stringify({
         query: ORDERS_QUERY,
         variables,
@@ -587,159 +843,8 @@ async function fetchShopifyOrdersGraphQL(params: {
       break;
     }
 
-    // Convert GraphQL orders to REST format
     for (const edge of orders) {
-      const gqlOrder = edge.node;
-      
-      // Extract customer ID from GID
-      let customerId: number | null = null;
-      if (gqlOrder.customer?.id) {
-        const gidMatch = gqlOrder.customer.id.match(/\/(\d+)$/);
-        if (gidMatch) {
-          customerId = parseInt(gidMatch[1]);
-        }
-      }
-
-      // Prefer order-level totalDiscountsSet when available; fallback to summing line-item discount allocations.
-      let totalDiscounts = 0;
-      const orderLevelDiscount = gqlOrder.totalDiscountsSet?.shopMoney?.amount;
-      if (orderLevelDiscount !== null && orderLevelDiscount !== undefined && orderLevelDiscount !== '') {
-        const n = parseFloat(orderLevelDiscount);
-        totalDiscounts = Number.isFinite(n) ? n : 0;
-      } else {
-        for (const lineItemEdge of gqlOrder.lineItems.edges || []) {
-          const item = lineItemEdge.node;
-          for (const allocation of item.discountAllocations || []) {
-            totalDiscounts += parseFloat(allocation.allocatedAmountSet.shopMoney.amount || '0');
-          }
-        }
-      }
-
-      // Infer financial_status from transactions (same logic as backfill script)
-      // CRITICAL: Default to 'paid' if order has line items but no transactions
-      // This ensures orders are not filtered out by calculateShopifyLikeSales
-      // This matches Shopify Analytics behavior where orders typically have financial_status='paid'
-      let financialStatus = 'pending';
-      if (gqlOrder.cancelledAt) {
-        financialStatus = 'voided';
-      } else if (gqlOrder.transactions && gqlOrder.transactions.length > 0) {
-        const successfulSales = gqlOrder.transactions.filter(
-          (txn: any) => (txn.kind === 'SALE' || txn.kind === 'CAPTURE') && txn.status === 'SUCCESS'
-        );
-        const refunds = gqlOrder.transactions.filter(
-          (txn: any) => txn.kind === 'REFUND' && txn.status === 'SUCCESS'
-        );
-        
-        if (refunds.length > 0 && successfulSales.length > 0) {
-          financialStatus = 'partially_refunded';
-        } else if (successfulSales.length > 0) {
-          financialStatus = 'paid';
-        } else {
-          // No successful sales transactions - but if we have line items, assume 'paid'
-          // (transactions might be missing from GraphQL but order is actually paid)
-          const hasLineItems = gqlOrder.lineItems?.edges?.length > 0;
-          financialStatus = hasLineItems ? 'paid' : 'pending';
-        }
-      } else {
-        // No transactions available - default to 'paid' if order has line items
-        // This ensures orders are included in calculations (matches Shopify Analytics behavior)
-        const hasLineItems = gqlOrder.lineItems?.edges?.length > 0;
-        financialStatus = hasLineItems ? 'paid' : 'pending';
-      }
-
-      // Convert line items
-      const lineItems = (gqlOrder.lineItems.edges || []).map((lineItemEdge: any) => {
-        const item = lineItemEdge.node;
-        let lineItemId: number | null = null;
-        const gidMatch = item.id.match(/\/(\d+)$/);
-        if (gidMatch) {
-          lineItemId = parseInt(gidMatch[1]);
-        }
-
-        let itemTotalDiscount = 0;
-        for (const allocation of item.discountAllocations || []) {
-          itemTotalDiscount += parseFloat(allocation.allocatedAmountSet.shopMoney.amount || '0');
-        }
-
-        let itemTaxTotal = 0;
-        for (const tl of item.taxLines || []) {
-          const amt = tl?.priceSet?.shopMoney?.amount;
-          if (amt !== null && amt !== undefined && amt !== '') {
-            const n = parseFloat(amt);
-            if (Number.isFinite(n)) itemTaxTotal += n;
-          }
-        }
-
-        return {
-          id: lineItemId || 0,
-          sku: item.sku || null,
-          name: item.name,
-          quantity: item.quantity,
-          price: item.originalUnitPriceSet.shopMoney.amount,
-          total_discount: itemTotalDiscount.toFixed(2),
-          tax: itemTaxTotal.toFixed(2),
-        };
-      });
-
-      // Convert refunds
-      const refunds: ShopifyRefund[] = (gqlOrder.refunds || []).map((refund: any) => ({
-        id: parseInt(refund.id.match(/\/(\d+)$/)?.[1] || '0'),
-        created_at: refund.createdAt,
-        refund_line_items: (refund.refundLineItems?.edges || []).map((refundEdge: any) => {
-          const refundNode = refundEdge.node;
-          return {
-            line_item_id: refundNode.lineItem?.id || null,
-            quantity: refundNode.quantity,
-            subtotal: refundNode.subtotalSet?.shopMoney?.amount,
-            line_item: refundNode.lineItem ? {
-              price: refundNode.lineItem.originalUnitPriceSet.shopMoney.amount,
-            } : undefined,
-          };
-        }),
-      }));
-
-      const restOrder: ShopifyOrder = {
-        id: parseInt(gqlOrder.legacyResourceId || gqlOrder.id),
-        order_number: parseInt(gqlOrder.name.replace('#', '')),
-        processed_at: gqlOrder.processedAt || null,
-        created_at: gqlOrder.createdAt,
-        updated_at: gqlOrder.updatedAt || null,
-        cancelled_at: gqlOrder.cancelledAt || null,
-        total_price: gqlOrder.totalPriceSet?.shopMoney?.amount || '0',
-        subtotal_price: gqlOrder.subtotalPriceSet?.shopMoney?.amount || '0',
-        total_discounts: totalDiscounts.toFixed(2),
-        total_tax: gqlOrder.totalTaxSet?.shopMoney?.amount || '0',
-        currency: gqlOrder.currencyCode,
-        test: gqlOrder.test,
-        customer: gqlOrder.customer && customerId ? {
-          id: customerId,
-          email: gqlOrder.customer.email || null,
-          first_name: null,
-          last_name: null,
-        } : null,
-        line_items: lineItems,
-        refunds,
-        financial_status: financialStatus,
-        billing_address: gqlOrder.billingAddress ? {
-          country_code: gqlOrder.billingAddress.countryCode || null,
-          country: gqlOrder.billingAddress.country || null,
-        } : undefined,
-        shipping_address: gqlOrder.shippingAddress ? {
-          country_code: gqlOrder.shippingAddress.countryCode || null,
-          country: gqlOrder.shippingAddress.country || null,
-        } : undefined,
-        total_shipping_price_set: gqlOrder.totalShippingPriceSet ? {
-          shop_money: {
-            amount: gqlOrder.totalShippingPriceSet.shopMoney.amount,
-            currency_code: gqlOrder.totalShippingPriceSet.shopMoney.currencyCode,
-          },
-        } : undefined,
-        // NOTE: Some Shopify stores / API versions do not expose totalDutiesSet on Order in Admin GraphQL.
-        // We keep duties null for now to avoid hard-failing the entire sync.
-        total_duties_set: undefined,
-      };
-
-      allOrders.push(restOrder);
+      allOrders.push(convertGraphQLOrderNodeToShopifyOrder(edge.node));
     }
 
     const pageInfo = result.data?.orders?.pageInfo;
@@ -763,6 +868,201 @@ async function fetchShopifyOrdersGraphQL(params: {
   console.log(`[sync-shopify] Total orders fetched via GraphQL: ${allOrders.length} across ${page - 1} page(s)`);
   
   return allOrders;
+}
+
+/**
+ * Fetch a specific set of orders by ID (fast path to avoid timeouts for large updated_at windows)
+ */
+async function fetchShopifyOrdersByIdsGraphQL(params: {
+  shopDomain: string;
+  accessToken: string;
+  orderIds: string[]; // numeric legacy IDs or full GIDs
+}): Promise<ShopifyOrder[]> {
+  const normalizedShop = normalizeShopDomain(params.shopDomain);
+  const ids = (params.orderIds || [])
+    .map((id) => String(id).trim())
+    .filter(Boolean)
+    .map((id) => (id.startsWith('gid://') ? id : `gid://shopify/Order/${id}`));
+
+  if (ids.length === 0) return [];
+
+  // Reuse the same selection set as the paginated query.
+  const ORDERS_BY_ID_QUERY = `
+    query GetOrdersByIds($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on Order {
+          id
+          name
+          legacyResourceId
+          createdAt
+          processedAt
+          updatedAt
+          cancelledAt
+          test
+          currencyCode
+          customer {
+            id
+            email
+            numberOfOrders
+          }
+          billingAddress {
+            countryCode
+            country
+          }
+          shippingAddress {
+            countryCode
+            country
+          }
+          totalPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          subtotalPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          totalDiscountsSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          totalTaxSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          totalShippingPriceSet {
+            shopMoney {
+              amount
+              currencyCode
+            }
+          }
+          lineItems(first: 250) {
+            edges {
+              node {
+                id
+                sku
+                name
+                quantity
+                originalUnitPriceSet {
+                  shopMoney {
+                    amount
+                    currencyCode
+                  }
+                }
+                taxLines {
+                  priceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+                discountAllocations {
+                  allocatedAmountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+          transactions(first: 250) {
+            id
+            kind
+            status
+            processedAt
+            gateway
+            amountSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+          }
+          refunds(first: 250) {
+            id
+            createdAt
+            orderAdjustments(first: 50) {
+              edges {
+                node {
+                  reason
+                  amountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  taxAmountSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+            refundLineItems(first: 250) {
+              edges {
+                node {
+                  id
+                  quantity
+                  lineItem {
+                    id
+                    originalUnitPriceSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                  subtotalSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await fetchWithRetry(`https://${normalizedShop}/admin/api/2023-10/graphql.json`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': params.accessToken,
+    },
+    body: JSON.stringify({
+      query: ORDERS_BY_ID_QUERY,
+      variables: { ids },
+    }),
+  });
+
+  const result = await response.json();
+  if (result.errors) {
+    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(result.errors)}`);
+  }
+
+  const nodes = (result.data?.nodes || []) as any[];
+  const orders: ShopifyOrder[] = [];
+  for (const node of nodes) {
+    if (!node || !node.legacyResourceId) continue;
+    orders.push(convertGraphQLOrderNodeToShopifyOrder(node));
+  }
+  return orders;
 }
 
 function normalizeShopDomain(domain: string): string {
@@ -940,7 +1240,25 @@ function calculateShopifyLikeSalesInline(order: ShopifyOrder): {
       for (const refundLineItem of refund.refund_line_items || []) {
         // Prefer subtotal field (EXCL tax), otherwise calculate from price
         if (refundLineItem.subtotal) {
-          returns += parseFloat(refundLineItem.subtotal);
+          const incl = parseFloat(refundLineItem.subtotal);
+          if (Number.isFinite(incl) && incl > 0) {
+            // Shopify Analytics export `Returer` is EXCL tax. In our GraphQL mapping,
+            // refundLineItems.subtotalSet is often INCL tax, so convert using original line item tax.
+            const originalLineItem = (order.line_items || []).find(
+              (item) => item.id.toString() === refundLineItem.line_item_id.toString(),
+            );
+            if (originalLineItem && originalLineItem.tax) {
+              const taxTotal = parseFloat(originalLineItem.tax) || 0;
+              const qty = originalLineItem.quantity || 0;
+              const perUnitTax = qty > 0 ? taxTotal / qty : 0;
+              const refundedTax = perUnitTax * (refundLineItem.quantity || 0);
+              const ex = incl - refundedTax;
+              returns += ex > 0 ? ex : 0;
+            } else {
+              // Fallback: assume subtotal is already EXCL tax.
+              returns += incl;
+            }
+          }
         } else if (refundLineItem.line_item?.price) {
           // Use line_item.price × quantity
           returns += parseFloat(refundLineItem.line_item.price) * refundLineItem.quantity;
@@ -1203,22 +1521,22 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
     
     // Count ALL orders with gross_sales > 0 as "orders" (Shopify Analytics behavior)
     // No filtering on is_refund - only gross_sales > 0 matters
-    existing.conversions += 1;
-    
-    // Track currency frequency (use most common currency for the day)
-    if (row.currency) {
-      const count = existing.currencies.get(row.currency) ?? 0;
-      existing.currencies.set(row.currency, count + 1);
-    }
-    
+      existing.conversions += 1;
+      
+      // Track currency frequency (use most common currency for the day)
+      if (row.currency) {
+        const count = existing.currencies.get(row.currency) ?? 0;
+        existing.currencies.set(row.currency, count + 1);
+      }
+      
     // Use is_first_order_for_customer for correct classification
     // is_new_customer is kept for backward compatibility but should match is_first_order_for_customer
     if (row.is_first_order_for_customer === true) {
-      existing.new_customer_conversions += 1;
-      existing.new_customer_net_sales += netValue;
-    } else {
-      existing.returning_customer_conversions += 1;
-      existing.returning_customer_net_sales += netValue;
+        existing.new_customer_conversions += 1;
+        existing.new_customer_net_sales += netValue;
+      } else {
+        existing.returning_customer_conversions += 1;
+        existing.returning_customer_net_sales += netValue;
     }
     byDate.set(row.processed_at, existing);
   }
@@ -1265,11 +1583,11 @@ function aggregateKpis(rows: ShopifyOrderRow[]) {
 async function upsertJobLog(
   client: SupabaseClient,
   payload: {
-    tenantId: string;
-    status: 'pending' | 'running' | 'succeeded' | 'failed';
-    error?: string;
-    startedAt: string;
-    finishedAt?: string;
+  tenantId: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed';
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
     jobLogId?: string; // If provided, update this specific job log entry
   },
 ): Promise<string | null> {
@@ -1297,12 +1615,12 @@ async function upsertJobLog(
   const { error, data } = await client
     .from('jobs_log')
     .insert({
-      tenant_id: payload.tenantId,
-      source: SOURCE,
-      status: payload.status,
-      started_at: payload.startedAt,
-      finished_at: payload.finishedAt ?? null,
-      error: payload.error ?? null,
+    tenant_id: payload.tenantId,
+    source: SOURCE,
+    status: payload.status,
+    started_at: payload.startedAt,
+    finished_at: payload.finishedAt ?? null,
+    error: payload.error ?? null,
     })
     .select('id')
     .single();
@@ -1314,7 +1632,11 @@ async function upsertJobLog(
   return data?.id ?? null;
 }
 
-async function processTenant(client: SupabaseClient, connection: ShopifyConnection): Promise<JobResult> {
+async function processTenant(
+  client: SupabaseClient,
+  connection: ShopifyConnection,
+  options?: { orderIds?: string[] | null },
+): Promise<JobResult> {
   const tenantId = connection.tenant_id;
   const startedAt = new Date().toISOString();
 
@@ -1347,18 +1669,40 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
 
     const normalizedShop = normalizeShopDomain(shopDomain);
 
-    const syncStartDate = connection.meta?.sync_start_date;
-    const backfillSince = connection.meta?.backfill_since;
-    let since =
+    const meta = (connection.meta ?? {}) as Record<string, any>;
+    const syncStartDate = meta.sync_start_date;
+    const backfillSince = meta.backfill_since;
+    const backfillCursor = meta.backfill_cursor;
+
+    // Incremental strategy:
+    // - If backfill_since is set (or we have an initial sync_start_date in the past), process ONE Stockholm day at a time.
+    // - Otherwise, process today's Stockholm day (idempotent hourly refresh; captures new orders + refunds via updated_at).
+    const todayDay = stockholmDay();
+    const backfillAnchor =
       typeof backfillSince === 'string' && backfillSince.length > 0
         ? backfillSince
         : typeof syncStartDate === 'string' && syncStartDate.length > 0
           ? syncStartDate
-          : undefined;
+          : null;
+
+    const inBackfill =
+      typeof backfillAnchor === 'string' &&
+      backfillAnchor.length >= 10 &&
+      backfillAnchor.match(/^\d{4}-\d{2}-\d{2}$/) &&
+      backfillAnchor < todayDay;
+
+    const dayToProcess = inBackfill
+      ? (typeof backfillCursor === 'string' && backfillCursor.length >= 10 ? backfillCursor : backfillAnchor!)
+      : todayDay;
+
+    let since: string | undefined = dayToProcess;
 
     // Fetch orders from Shopify using GraphQL API with processed_at filter
     // This matches the backfill script's approach for consistency
-    console.log(`[sync-shopify] Fetching orders for tenant ${tenantId}, shop ${normalizedShop}, since ${since || 'all time'}`);
+    console.log(
+      `[sync-shopify] Fetching orders for tenant ${tenantId}, shop ${normalizedShop}, day ${dayToProcess}` +
+        (inBackfill ? ` (backfill from ${backfillAnchor})` : ''),
+    );
     
     // For daily syncs, if 'since' is a single date, fetch that entire day
     // Otherwise, if a date range is provided, use it
@@ -1374,15 +1718,41 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       }
     }
     
-    // Fetch ALL orders without filtering - filtering happens in database/frontend
-    const shopifyOrders = await fetchShopifyOrdersGraphQL({
+    // Fetch orders:
+    // - If request provided orderIds, use a fast targeted fetch (avoids timeouts)
+    // - Otherwise, do the processed_at + updated_at union (captures refunds on older orders)
+    let shopifyOrders: ShopifyOrder[] = [];
+    if (options?.orderIds && options.orderIds.length > 0) {
+      shopifyOrders = await fetchShopifyOrdersByIdsGraphQL({
+        shopDomain: normalizedShop,
+        accessToken,
+        orderIds: options.orderIds,
+      });
+    } else {
+      const processedOrders = await fetchShopifyOrdersGraphQL({
       shopDomain: normalizedShop,
       accessToken,
       since,
-      until,
-      filterBy: 'processed_at', // Use processed_at filter (same as backfill)
-      excludeTest: false, // Don't filter - fetch all orders, filtering happens in DB/frontend
-    });
+        until,
+        filterBy: 'processed_at',
+        excludeTest: false,
+      });
+      const updatedOrders = since
+        ? await fetchShopifyOrdersGraphQL({
+            shopDomain: normalizedShop,
+            accessToken,
+            since,
+            until,
+            filterBy: 'updated_at',
+            excludeTest: false,
+          })
+        : [];
+
+      const byId = new Map<string, ShopifyOrder>();
+      for (const o of processedOrders) byId.set(o.id.toString(), o);
+      for (const o of updatedOrders) byId.set(o.id.toString(), o);
+      shopifyOrders = Array.from(byId.values());
+    }
 
     console.log(`[sync-shopify] Fetched ${shopifyOrders.length} orders for tenant ${tenantId}`);
 
@@ -1767,6 +2137,262 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
         }
       }
 
+      // Upsert RETURN events into shopify_sales_transactions so we can attribute Returns by refund.createdAt day
+      // (Shopify Analytics export behavior).
+      const refundEventDates = new Set<string>();
+      try {
+        type SalesTransactionRow = {
+          tenant_id: string;
+          shopify_order_id: string;
+          shopify_order_name: string | null;
+          shopify_order_number: string | null;
+          shopify_refund_id: string | null;
+          shopify_line_item_id: string | null;
+          event_type: 'RETURN';
+          event_date: string; // YYYY-MM-DD
+          currency: string | null;
+          product_sku: string | null;
+          product_title: string | null;
+          variant_title: string | null;
+          quantity: number;
+          gross_sales: number;
+          discounts: number;
+          returns: number;
+          shipping: number;
+          tax: number;
+        };
+
+        const returnRowsRaw: SalesTransactionRow[] = [];
+
+        for (const { originalOrder } of orderRowsWithOriginal) {
+          if (!originalOrder.refunds || originalOrder.refunds.length === 0) continue;
+
+          const orderIdStr = originalOrder.id.toString();
+          const orderGid = `gid://shopify/Order/${orderIdStr}`;
+          const orderName = originalOrder.order_number ? `#${originalOrder.order_number}` : null;
+          const orderNumber = originalOrder.order_number ? String(originalOrder.order_number) : null;
+
+          for (const refund of originalOrder.refunds) {
+            if (!refund.created_at) continue;
+            const refundDay = parseDateInStockholmTimezone(refund.created_at);
+            if (!refundDay) continue;
+            refundEventDates.add(refundDay);
+
+            const refundId =
+              refund.id !== undefined && refund.id !== null ? String(refund.id) : null;
+            const refundGid = refundId ? `gid://shopify/Refund/${refundId}` : null;
+
+            const refundTxAmount = (() => {
+              let total = 0;
+              for (const t of originalOrder.transactions || []) {
+                if (String(t.kind).toUpperCase() !== 'REFUND') continue;
+                if (String(t.status).toUpperCase() !== 'SUCCESS') continue;
+                const txDay = t.processed_at ? parseDateInStockholmTimezone(t.processed_at) : null;
+                if (txDay && txDay !== refundDay) continue;
+                const amt = t.amount ? Math.abs(parseFloat(t.amount)) : 0;
+                if (!Number.isFinite(amt) || amt <= 0) continue;
+                total += amt;
+              }
+              return Math.round(total * 100) / 100;
+            })();
+
+            // Shopify Analytics export can net return-fees into `Returer` as positive amounts.
+            // These show up in GraphQL as refund.orderAdjustments (often reason REFUND_DISCREPANCY).
+            // We treat positive adjustments as fees and subtract them from product returns (EXCL tax),
+            // distributing proportionally across refunded line items.
+            const adjustmentFeeExcl = (() => {
+              let total = 0;
+              for (const adj of refund.adjustments || []) {
+                const amount = adj?.amount ? parseFloat(adj.amount) : 0;
+                const taxAmt = adj?.tax_amount ? parseFloat(adj.tax_amount) : 0;
+                const reason = String(adj?.reason || '').toUpperCase();
+                if (!Number.isFinite(amount) || amount <= 0) continue;
+                // Ignore pending bookkeeping adjustments.
+                if (reason.includes('PENDING')) continue;
+                // Exclude the mirrored cash-refund adjustment (commonly equals the refund transaction amount).
+                // The "fee" we want is typically smaller and has taxAmount=0.
+                if (refundTxAmount > 0 && Math.abs(amount - refundTxAmount) < 0.01) continue;
+                total += Math.max(0, amount - (Number.isFinite(taxAmt) ? taxAmt : 0));
+              }
+              return Math.round(total * 100) / 100;
+            })();
+
+            // We'll compute per-line returnsExcl and then distribute fee.
+            const perLine: Array<{
+              lineItemIdStr: string | null;
+              lineItemGid: string | null;
+              qty: number;
+              returnsExcl: number;
+            }> = [];
+
+            for (const rli of refund.refund_line_items || []) {
+              const qty = rli.quantity || 0;
+              const subtotalIncl = rli.subtotal ? parseFloat(rli.subtotal) : 0;
+              const fallbackPrice =
+                !subtotalIncl && rli.line_item?.price
+                  ? parseFloat(rli.line_item.price) * qty
+                  : 0;
+              // Compute Returns EXCL tax AFTER discounts (matches Shopify Analytics export `Returer`).
+              // Preferred: derive from the original line item net (gross - discount), then scale by refunded qty,
+              // then convert to EXCL tax using line tax rate.
+              let returnsExcl = 0;
+
+              const original = (originalOrder.line_items || []).find(
+                (li: any) => li.id?.toString?.() === rli.line_item_id?.toString?.(),
+              );
+
+              if (original) {
+                const priceIncl = parseFloat(original.price || '0') || 0;
+                const origQty = original.quantity || 0;
+                const discountIncl = parseFloat(original.total_discount || '0') || 0;
+                const taxTotal = parseFloat(original.tax || '0') || 0;
+
+                const lineTotalIncl = priceIncl * origQty;
+                const lineNetIncl = Math.max(0, lineTotalIncl - discountIncl);
+
+                let lineTaxRate = 0;
+                if (taxTotal > 0 && lineNetIncl > taxTotal) {
+                  lineTaxRate = taxTotal / (lineNetIncl - taxTotal);
+                }
+
+                const perUnitNetExcl =
+                  origQty > 0
+                    ? (lineTaxRate > 0 ? lineNetIncl / (1 + lineTaxRate) : lineNetIncl) / origQty
+                    : 0;
+
+                returnsExcl = perUnitNetExcl * qty;
+              } else {
+                // Fallback: use refund subtotal or original price and convert to EXCL tax using order line tax when available.
+                let basisInclOrEx = subtotalIncl || fallbackPrice;
+                returnsExcl = basisInclOrEx;
+              }
+
+              const lineItemIdStr =
+                rli.line_item_id !== undefined && rli.line_item_id !== null
+                  ? String(rli.line_item_id)
+                  : null;
+              const lineItemGid = lineItemIdStr ? `gid://shopify/LineItem/${lineItemIdStr}` : null;
+              const refundLineItemKey = rli.refund_line_item_id ? String(rli.refund_line_item_id) : null;
+              const uniqueLineKey =
+                lineItemGid && refundLineItemKey ? `${lineItemGid}#rli:${refundLineItemKey}` : lineItemGid;
+
+              const amt = Math.round(Math.max(0, returnsExcl) * 100) / 100;
+              if (!Number.isFinite(amt) || amt <= 0) continue;
+              perLine.push({ lineItemIdStr, lineItemGid: uniqueLineKey, qty, returnsExcl: amt });
+            }
+
+            const totalProductReturnsExcl = Math.round(perLine.reduce((s, x) => s + x.returnsExcl, 0) * 100) / 100;
+            const feeToAllocate = totalProductReturnsExcl > 0 ? Math.min(adjustmentFeeExcl, totalProductReturnsExcl) : 0;
+
+            for (let idx = 0; idx < perLine.length; idx++) {
+              const li = perLine[idx];
+              const share =
+                feeToAllocate > 0 && totalProductReturnsExcl > 0
+                  ? (feeToAllocate * li.returnsExcl) / totalProductReturnsExcl
+                  : 0;
+              // Round share; put remainder on last line to keep totals stable.
+              const feeShare =
+                idx === perLine.length - 1
+                  ? Math.round((feeToAllocate - perLine.slice(0, idx).reduce((s, x) => s + Math.round((feeToAllocate * x.returnsExcl) / totalProductReturnsExcl * 100) / 100, 0)) * 100) / 100
+                  : Math.round(share * 100) / 100;
+
+              const returnsAfterFee = Math.round(Math.max(0, li.returnsExcl - feeShare) * 100) / 100;
+              if (returnsAfterFee <= 0) continue;
+
+              returnRowsRaw.push({
+                tenant_id: tenantId,
+                shopify_order_id: orderGid,
+                shopify_order_name: orderName,
+                shopify_order_number: orderNumber,
+                shopify_refund_id: refundGid,
+                shopify_line_item_id: li.lineItemGid,
+                event_type: 'RETURN',
+                event_date: refundDay,
+                currency: originalOrder.currency || null,
+                product_sku: null,
+                product_title: null,
+                variant_title: null,
+                quantity: li.qty,
+                gross_sales: 0,
+                discounts: 0,
+                returns: returnsAfterFee,
+                shipping: 0,
+                tax: 0,
+              });
+            }
+
+            // Tx-only refunds: if Shopify export shows `Returer` but there are no refund line items,
+            // allocate successful REFUND transactions on the refund day as Returns (EXCL tax).
+            // This is needed for cases like 7192227283287 / 7191716233559 where Skatter=0 in export.
+            if (!refund.refund_line_items || refund.refund_line_items.length === 0) {
+              const txs = (originalOrder.transactions || []).filter(
+                (t: any) => String(t.kind).toUpperCase() === 'REFUND' && String(t.status).toUpperCase() === 'SUCCESS',
+              );
+              for (const t of txs) {
+                const txDay = t.processed_at ? parseDateInStockholmTimezone(t.processed_at) : null;
+                if (txDay && txDay !== refundDay) continue;
+                const amt = t.amount ? Math.abs(parseFloat(t.amount)) : 0;
+                if (!Number.isFinite(amt) || amt <= 0) continue;
+                const txId = t.id || `${orderIdStr}-${refundId || 'refund'}-${t.processed_at || refund.created_at}`;
+                returnRowsRaw.push({
+                  tenant_id: tenantId,
+                  shopify_order_id: orderGid,
+                  shopify_order_name: orderName,
+                  shopify_order_number: orderNumber,
+                  shopify_refund_id: refundGid,
+                  shopify_line_item_id: `gid://shopify/LineItem/tx-${txId}`,
+                  event_type: 'RETURN',
+                  event_date: refundDay,
+                  currency: t.currency || originalOrder.currency || null,
+                  product_sku: null,
+                  product_title: null,
+                  variant_title: null,
+                  quantity: 0,
+                  gross_sales: 0,
+                  discounts: 0,
+                  returns: Math.round(amt * 100) / 100,
+                  shipping: 0,
+                  tax: 0,
+                });
+              }
+            }
+          }
+        }
+
+        if (returnRowsRaw.length > 0) {
+          // Deduplicate by the unique constraint key
+          const txMap = new Map<string, SalesTransactionRow>();
+          for (const row of returnRowsRaw) {
+            const key = `${row.tenant_id}|${row.shopify_order_id}|${row.shopify_line_item_id || ''}|${row.event_type}|${row.event_date}|${row.shopify_refund_id || ''}`;
+            if (!txMap.has(key)) txMap.set(key, row);
+          }
+          const returnRows = Array.from(txMap.values());
+
+          const { error: returnTxError } = await client
+            .from('shopify_sales_transactions')
+            .upsert(returnRows, {
+              onConflict:
+                'tenant_id,shopify_order_id,shopify_line_item_id,event_type,event_date,shopify_refund_id',
+            });
+
+          if (returnTxError) {
+            console.error(
+              '[sync-shopify] Failed to upsert RETURN events to shopify_sales_transactions:',
+              returnTxError.message,
+            );
+          } else {
+            console.log(
+              `[sync-shopify] Upserted ${returnRows.length} RETURN events to shopify_sales_transactions`,
+            );
+          }
+        }
+      } catch (e) {
+        console.error(
+          '[sync-shopify] Failed to map/upsert RETURN events to shopify_sales_transactions:',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+
       // Log sync summary for operational parity verification
       console.log(
         `[sync-shopify] SYNC_VERSION=${SYNC_VERSION} - Summary: ${orderRows.length} orders updated, ${refundRows.length} refunds upserted, ${refundTransactionsUpserted} refund transactions upserted`,
@@ -1804,7 +2430,9 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       // Update shopify_daily_sales for all dates that were affected by this sync
       // We need to recalculate from ALL orders for each date (not just the synced ones)
       // to ensure accuracy - this matches the logic in recalculate_all_shopify_daily_sales.ts
-      const uniqueDates = Array.from(new Set(aggregates.map((a) => a.date)));
+      const uniqueDatesSet = new Set<string>(aggregates.map((a) => a.date));
+      for (const d of refundEventDates) uniqueDatesSet.add(d);
+      const uniqueDates = Array.from(uniqueDatesSet);
       
       for (const date of uniqueDates) {
         // Fetch ALL orders for this date from database
@@ -1823,9 +2451,10 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
 
         // Aggregate for this date from ALL orders
         let grossSales = 0;
-        let netSales = 0;
         let discounts = 0;
-        let refunds = 0;
+        // Net sales BEFORE returns on the refund day. We add returns back to order net_sales so returns
+        // are not attributed to the order day. Returns will be subtracted on the refund day instead.
+        let netSalesBeforeReturns = 0;
         let ordersCount = 0;
         let newCustomerNetSales = 0;
         let returningCustomerNetSales = 0;
@@ -1838,9 +2467,9 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
           const ref = parseFloat((order.refunds || 0).toString());
 
           grossSales += gross;
-          netSales += net;
           discounts += disc;
-          refunds += ref;
+          const netBefore = net + ref;
+          netSalesBeforeReturns += netBefore;
 
           // Count ALL orders with gross_sales > 0 (Shopify Analytics behavior)
           // Only filter: gross_sales > 0 (already filtered in the query above)
@@ -1848,15 +2477,81 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
           ordersCount += 1;
           
           if (order.is_first_order_for_customer === true) {
-            newCustomerNetSales += net;
+            newCustomerNetSales += netBefore;
           } else if (order.is_first_order_for_customer === false) {
-            returningCustomerNetSales += net;
+            returningCustomerNetSales += netBefore;
           }
 
           if (!currency && order.currency) {
             currency = order.currency as string;
           }
         }
+
+        // Compute returns for this day from refund-dated RETURN events.
+        // This ensures Returns are attributed to refund.createdAt day (Shopify Analytics export behavior),
+        // not to the order's processed_at day.
+        let refunds = 0;
+        let newCustomerRefunds = 0;
+        let returningCustomerRefunds = 0;
+
+        const { data: returnEvents, error: returnEventsError } = await client
+          .from('shopify_sales_transactions')
+          .select('shopify_order_id, returns')
+          .eq('tenant_id', tenantId)
+          .eq('event_type', 'RETURN')
+          .eq('event_date', date);
+
+        if (returnEventsError) {
+        console.error(
+            `[sync-shopify] Failed to fetch RETURN events for date ${date}:`,
+            returnEventsError.message,
+        );
+      } else {
+          const returnsByOrder = new Map<string, number>();
+          for (const ev of returnEvents || []) {
+            const orderId = (ev as any).shopify_order_id as string;
+            const amt = parseFloat(((ev as any).returns || 0).toString());
+            if (!orderId || !Number.isFinite(amt) || amt <= 0) continue;
+            refunds += amt;
+            returnsByOrder.set(orderId, (returnsByOrder.get(orderId) || 0) + amt);
+          }
+
+          // Bucket refunds by customer type by joining to shopify_orders.is_first_order_for_customer
+          const refundOrderIds = Array.from(returnsByOrder.keys());
+          if (refundOrderIds.length > 0) {
+            const { data: refundOrders, error: refundOrdersError } = await client
+              .from('shopify_orders')
+              .select('order_id, is_first_order_for_customer')
+              .eq('tenant_id', tenantId)
+              .in('order_id', refundOrderIds);
+
+            if (refundOrdersError) {
+              console.error(
+                `[sync-shopify] Failed to fetch refund order classifications for date ${date}:`,
+                refundOrdersError.message,
+              );
+            } else {
+              const isFirstMap = new Map<string, boolean | null>();
+              for (const ro of refundOrders || []) {
+                isFirstMap.set((ro as any).order_id as string, (ro as any).is_first_order_for_customer ?? null);
+              }
+              for (const [oid, amt] of returnsByOrder.entries()) {
+                const isFirst = isFirstMap.get(oid);
+                if (isFirst === true) newCustomerRefunds += amt;
+                else if (isFirst === false) returningCustomerRefunds += amt;
+              }
+            }
+          }
+        }
+
+        refunds = Math.round(refunds * 100) / 100;
+        newCustomerRefunds = Math.round(newCustomerRefunds * 100) / 100;
+        returningCustomerRefunds = Math.round(returningCustomerRefunds * 100) / 100;
+
+        // Final net sales for the day: gross - discounts - refunds (returns)
+        const netSales = Math.round((grossSales - discounts - refunds) * 100) / 100;
+        const newCustomerNetSalesFinal = Math.round((newCustomerNetSales - newCustomerRefunds) * 100) / 100;
+        const returningCustomerNetSalesFinal = Math.round((returningCustomerNetSales - returningCustomerRefunds) * 100) / 100;
 
         // Upsert shopify_daily_sales for this date
         const { error: dailySalesError } = await client
@@ -1872,8 +2567,8 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
               refunds_excl_tax: refunds,
               orders_count: ordersCount,
               currency: currency,
-              new_customer_net_sales: newCustomerNetSales,
-              returning_customer_net_sales: returningCustomerNetSales,
+              new_customer_net_sales: newCustomerNetSalesFinal,
+              returning_customer_net_sales: returningCustomerNetSalesFinal,
               guest_net_sales: 0,
             },
             {
@@ -1889,28 +2584,58 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
       console.log(`[sync-shopify] Updated shopify_daily_sales for ${uniqueDates.length} dates for tenant ${tenantId}`);
     }
 
-    if (backfillSince) {
-      const clearedMeta = {
-        ...(connection.meta ?? {}),
-        backfill_since: null,
-      };
+    // Persist progress so cron can continue where it left off (and so we rotate tenants)
+    try {
+      const existingMeta = (connection.meta ?? {}) as Record<string, any>;
+      const updatedMeta: Record<string, any> = { ...existingMeta };
 
-      const { error: clearBackfillError } = await client
-        .from('connections')
-        .update({
-          meta: clearedMeta,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', connection.id);
+      // Use the same backfill anchor logic as above
+      const todayDay = stockholmDay();
+      const syncStartDate = updatedMeta.sync_start_date;
+      const backfillSince = updatedMeta.backfill_since;
+      const backfillAnchor =
+        typeof backfillSince === 'string' && backfillSince.length > 0
+          ? backfillSince
+          : typeof syncStartDate === 'string' && syncStartDate.length > 0
+            ? syncStartDate
+            : null;
 
-      if (clearBackfillError) {
-        console.error(
-          `[sync-shopify] Failed to clear Shopify backfill flag for tenant ${tenantId}:`,
-          clearBackfillError.message,
-        );
-      } else {
-        console.log(`[sync-shopify] Cleared Shopify backfill flag for tenant ${tenantId}`);
+      const inBackfill =
+        typeof backfillAnchor === 'string' &&
+        backfillAnchor.length >= 10 &&
+        backfillAnchor.match(/^\d{4}-\d{2}-\d{2}$/) &&
+        backfillAnchor < todayDay;
+
+      const dayToProcess = inBackfill
+        ? (typeof updatedMeta.backfill_cursor === 'string' && updatedMeta.backfill_cursor.length >= 10
+            ? updatedMeta.backfill_cursor
+            : backfillAnchor!)
+        : todayDay;
+
+      if (inBackfill) {
+        const nextDay = addDays(dayToProcess, 1);
+        if (nextDay > todayDay) {
+          // Backfill finished
+          updatedMeta.backfill_since = null;
+          updatedMeta.backfill_cursor = null;
+          updatedMeta.initial_backfill_complete = true;
+        } else {
+          // Ensure we keep an explicit cursor (so we don't repeat the anchor forever)
+          updatedMeta.backfill_cursor = nextDay;
+          // If backfill_since wasn't explicitly set, pin it so progress survives future code changes
+          if (!updatedMeta.backfill_since) updatedMeta.backfill_since = backfillAnchor;
+        }
       }
+
+      updatedMeta.last_sync_day = dayToProcess;
+      updatedMeta.last_sync_at = new Date().toISOString();
+
+      await client
+        .from('connections')
+        .update({ meta: updatedMeta, updated_at: new Date().toISOString() })
+        .eq('id', connection.id);
+    } catch (e) {
+      console.error('[sync-shopify] Failed to update connection meta progress:', e instanceof Error ? e.message : String(e));
     }
 
     await upsertJobLog(client, {
@@ -1928,12 +2653,12 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
     
     // Update existing job log if we have an ID, otherwise create new one
     if (jobLogId) {
-      await upsertJobLog(client, {
-        tenantId,
-        status: 'failed',
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        error: message,
+    await upsertJobLog(client, {
+      tenantId,
+      status: 'failed',
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      error: message,
         jobLogId,
       });
     } else {
@@ -1980,12 +2705,23 @@ async function processTenant(client: SupabaseClient, connection: ShopifyConnecti
 
 serve(async (request) => {
   try {
+    if (request) {
+      requireTriggerSecret(request);
+    }
     let tenantFilter: string | null = null;
+    let orderIdsFilter: string[] | null = null;
+    let maxTenants: number | null = null;
     if (request) {
       try {
         const payload = await request.json();
         if (payload && typeof payload.tenantId === 'string' && payload.tenantId.length > 0) {
           tenantFilter = payload.tenantId;
+        }
+        if (payload && Array.isArray(payload.orderIds) && payload.orderIds.length > 0) {
+          orderIdsFilter = payload.orderIds.map((x: any) => String(x));
+        }
+        if (payload && typeof payload.maxTenants === 'number') {
+          maxTenants = payload.maxTenants;
         }
       } catch {
         // ignore invalid JSON
@@ -2001,6 +2737,14 @@ serve(async (request) => {
 
     if (tenantFilter) {
       query = query.eq('tenant_id', tenantFilter);
+    }
+
+    // When invoked from cron with no tenant filter, keep each invocation small to avoid Edge timeouts.
+    // We also order by updated_at so the "least recently touched" tenant gets processed first.
+    if (!tenantFilter) {
+      query = query
+        .order('updated_at', { ascending: true })
+        .limit(typeof maxTenants === 'number' && maxTenants > 0 ? maxTenants : 1);
     }
 
     const { data, error } = await query;
@@ -2019,7 +2763,7 @@ serve(async (request) => {
     );
 
     for (const connection of connections) {
-      const result = await processTenant(client, connection);
+      const result = await processTenant(client, connection, { orderIds: orderIdsFilter });
       results.push(result);
     }
 

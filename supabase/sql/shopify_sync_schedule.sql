@@ -28,11 +28,15 @@ $$;
 do $$
 begin
   -- Try to update first (if exists)
-  perform vault.update_secret('shopify_sync_function_key', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB1bmljb3ZhY2FrdGFzenFjY2twIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MjUxMDM3MywiZXhwIjoyMDc4MDg2MzczfQ.3-9ftt3jy_D4O1gjn3mO7F4NkKzqzfcDcc--unJwXGc');
+  -- IMPORTANT: do not commit service role keys.
+  -- Set/update this secret manually in Supabase Vault:
+  --   name: shopify_sync_function_key
+  --   value: <YOUR_SUPABASE_SERVICE_ROLE_JWT>
+  perform vault.update_secret('shopify_sync_function_key', '<SET_IN_SUPABASE_VAULT>');
 exception
   when others then
     -- If update fails, create new
-    perform vault.create_secret('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB1bmljb3ZhY2FrdGFzenFjY2twIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MjUxMDM3MywiZXhwIjoyMDc4MDg2MzczfQ.3-9ftt3jy_D4O1gjn3mO7F4NkKzqzfcDcc--unJwXGc', 'shopify_sync_function_key');
+    perform vault.create_secret('<SET_IN_SUPABASE_VAULT>', 'shopify_sync_function_key');
 end
 $$;
 
@@ -59,7 +63,8 @@ select
           'Content-Type', 'application/json',
           'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'shopify_sync_function_key')
         ),
-        body := jsonb_build_object()
+        -- Optional: keep cron invocations small; Edge Function defaults to maxTenants=1 anyway.
+        body := jsonb_build_object('maxTenants', 1)
       ) as request_id;
     $$
   );

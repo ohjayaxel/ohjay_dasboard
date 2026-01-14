@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Area, AreaChart, CartesianGrid, XAxis } from "recharts"
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 
 import {
@@ -109,6 +109,12 @@ export function MarketsChart({
     return formatNumber(value)
   }, [selectedMetric, formatCurrency, formatNumber, formatRatio])
 
+  // Horizontal bar chart works better for many markets (country labels)
+  const chartHeight = React.useMemo(() => {
+    // ~22px per row, bounded for layout sanity
+    return Math.min(560, Math.max(300, chartData.length * 22))
+  }, [chartData.length])
+
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
       <Card>
@@ -150,34 +156,30 @@ export function MarketsChart({
         </CardHeader>
         <CollapsibleContent>
           <CardContent className="pt-0">
-            <ChartContainer config={chartConfig} className="h-[300px] w-full">
-              <AreaChart data={chartData}>
-                <defs>
-                  <linearGradient id="fillValue" x1="0" y1="0" x2="0" y2="1">
-                    <stop
-                      offset="5%"
-                      stopColor={orangeColor}
-                      stopOpacity={0.8}
-                    />
-                    <stop
-                      offset="95%"
-                      stopColor={orangeColor}
-                      stopOpacity={0.1}
-                    />
-                  </linearGradient>
-                </defs>
+            <div style={{ height: chartHeight }}>
+              <ChartContainer config={chartConfig} className="h-full w-full">
+                <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 16 }}>
                 <CartesianGrid 
-                  vertical={false} 
+                  horizontal={false}
                   strokeDasharray="3 3"
                   stroke="hsl(var(--muted))"
                   opacity={0.5}
                 />
                 <XAxis
-                  dataKey="country"
+                  type="number"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  minTickGap={32}
+                  tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 12 }}
+                  tickFormatter={(value) => formatValue(Number(value))}
+                />
+                <YAxis
+                  dataKey="country"
+                  type="category"
+                  width={56}
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
                   tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 12 }}
                 />
                 <ChartTooltip
@@ -190,17 +192,14 @@ export function MarketsChart({
                     />
                   }
                 />
-                <Area
+                <Bar
                   dataKey="value"
-                  type="natural"
-                  fill="url(#fillValue)"
-                  stroke={orangeColor}
-                  strokeWidth={2.5}
-                  dot={false}
-                  activeDot={{ r: 4, fill: orangeColor }}
+                  fill={orangeColor}
+                  radius={[6, 6, 6, 6]}
                 />
-              </AreaChart>
-            </ChartContainer>
+              </BarChart>
+              </ChartContainer>
+            </div>
           </CardContent>
         </CollapsibleContent>
       </Card>

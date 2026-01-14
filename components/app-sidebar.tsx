@@ -42,6 +42,8 @@ type IconKey =
   | 'brand-google'
   | 'brand-shopify'
   | 'settings'
+  | 'help'
+  | 'search'
   | 'chart-dots'
   | 'chart-bar'
   | 'users'
@@ -55,6 +57,8 @@ const iconMap: Record<IconKey, Icon> = {
   'brand-google': IconBrandGoogle,
   'brand-shopify': IconShoppingCart,
   settings: IconSettings,
+  help: IconHelp,
+  search: IconSearch,
   'chart-dots': IconChartDots,
   'chart-bar': IconChartBar,
   users: IconUsers,
@@ -161,6 +165,7 @@ export function AppSidebar({
   navSecondary,
   documents,
   user,
+  userTenants,
   ...props
 }: AppSidebarProps) {
   const resolveIcon = (icon?: IconSource): Icon | undefined => {
@@ -205,7 +210,7 @@ export function AppSidebar({
         <NavSecondary items={navSecondaryItems} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={sidebarUser} />
+        <NavUser user={sidebarUser} userTenants={userTenants} />
       </SidebarFooter>
     </Sidebar>
   )

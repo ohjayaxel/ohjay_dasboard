@@ -166,7 +166,7 @@ async function main() {
   // Get platform orders
   const { data: platformOrders, error: platformError } = await supabase
     .from('shopify_orders')
-    .select('order_id, gross_sales, net_sales, total_price, total_tax, discount_total, total_refunds')
+    .select('order_id, gross_sales, net_sales, total_sales, tax, revenue, total_tax, discount_total, total_refunds')
     .eq('tenant_id', tenant.id)
     .eq('processed_at', targetDate)
     .gt('gross_sales', 0);

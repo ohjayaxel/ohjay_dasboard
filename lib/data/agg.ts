@@ -345,19 +345,14 @@ export type MarketsResult = {
   currency: string | null;
 };
 
-// Country priority mapping: DE, SE, NO, FI are kept as-is, all others become OTHER
-const COUNTRY_PRIORITY_CODES = new Set(['DE', 'SE', 'NO', 'FI']);
-const COUNTRY_PRIORITY_ORDER = ['DE', 'SE', 'NO', 'FI', 'OTHER'] as const;
-
 /**
- * Normalize country code to country_priority format
- * DE, SE, NO, FI are kept as-is, all others become OTHER
+ * Normalize country code to uppercase format
+ * Returns uppercase country code, or null if empty/invalid
  */
-function normalizeCountryToPriority(country: string | null | undefined): string {
-  if (!country) return 'OTHER';
-  
-  const upperCountry = country.toUpperCase();
-  return COUNTRY_PRIORITY_CODES.has(upperCountry) ? upperCountry : 'OTHER';
+function normalizeCountry(country: string | null | undefined): string | null {
+  if (!country || typeof country !== 'string') return null;
+  const trimmed = country.trim();
+  return trimmed.length > 0 ? trimmed.toUpperCase() : null;
 }
 
 /**
@@ -379,6 +374,7 @@ export async function getMarketsData(params: {
 
     const fromDate = params.from ?? '1970-01-01';
     const toDate = params.to ?? '2100-01-01';
+    const pageSize = 1000;
 
     // Fetch global marketing spend totals from semantic layer
     // This ensures consistency with Overview page totals
@@ -388,92 +384,131 @@ export async function getMarketsData(params: {
       to: toDate,
     });
 
-    // Fetch transactions for the date range (using transactions table for 100% Shopify matching)
-    const { data: transactions, error: transactionsError } = await supabase
-      .from('shopify_sales_transactions')
-      .select('event_date, gross_sales, discounts, returns, shopify_order_id, event_type, currency')
-      .eq('tenant_id', params.tenantId)
-      .gte('event_date', fromDate)
-      .lte('event_date', toDate);
+    // IMPORTANT:
+    // `shopify_sales_transactions` is line-item granularity. Summing SALE rows will often overstate
+    // order totals (and can drift due to taxes/duplication nuances). For Markets we want the same
+    // semantics as `shopify_daily_sales`:
+    // - Gross/Discounts/New-customer are based on `shopify_orders` by order.created_at day
+    // - Returns are attributed by refund.createdAt day via RETURN events in `shopify_sales_transactions`
 
-    if (transactionsError) {
-      throw new Error(`Failed to fetch Shopify transactions: ${transactionsError.message}`);
-    }
-
-    // Get unique order IDs from transactions
-    // Normalize order_id format: shopify_sales_transactions uses gid://shopify/Order/1234567890
-    // but shopify_orders uses just 1234567890, so extract numeric ID from gid format
-    const orderIds = new Set<string>();
-    const orderIdMapping = new Map<string, string>(); // Maps normalized ID -> original gid format
-    
-    for (const txn of transactions || []) {
-      if (txn.shopify_order_id) {
-        const originalId = txn.shopify_order_id as string;
-        // Extract numeric ID from gid://shopify/Order/1234567890 format
-        const normalizedId = originalId.includes('/') 
-          ? originalId.split('/').pop() || originalId
-          : originalId;
-        orderIds.add(normalizedId);
-        orderIdMapping.set(normalizedId, originalId);
-      }
-    }
-
-    // Fetch shopify_orders for country and new customer data
-    const ordersMap = new Map<string, {
+    // 1) Fetch orders in the date range (order.created_at) for sales-side metrics.
+    const ordersInRange: Array<{
+      order_id: string;
+      created_at: string;
       country: string | null;
-      is_new_customer: boolean | null;
+      gross_sales: number | string | null;
+      discount: number | string | null;
+      net_sales: number | string | null;
+      refunds: number | string | null;
       is_refund: boolean | null;
-      processed_at: string | null;
-    }>();
+      is_test: boolean | null;
+      financial_status: string | null;
+      is_first_order_for_customer: boolean | null;
+      customer_type_shopify_mode: string | null;
+      currency: string | null;
+    }> = [];
 
-    if (orderIds.size > 0) {
-      // Fetch in batches of 1000
-      const orderIdArray = Array.from(orderIds);
-      for (let i = 0; i < orderIdArray.length; i += 1000) {
-        const batch = orderIdArray.slice(i, i + 1000);
-        const { data: batchOrders, error: ordersError } = await supabase
-          .from('shopify_orders')
-          .select('order_id, country, is_new_customer, is_refund, processed_at')
-          .eq('tenant_id', params.tenantId)
-          .in('order_id', batch);
+    for (let offset = 0; ; offset += pageSize) {
+      const { data: page, error } = await supabase
+        .from('shopify_orders')
+        .select(
+          'order_id, created_at, country, gross_sales, discount, net_sales, refunds, is_refund, is_test, financial_status, is_first_order_for_customer, customer_type_shopify_mode, currency',
+        )
+        .eq('tenant_id', params.tenantId)
+        .gte('created_at', fromDate)
+        .lte('created_at', toDate)
+        .gt('gross_sales', 0)
+        .range(offset, offset + pageSize - 1);
 
-        if (ordersError) {
-          console.warn(`Failed to fetch orders batch: ${ordersError.message}`);
-        } else if (batchOrders) {
-          for (const order of batchOrders) {
-            ordersMap.set(order.order_id as string, {
-              country: order.country as string | null,
-              is_new_customer: order.is_new_customer as boolean | null,
-              is_refund: order.is_refund as boolean | null,
-              processed_at: order.processed_at as string | null,
-            });
-          }
-        }
+      if (error) {
+        throw new Error(`Failed to fetch Shopify orders for Markets: ${error.message}`);
       }
+
+      if (page && page.length > 0) {
+        ordersInRange.push(...(page as typeof ordersInRange));
+      }
+
+      if (!page || page.length < pageSize) break;
     }
 
     // Fetch marketing spend with country breakdown from Meta insights if available
     // This is used ONLY for per-country breakdown; global totals come from semantic layer
-    // Only fetch insights with country breakdown (country_priority or country breakdown keys)
-    const { data: metaInsightsWithCountry } = await supabase
-      .from('meta_insights_daily')
-      .select('date, spend, breakdowns, breakdowns_key')
-      .eq('tenant_id', params.tenantId)
-      .gte('date', fromDate)
-      .lte('date', toDate)
-      .eq('action_report_time', 'impression')
-      .eq('attribution_window', '1d_click')
-      .in('breakdowns_key', ['country_priority', 'country'])
-      .not('spend', 'is', null)
-      .gt('spend', 0)
-      .not('breakdowns', 'is', null);
+    // Only fetch insights with country breakdown
+    const metaInsightsWithCountry: Array<{
+      date: string;
+      spend: number | string | null;
+      breakdowns: unknown;
+      breakdowns_key: string | null;
+    }> = [];
+
+    for (let offset = 0; ; offset += pageSize) {
+      const { data: page, error } = await supabase
+        .from('meta_insights_daily')
+        .select('date, spend, breakdowns, breakdowns_key')
+        .eq('tenant_id', params.tenantId)
+        .gte('date', fromDate)
+        .lte('date', toDate)
+        .eq('action_report_time', 'impression')
+        .eq('attribution_window', '1d_click')
+        .eq('breakdowns_key', 'country')
+        .not('spend', 'is', null)
+        .gt('spend', 0)
+        .not('breakdowns', 'is', null)
+        .range(offset, offset + pageSize - 1);
+
+      if (error) {
+        throw new Error(`Failed to fetch Meta insights with country: ${error.message}`);
+      }
+
+      if (page && page.length > 0) {
+        metaInsightsWithCountry.push(...(page as typeof metaInsightsWithCountry));
+      }
+
+      if (!page || page.length < pageSize) {
+        break;
+      }
+    }
+
+    // Fetch marketing spend with country breakdown from Google Ads geographic data
+    const googleAdsGeographic: Array<{
+      date: string;
+      country_code: string | null;
+      cost_micros: number | string | null;
+    }> = [];
+
+    for (let offset = 0; ; offset += pageSize) {
+      const { data: page, error } = await supabase
+        .from('google_ads_geographic_daily')
+        .select('date, country_code, cost_micros')
+        .eq('tenant_id', params.tenantId)
+        .gte('date', fromDate)
+        .lte('date', toDate)
+        .eq('location_type', 'LOCATION_OF_PRESENCE')
+        .not('country_code', 'is', null)
+        .not('cost_micros', 'is', null)
+        .range(offset, offset + pageSize - 1);
+
+      // google_ads_geographic_daily may not exist in all environments
+      if (error) {
+        console.warn(`Failed to fetch Google Ads geographic daily: ${error.message}`);
+        break;
+      }
+
+      if (page && page.length > 0) {
+        googleAdsGeographic.push(...(page as typeof googleAdsGeographic));
+      }
+
+      if (!page || page.length < pageSize) {
+        break;
+      }
+    }
 
     // Aggregate Meta spend by country if we have country breakdown data
     // This is used for per-country marketing spend allocation
     const metaSpendByCountry = new Map<string, number>();
     let totalMetaSpendWithCountry = 0;
 
-    if (metaInsightsWithCountry && metaInsightsWithCountry.length > 0) {
+    if (metaInsightsWithCountry.length > 0) {
       for (const insight of metaInsightsWithCountry) {
         const spend = Number(insight.spend) || 0;
 
@@ -483,12 +518,31 @@ export async function getMarketsData(params: {
           const rawCountry = breakdowns.country as string | undefined;
 
           if (rawCountry) {
-            // Normalize country to country_priority format (DE, SE, NO, FI, or OTHER)
-            const country = normalizeCountryToPriority(rawCountry);
-            const existing = metaSpendByCountry.get(country) ?? 0;
-            metaSpendByCountry.set(country, existing + spend);
-            totalMetaSpendWithCountry += spend;
+            // Normalize country to uppercase format
+            const country = normalizeCountry(rawCountry);
+            if (country) {
+              const existing = metaSpendByCountry.get(country) ?? 0;
+              metaSpendByCountry.set(country, existing + spend);
+              totalMetaSpendWithCountry += spend;
+            }
           }
+        }
+      }
+    }
+
+    // Aggregate Google Ads spend by country
+    const googleAdsSpendByCountry = new Map<string, number>();
+    let totalGoogleAdsSpendWithCountry = 0;
+
+    if (googleAdsGeographic.length > 0) {
+      for (const row of googleAdsGeographic) {
+        // Convert cost_micros to spend (divide by 1,000,000)
+        const spend = (Number(row.cost_micros) || 0) / 1_000_000;
+        const country = normalizeCountry(row.country_code);
+        if (country) {
+          const existing = googleAdsSpendByCountry.get(country) ?? 0;
+          googleAdsSpendByCountry.set(country, existing + spend);
+          totalGoogleAdsSpendWithCountry += spend;
         }
       }
     }
@@ -498,55 +552,139 @@ export async function getMarketsData(params: {
     const totalGoogleSpend = globalMarketingSpend.google_ads_spend;
     const totalMarketingSpend = globalMarketingSpend.total_marketing_spend;
 
-    // Aggregate transactions by country (normalized to country_priority format)
+    // Aggregate orders by country (sales-side metrics)
     const byCountry = new Map<string, MarketsDataPoint>();
     const ordersByCountry = new Map<string, Set<string>>(); // Track unique order IDs per country
 
-    for (const transaction of transactions || []) {
-      const originalOrderId = transaction.shopify_order_id as string;
-      // Normalize order_id: extract numeric ID from gid://shopify/Order/1234567890 format
-      const normalizedOrderId = originalOrderId.includes('/') 
-        ? originalOrderId.split('/').pop() || originalOrderId
-        : originalOrderId;
-      const order = ordersMap.get(normalizedOrderId);
-      if (!order || !order.country) continue;
+    for (const order of ordersInRange) {
+      const country = normalizeCountry(order.country);
+      if (!country) continue;
 
-      // Normalize country to country_priority format (DE, SE, NO, FI, or OTHER)
-      const country = normalizeCountryToPriority(order.country);
+      const gross = parseFloat((order.gross_sales || 0).toString());
+      if (!Number.isFinite(gross) || gross <= 0) continue;
+
+      const disc = parseFloat((order.discount || 0).toString());
+      const net = parseFloat((order.net_sales || 0).toString());
+      const ref = parseFloat((order.refunds || 0).toString());
+      const netBeforeReturns = (Number.isFinite(net) ? net : 0) + (Number.isFinite(ref) ? ref : 0);
 
       const existing = byCountry.get(country) ?? {
         country,
         gross_sales: 0,
-        net_sales: 0,
-        new_customer_net_sales: 0,
+        net_sales: 0, // we'll subtract refund-dated RETURN events later
+        new_customer_net_sales: 0, // idem
         marketing_spend: 0,
         amer: null,
         orders: 0,
         aov: null,
       };
 
-      const grossSales = parseFloat((transaction.gross_sales || 0).toString());
-      const discounts = parseFloat((transaction.discounts || 0).toString());
-      const returns = parseFloat((transaction.returns || 0).toString());
-      const netSales = grossSales - discounts - returns;
+      existing.gross_sales += gross;
+      existing.net_sales += netBeforeReturns;
 
-      existing.gross_sales += grossSales;
-      existing.net_sales += netSales;
+      const isFirst =
+        order.is_first_order_for_customer === true ||
+        order.customer_type_shopify_mode === 'FIRST_TIME';
 
-      // Track orders per country (only SALE events, not refunds)
-      if (transaction.event_type === 'SALE' && !order.is_refund) {
-        if (!ordersByCountry.has(country)) {
-          ordersByCountry.set(country, new Set());
+      if (isFirst && order.is_refund !== true) {
+        existing.new_customer_net_sales += netBeforeReturns;
+      }
+
+      if (!ordersByCountry.has(country)) ordersByCountry.set(country, new Set());
+      ordersByCountry.get(country)!.add(String(order.order_id));
+
+      byCountry.set(country, existing);
+    }
+
+    // 2) Subtract refund-dated returns (RETURN events) by the refunded order's country.
+    const returnEvents: Array<{ shopify_order_id: string | null; returns: number | string | null }> = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const { data: page, error } = await supabase
+        .from('shopify_sales_transactions')
+        .select('shopify_order_id, returns')
+        .eq('tenant_id', params.tenantId)
+        .eq('event_type', 'RETURN')
+        .gte('event_date', fromDate)
+        .lte('event_date', toDate)
+        .range(offset, offset + pageSize - 1);
+
+      if (error) {
+        throw new Error(`Failed to fetch RETURN events for Markets: ${error.message}`);
+      }
+
+      if (page && page.length > 0) {
+        returnEvents.push(...(page as typeof returnEvents));
+      }
+
+      if (!page || page.length < pageSize) break;
+    }
+
+    const returnsByOrderId = new Map<string, number>();
+    for (const ev of returnEvents) {
+      const gid = (ev.shopify_order_id || '').toString();
+      const numericId = gid.includes('/') ? gid.split('/').pop() : gid;
+      if (!numericId) continue;
+      const amt = parseFloat((ev.returns || 0).toString());
+      if (!Number.isFinite(amt) || amt <= 0) continue;
+      returnsByOrderId.set(numericId, (returnsByOrderId.get(numericId) || 0) + amt);
+    }
+
+    if (returnsByOrderId.size > 0) {
+      const refundOrderIds = Array.from(returnsByOrderId.keys());
+      const refundOrders: Array<{
+        order_id: string;
+        country: string | null;
+        is_first_order_for_customer: boolean | null;
+        customer_type_shopify_mode: string | null;
+      }> = [];
+
+      for (let i = 0; i < refundOrderIds.length; i += 1000) {
+        const batch = refundOrderIds.slice(i, i + 1000);
+        const { data: page, error } = await supabase
+          .from('shopify_orders')
+          .select('order_id, country, is_first_order_for_customer, customer_type_shopify_mode')
+          .eq('tenant_id', params.tenantId)
+          .in('order_id', batch);
+
+        if (error) {
+          console.warn(`Failed to fetch refund order countries batch: ${error.message}`);
+          continue;
         }
-        ordersByCountry.get(country)!.add(normalizedOrderId);
-
-        // Calculate new customer net sales (only for SALE events)
-        if (order.is_new_customer === true) {
-          existing.new_customer_net_sales += netSales;
+        if (page && page.length > 0) {
+          refundOrders.push(...(page as typeof refundOrders));
         }
       }
 
-      byCountry.set(country, existing);
+      const refundOrderMap = new Map<string, typeof refundOrders[number]>();
+      for (const ro of refundOrders) refundOrderMap.set(String(ro.order_id), ro);
+
+      for (const [orderId, amt] of returnsByOrderId.entries()) {
+        const ro = refundOrderMap.get(orderId);
+        if (!ro) continue;
+        const country = normalizeCountry(ro.country);
+        if (!country) continue;
+
+        const existing = byCountry.get(country) ?? {
+          country,
+          gross_sales: 0,
+          net_sales: 0,
+          new_customer_net_sales: 0,
+          marketing_spend: 0,
+          amer: null,
+          orders: 0,
+          aov: null,
+        };
+
+        existing.net_sales -= amt;
+
+        const isFirst =
+          ro.is_first_order_for_customer === true || ro.customer_type_shopify_mode === 'FIRST_TIME';
+        if (isFirst) {
+          existing.new_customer_net_sales -= amt;
+        }
+
+        byCountry.set(country, existing);
+      }
     }
 
     // Set order counts
@@ -558,23 +696,41 @@ export async function getMarketsData(params: {
     }
 
     // Assign marketing spend per country
-    // If we have Meta country breakdown, use it. Otherwise distribute proportionally based on net_sales
+    // Use country breakdown from Meta and Google Ads if available, otherwise distribute proportionally based on net_sales
     // Note: Global totals (used in Markets summary) come from semantic layer, not from summing per-country values
     const totalNetSalesForDistribution = sum(Array.from(byCountry.values()).map((p) => p.net_sales));
+    const hasCountryBreakdown = metaSpendByCountry.size > 0 || googleAdsSpendByCountry.size > 0;
     
     const series = Array.from(byCountry.values())
       .map((point) => {
         let marketingSpend = 0;
 
-        // Use Meta country breakdown if available
+        // Get country-level spend from Meta and Google Ads if available
         const metaSpendForCountry = metaSpendByCountry.get(point.country) ?? 0;
+        const googleAdsSpendForCountry = googleAdsSpendByCountry.get(point.country) ?? 0;
         
-        if (metaSpendByCountry.size > 0) {
-          // We have country breakdown: use Meta spend per country + distribute Google spend proportionally
-          const googleSpendProportion = totalNetSalesForDistribution > 0 
-            ? point.net_sales / totalNetSalesForDistribution 
-            : 0;
-          marketingSpend = metaSpendForCountry + (googleSpendProportion * totalGoogleSpend);
+        if (hasCountryBreakdown) {
+          // We have country breakdown from at least one source
+          // Use actual country spend from Meta/Google Ads, and distribute the remainder proportionally
+          let directSpend = metaSpendForCountry + googleAdsSpendForCountry;
+          
+          // If we have partial breakdown (only one source), distribute the other source proportionally
+          if (metaSpendByCountry.size > 0 && googleAdsSpendByCountry.size === 0) {
+            // We have Meta breakdown but not Google Ads: distribute Google Ads proportionally
+            const googleSpendProportion = totalNetSalesForDistribution > 0 
+              ? point.net_sales / totalNetSalesForDistribution 
+              : 0;
+            marketingSpend = directSpend + (googleSpendProportion * totalGoogleSpend);
+          } else if (metaSpendByCountry.size === 0 && googleAdsSpendByCountry.size > 0) {
+            // We have Google Ads breakdown but not Meta: distribute Meta proportionally
+            const metaSpendProportion = totalNetSalesForDistribution > 0 
+              ? point.net_sales / totalNetSalesForDistribution 
+              : 0;
+            marketingSpend = directSpend + (metaSpendProportion * totalMetaSpend);
+          } else {
+            // We have both Meta and Google Ads breakdown: use direct spend
+            marketingSpend = directSpend;
+          }
         } else {
           // No country breakdown: distribute total marketing spend proportionally based on net_sales
           marketingSpend = totalNetSalesForDistribution > 0 
@@ -599,26 +755,41 @@ export async function getMarketsData(params: {
         };
       })
       .sort((a, b) => {
-        // Sort by country_priority order first (DE, SE, NO, FI, OTHER), then by gross_sales descending
-        const priority = new Map(COUNTRY_PRIORITY_ORDER.map((country, index) => [country, index]));
-        const aRank = priority.has(a.country) ? priority.get(a.country)! : COUNTRY_PRIORITY_ORDER.length + 1;
-        const bRank = priority.has(b.country) ? priority.get(b.country)! : COUNTRY_PRIORITY_ORDER.length + 1;
-
-        if (aRank !== bRank) {
-          return aRank - bRank;
+        // Sort by gross_sales descending, then alphabetically by country code
+        if (Math.abs(b.gross_sales - a.gross_sales) > 0.01) {
+          return b.gross_sales - a.gross_sales;
         }
-
-        // If same priority, sort by gross_sales descending
-        return b.gross_sales - a.gross_sales;
+        return a.country.localeCompare(b.country);
       });
 
     // Calculate totals
-    // Note: marketing_spend total comes from semantic layer (not summed from per-country values)
-    // to ensure consistency with Overview page
-    const totalGrossSalesCalculated = sum(series.map((p) => p.gross_sales));
-    const totalNetSales = sum(series.map((p) => p.net_sales));
-    const totalNewCustomerNetSales = sum(series.map((p) => p.new_customer_net_sales));
-    const totalOrders = sum(series.map((p) => p.orders));
+    // IMPORTANT: Use shopify_daily_sales(mode='shopify') for global sales totals to stay consistent
+    // with Overview/v_daily_metrics. Per-country breakdown still comes from per-order country.
+    let totalGrossSalesCalculated = sum(series.map((p) => p.gross_sales));
+    let totalNetSales = sum(series.map((p) => p.net_sales));
+    let totalNewCustomerNetSales = sum(series.map((p) => p.new_customer_net_sales));
+    let totalOrders = sum(series.map((p) => p.orders));
+    let currencyFromSales: string | null = null;
+
+    try {
+      const { data: dailySales, error: dailySalesError } = await supabase
+        .from('shopify_daily_sales')
+        .select('gross_sales_excl_tax, net_sales_excl_tax, new_customer_net_sales, orders_count, currency')
+        .eq('tenant_id', params.tenantId)
+        .eq('mode', 'shopify')
+        .gte('date', fromDate)
+        .lte('date', toDate);
+
+      if (!dailySalesError && dailySales) {
+        totalGrossSalesCalculated = sum(dailySales.map((r: any) => Number(r.gross_sales_excl_tax) || 0));
+        totalNetSales = sum(dailySales.map((r: any) => Number(r.net_sales_excl_tax) || 0));
+        totalNewCustomerNetSales = sum(dailySales.map((r: any) => Number(r.new_customer_net_sales) || 0));
+        totalOrders = sum(dailySales.map((r: any) => Number(r.orders_count) || 0));
+        currencyFromSales = (dailySales.find((r: any) => r.currency)?.currency as string) ?? null;
+      }
+    } catch (e) {
+      // Ignore schema issues; fall back to per-country sums
+    }
 
     // Use semantic layer marketing spend for global total (ensures consistency with Overview)
     const totalMarketingSpendForTotals = totalMarketingSpend;
@@ -639,8 +810,9 @@ export async function getMarketsData(params: {
       aov: totalOrders > 0 ? totalNetSales / totalOrders : null,
     };
 
-    // Get currency from transactions
-    const currency = transactions?.find((txn) => txn.currency)?.currency ?? null;
+    // Get currency: prefer sales table, fallback to any order currency we saw
+    const currency =
+      currencyFromSales ?? ordersInRange.find((o) => o.currency)?.currency ?? null;
 
     return { series, totals, currency };
   } catch (error) {

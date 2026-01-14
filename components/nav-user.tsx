@@ -4,9 +4,11 @@ import {
   IconDotsVertical,
   IconLogout,
   IconUserCircle,
+  IconBuilding,
 } from "@tabler/icons-react"
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
+import { getSupabaseBrowserClient } from '@/lib/supabase/client'
 
 import {
   Avatar,
@@ -31,20 +33,35 @@ import {
 
 export function NavUser({
   user,
+  userTenants,
 }: {
   user: {
     name: string
     email: string
     avatar: string
   }
+  userTenants?: Array<{
+    tenantSlug: string
+    tenantName: string
+  }>
 }) {
   const { isMobile } = useSidebar()
   const pathname = usePathname()
+  const router = useRouter()
   
   // Extract tenantSlug from pathname (/t/[tenantSlug]/...)
   const tenantSlugMatch = pathname.match(/^\/t\/([^/]+)/)
   const tenantSlug = tenantSlugMatch ? tenantSlugMatch[1] : ''
   const accountUrl = tenantSlug ? `/t/${tenantSlug}/account` : '#'
+  
+  // Only show tenant switcher if we're on a tenant page and user has multiple tenants
+  const showTenantSwitcher = tenantSlug && userTenants && userTenants.length > 1
+
+  const handleLogout = async () => {
+    const supabase = getSupabaseBrowserClient()
+    await supabase.auth.signOut()
+    router.replace('/signin')
+  }
 
   return (
     <SidebarMenu>
@@ -88,6 +105,24 @@ export function NavUser({
                 </div>
               </div>
             </DropdownMenuLabel>
+            {showTenantSwitcher && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>Tenants</DropdownMenuLabel>
+                  {userTenants!.map((tenant) => (
+                    <DropdownMenuItem key={tenant.tenantSlug} asChild>
+                      <Link href={`/t/${tenant.tenantSlug}`}>
+                        <IconBuilding />
+                        <span className={tenantSlug === tenant.tenantSlug ? 'font-semibold' : ''}>
+                          {tenant.tenantName}
+                        </span>
+                      </Link>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuGroup>
               <DropdownMenuItem asChild>
@@ -98,7 +133,7 @@ export function NavUser({
               </DropdownMenuItem>
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>
+            <DropdownMenuItem onClick={handleLogout}>
               <IconLogout />
               Log out
             </DropdownMenuItem>

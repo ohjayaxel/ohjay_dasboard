@@ -5,6 +5,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { getCurrentUser } from '@/lib/auth/current-user'
 import { resolveTenantBySlug } from '@/lib/tenants/resolve-tenant'
 import { TenantDateRangeFilter } from '@/components/tenant/date-range-filter'
+import { getUserTenants } from '@/lib/admin/settings'
 
 interface TenantLayoutProps {
   children: ReactNode
@@ -15,6 +16,7 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
   const { tenantSlug } = await params
   const tenant = await resolveTenantBySlug(tenantSlug)
   const user = await getCurrentUser()
+  const userTenants = await getUserTenants(user.id)
   const environment = process.env.APP_ENV ?? 'development'
 
   const navMain = [
@@ -43,11 +45,6 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
       url: `/t/${tenantSlug}/markets`,
       icon: 'chart-dots',
     },
-    {
-      title: 'Account',
-      url: `/t/${tenantSlug}/account`,
-      icon: 'users',
-    },
   ]
 
   const documents: Array<{ name: string; url: string; icon: string }> = []
@@ -70,6 +67,10 @@ export default async function TenantLayout({ children, params }: TenantLayoutPro
           email: user.email,
           avatar: user.avatar ?? '/placeholder-user.jpg',
         }}
+        userTenants={userTenants.map((t) => ({
+          tenantSlug: t.tenantSlug,
+          tenantName: t.tenantName,
+        }))}
       />
       <SidebarInset>
         <SiteHeader title={tenant.name} environment={environment} actions={<TenantDateRangeFilter />} />

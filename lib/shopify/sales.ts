@@ -173,19 +173,10 @@ function roundTo2Decimals(value: number): number {
 }
 
 function getRefundEffectiveDate(refund: NonNullable<ShopifyOrder['refunds']>[number]): string {
-  // Shopify Analytics exports may align refunds to the transaction processed date (payout/settlement),
-  // not necessarily refund.created_at. Prefer successful REFUND transaction processed_at when available.
-  const processedDates =
-    refund.transactions
-      ?.filter((t) => t.kind === 'REFUND' && t.status === 'SUCCESS' && t.processed_at)
-      .map((t) => t.processed_at as string) || [];
-
-  if (processedDates.length > 0) {
-    // Use the latest processed date to represent when the refund actually took effect financially.
-    processedDates.sort();
-    return processedDates[processedDates.length - 1];
-  }
-
+  // IMPORTANT: In our Shopify Analytics export matching, returns are attributed to the refund's
+  // createdAt date (shop timezone), not the payment transaction processedAt date.
+  //
+  // Keep this as a single place to change if we ever need to support a different attribution rule.
   return refund.created_at;
 }
 
@@ -431,7 +422,8 @@ function calculateRefundReturnExclTaxForDaily(
 ): number {
   // Apply the same logic as calculateOrderSales, but scoped to a single refund so we can allocate by refund day.
   if (datePeriod?.from || datePeriod?.to) {
-    const refundDate = getRefundEffectiveDate(refund).split('T')[0];
+    // Compare using the shop-local refund day (YYYY-MM-DD).
+    const refundDate = toLocalDate(getRefundEffectiveDate(refund), 'Europe/Stockholm');
     if (datePeriod.from && refundDate < datePeriod.from) return 0;
     if (datePeriod.to && refundDate > datePeriod.to) return 0;
   }
@@ -674,7 +666,7 @@ export function calculateOrderSales(
   // Falls back naturally if taxRate=0 (then line computations are INCL=EXCL).
   discounts = discountsExclTaxFromLines;
   discounts = roundTo2Decimals(discounts);
-  
+
   // Net Sales EXCL tax BEFORE refunds
   // = subtotalPrice - totalTax
   const netSalesExclTaxBeforeRefunds = roundTo2Decimals(subtotalPrice - totalTax);

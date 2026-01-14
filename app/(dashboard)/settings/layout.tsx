@@ -5,10 +5,17 @@ import { SiteHeader } from '@/components/site-header'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { requirePlatformAdmin } from '@/lib/auth/current-user'
 import { listAdminTenants } from '@/lib/admin/tenants'
+import { getUserTenants } from '@/lib/admin/settings'
 
 export default async function SettingsLayout({ children }: { children: ReactNode }) {
   const user = await requirePlatformAdmin()
-  const tenants = await listAdminTenants()
+  const allTenants = await listAdminTenants()
+  const userTenants = await getUserTenants(user.id)
+  const userTenantIds = new Set(userTenants.map((t) => t.tenantId))
+  
+  // Filter tenants to only show those the user has access to
+  const tenants = allTenants.filter((tenant) => userTenantIds.has(tenant.id))
+  
   const environment = process.env.APP_ENV ?? 'development'
 
   const navMain = [
@@ -16,6 +23,10 @@ export default async function SettingsLayout({ children }: { children: ReactNode
       title: 'All tenants',
       url: '/admin',
       icon: 'gauge',
+      items: tenants.map((tenant) => ({
+        title: tenant.name,
+        url: `/admin/tenants/${tenant.slug}`,
+      })),
     },
     {
       title: 'Audits',
@@ -28,11 +39,6 @@ export default async function SettingsLayout({ children }: { children: ReactNode
         },
       ],
     },
-    ...tenants.map((tenant) => ({
-      title: tenant.name,
-      url: `/admin/tenants/${tenant.slug}`,
-      icon: 'users',
-    })),
     {
       title: 'Settings',
       url: '/settings',
@@ -51,6 +57,10 @@ export default async function SettingsLayout({ children }: { children: ReactNode
         variant="inset"
         tenantName="Admin Console"
         navMain={navMain}
+        navSecondary={[
+          { title: 'Get Help', url: '#', icon: 'help' },
+          { title: 'Search', url: '#', icon: 'search' },
+        ]}
         documents={[]}
         user={{
           name: user.name,

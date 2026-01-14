@@ -64,7 +64,7 @@ async function main() {
   // Build query
   let query = supabase
     .from('shopify_orders')
-    .select('order_id, total_price, discount_total, total_refunds, total_tax')
+    .select('order_id, total_sales, tax, discount_total, total_refunds, total_tax')
     .eq('tenant_id', tenant.id)
     .is('gross_sales', null)
     .gt('total_price', 0);

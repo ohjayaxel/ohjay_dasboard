@@ -137,7 +137,7 @@ function parseCSV(content: string): FileOrder[] {
 async function fetchPlatformOrders(tenantId: string, date: string): Promise<PlatformOrder[]> {
   const { data, error } = await supabase
     .from('shopify_orders')
-    .select('order_id, processed_at, total_price, gross_sales, net_sales, currency, is_refund')
+    .select('order_id, processed_at, total_sales, tax, gross_sales, net_sales, revenue, currency, is_refund')
     .eq('tenant_id', tenantId)
     .eq('processed_at', date);
 

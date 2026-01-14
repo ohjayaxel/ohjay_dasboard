@@ -3,11 +3,14 @@ export const dynamic = 'force-dynamic'
 import { notFound } from 'next/navigation'
 
 import { addPlatformAdmin, removePlatformAdmin, updatePlatformAdminRole } from '@/app/(dashboard)/admin/actions'
-import { getPlatformAdminsGrouped } from '@/lib/admin/settings'
+import { getAllUsersGrouped, getUserTenants } from '@/lib/admin/settings'
 import { requirePlatformAdmin } from '@/lib/auth/current-user'
-import { Roles } from '@/lib/auth/roles'
+import { Roles, isPlatformAdmin } from '@/lib/auth/roles'
 import { listAdminTenants } from '@/lib/admin/tenants'
 
+import { AddUserForm } from '@/components/admin/add-user-form'
+import { EditUserDialog } from '@/components/admin/edit-user-dialog'
+import { TenantPopover } from '@/components/admin/tenant-popover'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -30,6 +33,13 @@ const ROLE_OPTIONS = [
   { label: 'Viewer', value: Roles.viewer },
 ]
 
+const USER_TYPE_LABELS: Record<string, string> = {
+  platform_admin: 'Platform Admin',
+  admin: 'Tenant Admin',
+  editor: 'Editor',
+  viewer: 'Viewer',
+}
+
 type PageProps = {
   searchParams?: Promise<{
     status?: string
@@ -40,8 +50,16 @@ type PageProps = {
 export default async function AdminSettingsPage(props: PageProps) {
   const user = await requirePlatformAdmin()
   const searchParams = await props.searchParams ?? Promise.resolve({})
-  const platformAdmins = await getPlatformAdminsGrouped()
-  const tenants = await listAdminTenants()
+  const allUsers = await getAllUsersGrouped()
+  const allTenants = await listAdminTenants()
+  const userTenants = await getUserTenants(user.id)
+  const userTenantIds = new Set(userTenants.map((t) => t.tenantId))
+  
+  // Filter tenants to only show those the user has access to (for navigation/listings)
+  const tenants = allTenants.filter((tenant) => userTenantIds.has(tenant.id))
+  
+  // For user management forms, Platform Admins should see all tenants
+  const tenantsForUserManagement = isPlatformAdmin(user.role) ? allTenants : tenants
 
   const status = searchParams?.status
   const error = searchParams?.error
@@ -55,6 +73,10 @@ export default async function AdminSettingsPage(props: PageProps) {
             return 'Platform admin removed successfully.'
           case 'role-updated':
             return 'Role updated successfully.'
+          case 'user-added':
+            return 'User added successfully.'
+          case 'user-updated':
+            return 'User updated successfully.'
           default:
             return 'Changes saved.'
         }
@@ -73,14 +95,14 @@ export default async function AdminSettingsPage(props: PageProps) {
 
       <div>
         <h1 className="text-2xl font-semibold leading-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground">Manage platform administrators</p>
+        <p className="text-sm text-muted-foreground">Manage users and platform administrators</p>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg font-semibold">Platform Admins</CardTitle>
+          <CardTitle className="text-lg font-semibold">Users</CardTitle>
           <CardDescription>
-            Users with platform_admin role have full access to all tenants and admin features. Only you (super-admin) can manage these.
+            All users with access to tenants. Click on the tenant count to see details.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -90,51 +112,40 @@ export default async function AdminSettingsPage(props: PageProps) {
                 <TableRow>
                   <TableHead>Email</TableHead>
                   <TableHead>Tenants</TableHead>
-                  <TableHead className="w-[110px] text-right">Actions</TableHead>
+                  <TableHead>User Type</TableHead>
+                  <TableHead className="w-[100px] text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {platformAdmins.length === 0 ? (
+                {allUsers.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={3} className="text-center text-sm text-muted-foreground">
-                      No platform admins yet.
+                    <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
+                      No users yet.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  platformAdmins.map((admin) => (
-                    <TableRow key={admin.userId}>
+                  allUsers.map((userData) => (
+                    <TableRow key={userData.userId}>
                       <TableCell className="font-medium">
-                        {admin.email ?? 'Unknown email'}
-                        {admin.userId === user.id && (
+                        {userData.email ?? 'Unknown email'}
+                        {userData.userId === user.id && (
                           <Badge variant="default" className="ml-2 text-xs">
                             You
                           </Badge>
                         )}
                       </TableCell>
                       <TableCell>
-                        <div className="flex flex-wrap gap-1">
-                          {admin.tenantMemberships.map((membership) => (
-                            <Badge key={membership.tenantId} variant="outline" className="text-xs">
-                              {membership.tenantName}
-                            </Badge>
-                          ))}
-                        </div>
+                        <TenantPopover tenants={userData.tenantMemberships}>
+                          {userData.tenantMemberships.length}
+                        </TenantPopover>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-xs">
+                          {USER_TYPE_LABELS[userData.userType] ?? userData.userType}
+                        </Badge>
                       </TableCell>
                       <TableCell className="text-right">
-                        {admin.userId === user.id ? (
-                          <span className="text-xs text-muted-foreground">Current user</span>
-                        ) : (
-                          <div className="flex gap-2 justify-end">
-                            {admin.tenantMemberships.map((membership) => (
-                              <form key={membership.memberId} action={removePlatformAdmin}>
-                                <input type="hidden" name="memberId" value={membership.memberId} />
-                                <Button type="submit" variant="ghost" size="sm">
-                                  Remove from {membership.tenantName}
-                                </Button>
-                              </form>
-                            ))}
-                          </div>
-                        )}
+                        <EditUserDialog user={userData} tenants={tenantsForUserManagement} roleOptions={ROLE_OPTIONS} />
                       </TableCell>
                     </TableRow>
                   ))
@@ -143,33 +154,7 @@ export default async function AdminSettingsPage(props: PageProps) {
             </Table>
           </div>
 
-          <form
-            action={addPlatformAdmin}
-            className="grid gap-4 rounded-xl border border-dashed border-muted/60 bg-background/60 p-4 md:grid-cols-[minmax(0,1fr)_200px_auto] md:items-end"
-          >
-            <div className="flex-1 space-y-2">
-              <Label htmlFor="email">Email</Label>
-              <Input id="email" name="email" type="email" placeholder="user@example.com" required />
-            </div>
-            <div className="w-full space-y-2 md:w-[200px]">
-              <Label htmlFor="tenantId">Tenant</Label>
-              <select
-                id="tenantId"
-                name="tenantId"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                required
-              >
-                {tenants.map((tenant) => (
-                  <option key={tenant.id} value={tenant.id}>
-                    {tenant.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <Button type="submit" className="md:self-end">
-              Add Platform Admin
-            </Button>
-          </form>
+          <AddUserForm tenants={tenantsForUserManagement} roleOptions={ROLE_OPTIONS} />
         </CardContent>
       </Card>
     </div>

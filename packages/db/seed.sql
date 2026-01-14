@@ -17,7 +17,7 @@ select
   t.id,
   '00000000-0000-0000-0000-000000000000'::uuid,
   'platform_admin',
-  'admin@ohjay.co'
+  'axel@ohjay.co'
 from t
 on conflict (tenant_id, user_id) do nothing;
 

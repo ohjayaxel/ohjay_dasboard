@@ -161,3 +161,94 @@ export async function getPlatformAdminsGrouped(): Promise<
   })
 }
 
+export type AllUsersGrouped = Array<{
+  userId: string
+  email: string | null
+  userType: 'platform_admin' | 'admin' | 'editor' | 'viewer'
+  tenantMemberships: Array<AdminTenantMembership & { memberId: string }>
+}>
+
+/**
+ * Get all users grouped by userId with all their tenant memberships
+ * Platform admins are shown with access to all tenants
+ */
+export async function getAllUsersGrouped(): Promise<AllUsersGrouped> {
+  const client = getSupabaseServiceClient()
+
+  // Get all members
+  const { data, error } = await client
+    .from('members')
+    .select(
+      `
+      id,
+      user_id,
+      email,
+      role,
+      tenant_id,
+      tenants!inner(
+        id,
+        name,
+        slug
+      )
+    `,
+    )
+    .order('email')
+
+  if (error) {
+    throw new Error(`Failed to fetch all users: ${error.message}`)
+  }
+
+  // Group by userId
+  const grouped = new Map<string, { userId: string; email: string | null; roles: Set<string>; tenantMemberships: Array<AdminTenantMembership & { memberId: string }> }>()
+
+  for (const member of data ?? []) {
+    const userId = member.user_id as string
+    const existing = grouped.get(userId)
+    
+    const membership: AdminTenantMembership & { memberId: string } = {
+      memberId: member.id as string,
+      tenantId: member.tenant_id as string,
+      tenantName: (member.tenants as any)?.name as string,
+      tenantSlug: (member.tenants as any)?.slug as string,
+      role: member.role as string,
+    }
+
+    if (existing) {
+      existing.roles.add(member.role as string)
+      existing.tenantMemberships.push(membership)
+    } else {
+      grouped.set(userId, {
+        userId,
+        email: member.email as string | null,
+        roles: new Set([member.role as string]),
+        tenantMemberships: [membership],
+      })
+    }
+  }
+
+  // Determine user type (platform_admin > admin > editor > viewer)
+  const rolePriority: Record<string, number> = {
+    platform_admin: 4,
+    admin: 3,
+    editor: 2,
+    viewer: 1,
+  }
+
+  return Array.from(grouped.values())
+    .map((user) => {
+      const highestRole = Array.from(user.roles).sort((a, b) => (rolePriority[b] ?? 0) - (rolePriority[a] ?? 0))[0] ?? 'viewer'
+      
+      return {
+        userId: user.userId,
+        email: user.email,
+        userType: highestRole as 'platform_admin' | 'admin' | 'editor' | 'viewer',
+        tenantMemberships: user.tenantMemberships.sort((a, b) => a.tenantName.localeCompare(b.tenantName)),
+      }
+    })
+    .sort((a, b) => {
+      const emailA = a.email?.toLowerCase() ?? ''
+      const emailB = b.email?.toLowerCase() ?? ''
+      return emailA.localeCompare(emailB)
+    })
+}
+
