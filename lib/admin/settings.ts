@@ -163,6 +163,7 @@ export async function getPlatformAdminsGrouped(): Promise<
 
 export type AllUsersGrouped = Array<{
   userId: string
+  name: string | null
   email: string | null
   userType: 'platform_admin' | 'admin' | 'editor' | 'viewer'
   tenantMemberships: Array<AdminTenantMembership & { memberId: string }>
@@ -182,6 +183,7 @@ export async function getAllUsersGrouped(): Promise<AllUsersGrouped> {
       `
       id,
       user_id,
+      name,
       email,
       role,
       tenant_id,
@@ -199,7 +201,7 @@ export async function getAllUsersGrouped(): Promise<AllUsersGrouped> {
   }
 
   // Group by userId
-  const grouped = new Map<string, { userId: string; email: string | null; roles: Set<string>; tenantMemberships: Array<AdminTenantMembership & { memberId: string }> }>()
+  const grouped = new Map<string, { userId: string; name: string | null; email: string | null; roles: Set<string>; tenantMemberships: Array<AdminTenantMembership & { memberId: string }> }>()
 
   for (const member of data ?? []) {
     const userId = member.user_id as string
@@ -216,9 +218,13 @@ export async function getAllUsersGrouped(): Promise<AllUsersGrouped> {
     if (existing) {
       existing.roles.add(member.role as string)
       existing.tenantMemberships.push(membership)
+      if (!existing.name && (member.name as string | null)) {
+        existing.name = member.name as string
+      }
     } else {
       grouped.set(userId, {
         userId,
+        name: member.name as string | null,
         email: member.email as string | null,
         roles: new Set([member.role as string]),
         tenantMemberships: [membership],
@@ -240,6 +246,7 @@ export async function getAllUsersGrouped(): Promise<AllUsersGrouped> {
       
       return {
         userId: user.userId,
+        name: user.name,
         email: user.email,
         userType: highestRole as 'platform_admin' | 'admin' | 'editor' | 'viewer',
         tenantMemberships: user.tenantMemberships.sort((a, b) => a.tenantName.localeCompare(b.tenantName)),

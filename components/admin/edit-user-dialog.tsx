@@ -25,6 +25,7 @@ type Tenant = {
 
 type UserData = {
   userId: string
+  name?: string | null
   email: string | null
   userType: 'platform_admin' | 'admin' | 'editor' | 'viewer'
   tenantMemberships: Array<{
@@ -78,6 +79,16 @@ export function EditUserDialog({ user, tenants, roleOptions }: EditUserDialogPro
         <form onSubmit={handleSubmit}>
           <input type="hidden" name="userId" value={user.userId} />
           <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="edit-name">Name</Label>
+              <Input
+                id="edit-name"
+                name="name"
+                type="text"
+                defaultValue={user.name ?? ''}
+                placeholder="Full name"
+              />
+            </div>
             <div className="grid gap-2">
               <Label htmlFor="edit-email">Email</Label>
               <Input

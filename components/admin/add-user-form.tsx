@@ -36,6 +36,10 @@ export function AddUserForm({ tenants, roleOptions }: AddUserFormProps) {
     >
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-2">
+          <Label htmlFor="name">Name</Label>
+          <Input id="name" name="name" type="text" placeholder="Full name" />
+        </div>
+        <div className="space-y-2">
           <Label htmlFor="email">Email</Label>
           <Input id="email" name="email" type="email" placeholder="user@example.com" required />
         </div>

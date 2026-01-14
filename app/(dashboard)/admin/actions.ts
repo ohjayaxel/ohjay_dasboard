@@ -203,6 +203,33 @@ async function revalidateTenantViews(tenantId: string, tenantSlug?: string) {
   }
 }
 
+async function findAuthUserByEmail(client: ReturnType<typeof getSupabaseServiceClient>, email: string) {
+  const normalizedEmail = email.toLowerCase()
+  const perPage = 1000
+  let page = 1
+
+  while (true) {
+    const { data, error } = await client.auth.admin.listUsers({ page, perPage })
+
+    if (error) {
+      throw new Error(`Unable to search Supabase Auth: ${error.message}`)
+    }
+
+    const users = data?.users ?? []
+    const match = users.find((user) => user.email?.toLowerCase() === normalizedEmail)
+
+    if (match) {
+      return match
+    }
+
+    if (users.length < perPage) {
+      return null
+    }
+
+    page += 1
+  }
+}
+
 export async function addTenantMember(formData: FormData) {
   await requirePlatformAdmin()
 
@@ -218,18 +245,14 @@ export async function addTenantMember(formData: FormData) {
   }
 
   const client = getSupabaseServiceClient()
+  let user: Awaited<ReturnType<typeof findAuthUserByEmail>>
 
-  const { data: usersData, error: userLookupError } = await client.auth.admin.listUsers({
-    page: 1,
-    perPage: 1,
-    filter: { email: result.data.email },
-  })
-
-  if (userLookupError) {
-    throw new Error(`Unable to search Supabase Auth: ${userLookupError.message}`)
+  try {
+    user = await findAuthUserByEmail(client, result.data.email)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to search Supabase Auth.'
+    redirect(`/settings?error=${encodeURIComponent(message)}`)
   }
-
-  const user = usersData?.users?.[0]
 
   if (!user) {
     redirect(
@@ -243,6 +266,7 @@ export async function addTenantMember(formData: FormData) {
     tenant_id: result.data.tenantId,
     user_id: user.id,
     email: result.data.email,
+    name: (user.user_metadata as { full_name?: string } | undefined)?.full_name,
     role: result.data.role,
   })
 
@@ -1064,6 +1088,12 @@ const addPlatformAdminSchema = z.object({
 })
 
 const addUserSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .max(120, { message: 'Name must be at most 120 characters.' })
+    .optional()
+    .transform((value) => (value && value.length > 0 ? value : undefined)),
   email: z.string().email({ message: 'Invalid email address.' }).transform((value) => value.toLowerCase()),
   password: z.string().min(6, { message: 'Password must be at least 6 characters.' }),
   tenantIds: z.array(z.string().uuid({ message: 'Invalid tenant identifier.' })).min(1, { message: 'At least one tenant is required.' }),
@@ -1072,6 +1102,12 @@ const addUserSchema = z.object({
 
 const updateUserSchema = z.object({
   userId: z.string().uuid({ message: 'Invalid user identifier.' }),
+  name: z
+    .string()
+    .trim()
+    .max(120, { message: 'Name must be at most 120 characters.' })
+    .optional()
+    .transform((value) => (value && value.length > 0 ? value : undefined)),
   email: z.string().email({ message: 'Invalid email address.' }).transform((value) => value.toLowerCase()).optional(),
   password: z.string().min(6, { message: 'Password must be at least 6 characters.' }).optional(),
   tenantIds: z.array(z.string().uuid({ message: 'Invalid tenant identifier.' })).min(1, { message: 'At least one tenant is required.' }).optional(),
@@ -1100,19 +1136,14 @@ export async function addPlatformAdmin(formData: FormData) {
   }
 
   const client = getSupabaseServiceClient()
+  let user: Awaited<ReturnType<typeof findAuthUserByEmail>>
 
-  // Find user by email
-  const { data: usersData, error: userLookupError } = await client.auth.admin.listUsers({
-    page: 1,
-    perPage: 1,
-    filter: { email: result.data.email },
-  })
-
-  if (userLookupError) {
-    throw new Error(`Unable to search Supabase Auth: ${userLookupError.message}`)
+  try {
+    user = await findAuthUserByEmail(client, result.data.email)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to search Supabase Auth.'
+    redirect(`/settings?error=${encodeURIComponent(message)}`)
   }
-
-  const user = usersData?.users?.[0]
 
   if (!user) {
     redirect(
@@ -1165,13 +1196,14 @@ export async function addPlatformAdmin(formData: FormData) {
   redirect('/settings?status=platform-admin-added')
 }
 
-export async function addUser(formData: FormData) {
+export async function addUser(prevState: unknown, formData: FormData) {
   await requirePlatformAdmin()
 
   // Parse tenantIds from form data (can be multiple)
   const tenantIds = formData.getAll('tenantIds').filter((id): id is string => typeof id === 'string' && id.length > 0)
 
   const result = addUserSchema.safeParse({
+    name: formData.get('name'),
     email: formData.get('email'),
     password: formData.get('password'),
     tenantIds,
@@ -1186,30 +1218,29 @@ export async function addUser(formData: FormData) {
 
   const client = getSupabaseServiceClient()
 
-  // Check if user already exists
-  const { data: usersData, error: userLookupError } = await client.auth.admin.listUsers({
-    page: 1,
-    perPage: 1,
-    filter: { email: result.data.email },
-  })
-
-  if (userLookupError) {
-    redirect(
-      `/settings?error=${encodeURIComponent(`Unable to search Supabase Auth: ${userLookupError.message}`)}`,
-    )
-  }
-
   let userId: string
+  let existingUser: Awaited<ReturnType<typeof findAuthUserByEmail>>
 
-  const existingUser = usersData?.users?.[0]
+  try {
+    existingUser = await findAuthUserByEmail(client, result.data.email)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to search Supabase Auth.'
+    redirect(`/settings?error=${encodeURIComponent(message)}`)
+  }
   if (existingUser) {
     userId = existingUser.id
+    if (result.data.name) {
+      await client.auth.admin.updateUserById(userId, {
+        user_metadata: { full_name: result.data.name },
+      })
+    }
   } else {
     // Create new user in Supabase Auth
     const { data: newUser, error: createError } = await client.auth.admin.createUser({
       email: result.data.email,
       password: result.data.password,
       email_confirm: true,
+      user_metadata: result.data.name ? { full_name: result.data.name } : undefined,
     })
 
     if (createError) {
@@ -1218,7 +1249,7 @@ export async function addUser(formData: FormData) {
       )
     }
 
-    if (!newUser.user) {
+    if (!newUser?.user?.id) {
       redirect(
         `/settings?error=${encodeURIComponent('Failed to create user: No user returned.')}`,
       )
@@ -1227,22 +1258,34 @@ export async function addUser(formData: FormData) {
     userId = newUser.user.id
   }
 
+  // Validate userId before proceeding
+  if (!userId || typeof userId !== 'string') {
+    redirect(
+      `/settings?error=${encodeURIComponent('Failed to create user: Invalid user ID.')}`,
+    )
+  }
+
   // Add user to all selected tenants
   const membersToInsert = result.data.tenantIds.map((tenantId) => ({
     tenant_id: tenantId,
     user_id: userId,
     email: result.data.email,
+    name: result.data.name,
     role: result.data.role,
   }))
 
+  // Use insert instead of upsert to avoid accidentally updating existing rows
   const { error: insertError } = await client
     .from('members')
-    .upsert(membersToInsert, {
-      onConflict: 'tenant_id,user_id',
-      ignoreDuplicates: false,
-    })
+    .insert(membersToInsert)
 
   if (insertError) {
+    // Check if it's a duplicate key error
+    if (insertError.message?.includes('duplicate key') || insertError.message?.includes('unique constraint')) {
+      redirect(
+        `/settings?error=${encodeURIComponent(`User already exists for one or more of the selected tenants. Use "Edit User" to modify existing memberships instead.`)}`,
+      )
+    }
     redirect(
       `/settings?error=${encodeURIComponent(`Failed to add user to tenants: ${insertError.message}`)}`,
     )
@@ -1263,6 +1306,7 @@ export async function updateUser(formData: FormData) {
 
   const result = updateUserSchema.safeParse({
     userId: formData.get('userId'),
+    name: formData.get('name') || undefined,
     email: formData.get('email') || undefined,
     password,
     tenantIds: tenantIds.length > 0 ? tenantIds : undefined,
@@ -1277,11 +1321,12 @@ export async function updateUser(formData: FormData) {
 
   const client = getSupabaseServiceClient()
 
-  // Update user in Supabase Auth if email or password changed
-  if (result.data.email || result.data.password) {
-    const updatePayload: { email?: string; password?: string } = {}
+  // Update user in Supabase Auth if email, password, or name changed
+  if (result.data.email || result.data.password || result.data.name) {
+    const updatePayload: { email?: string; password?: string; user_metadata?: { full_name?: string } } = {}
     if (result.data.email) updatePayload.email = result.data.email
     if (result.data.password) updatePayload.password = result.data.password
+    if (result.data.name) updatePayload.user_metadata = { full_name: result.data.name }
 
     const { error: updateAuthError } = await client.auth.admin.updateUserById(result.data.userId, updatePayload)
 
@@ -1304,11 +1349,14 @@ export async function updateUser(formData: FormData) {
     }
 
     // Then insert new memberships
-    const email = result.data.email || (await client.auth.admin.getUserById(result.data.userId)).data.user?.email || ''
+    const authUser = await client.auth.admin.getUserById(result.data.userId)
+    const email = result.data.email || authUser.data.user?.email || ''
+    const name = result.data.name || (authUser.data.user?.user_metadata as { full_name?: string } | undefined)?.full_name
     const membersToInsert = result.data.tenantIds.map((tenantId) => ({
       tenant_id: tenantId,
       user_id: result.data.userId,
       email,
+      name,
       role: result.data.role!,
     }))
 
@@ -1320,11 +1368,11 @@ export async function updateUser(formData: FormData) {
       )
     }
 
-    // Update email in all members if email changed
-    if (result.data.email) {
+    // Update email/name in all members if changed
+    if (result.data.email || result.data.name) {
       const { error: updateEmailError } = await client
         .from('members')
-        .update({ email: result.data.email })
+        .update({ email: result.data.email, name: result.data.name })
         .eq('user_id', result.data.userId)
 
       if (updateEmailError) {
@@ -1332,11 +1380,11 @@ export async function updateUser(formData: FormData) {
         console.error('Failed to update email in members:', updateEmailError)
       }
     }
-  } else if (result.data.email) {
-    // Only update email in members table
+  } else if (result.data.email || result.data.name) {
+    // Only update email/name in members table
     const { error: updateEmailError } = await client
       .from('members')
-      .update({ email: result.data.email })
+      .update({ email: result.data.email, name: result.data.name })
       .eq('user_id', result.data.userId)
 
     if (updateEmailError) {

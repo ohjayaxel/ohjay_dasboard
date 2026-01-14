@@ -30,7 +30,7 @@ export async function getCurrentUser(): Promise<CurrentUser> {
   const service = getSupabaseServiceClient()
   const { data: memberships, error: memberError } = await service
     .from('members')
-    .select('role')
+    .select('role,name')
     .eq('user_id', user.id)
 
   if (memberError) {
@@ -47,10 +47,14 @@ export async function getCurrentUser(): Promise<CurrentUser> {
         ? Roles.editor
         : Roles.viewer
 
+  const memberName = (memberships ?? [])
+    .map((m: any) => m.name as string | null)
+    .find((value) => value && value.length > 0)
+
   return {
     id: user.id,
     email,
-    name: (user.user_metadata?.full_name as string) || email || 'User',
+    name: (user.user_metadata?.full_name as string) || memberName || email || 'User',
     role,
     avatar: (user.user_metadata?.avatar_url as string) ?? '/placeholder-user.jpg',
   }

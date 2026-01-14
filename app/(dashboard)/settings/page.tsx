@@ -110,6 +110,7 @@ export default async function AdminSettingsPage(props: PageProps) {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>Name</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead>Tenants</TableHead>
                   <TableHead>User Type</TableHead>
@@ -119,13 +120,16 @@ export default async function AdminSettingsPage(props: PageProps) {
               <TableBody>
                 {allUsers.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
                       No users yet.
                     </TableCell>
                   </TableRow>
                 ) : (
                   allUsers.map((userData) => (
                     <TableRow key={userData.userId}>
+                      <TableCell className="font-medium">
+                        {userData.name ?? '—'}
+                      </TableCell>
                       <TableCell className="font-medium">
                         {userData.email ?? 'Unknown email'}
                         {userData.userId === user.id && (
